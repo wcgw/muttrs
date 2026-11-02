@@ -51,6 +51,11 @@ Messages linked by what they reply to (their `References` and `In-Reply-To`), ea
 them so, the thread whose latest Message is newest first; one can be folded into the Message heading it.
 _Avoid_: conversation
 
+**Selection**:
+The Messages of the Index the user marked to act on together; when there is one, flagging, deleting, archiving and
+moving act on all of it instead of the Message at the cursor.
+_Avoid_: tagged, marked
+
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
 _Avoid_: preview, viewer, reader

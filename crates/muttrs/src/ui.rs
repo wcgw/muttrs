@@ -622,85 +622,162 @@ impl App {
         }
     }
 
-    /// The Messages an action is for: the one the Pager shows, or the one at the Index's cursor.
-    fn target(&self) -> Option<(usize, String, u32)> {
+    /// The Messages an action is for, by UID, and their Account and Mailbox: the one the Pager shows, or those
+    /// selected in the Index, or the one at its cursor with the replies folded into it.
+    fn targets(&self) -> Option<(usize, String, Vec<u32>)> {
         if self.pager.is_some() {
             let opened = self.opened.as_ref()?;
-            return Some((opened.account, opened.mailbox.clone(), opened.uid));
+            return Some((opened.account, opened.mailbox.clone(), vec![opened.uid]));
         }
         let index = self.index.as_ref()?;
-        Some((index.account, index.mailbox.clone(), index.current()?.uid))
+        let uids = index.targets();
+        (!uids.is_empty()).then(|| (index.account, index.mailbox.clone(), uids))
     }
 
-    /// Toggles `flag` on the Message an action is for.
+    /// Toggles `flag` on the Messages an action is for: on all, unless all have it already.
     fn toggle(&mut self, flag: Flag) {
-        let Some((account, mailbox, uid)) = self.target() else {
+        let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
-        let Some(envelope) = self.index.as_mut().and_then(|index| index.find_mut(uid)) else {
+        let Some(index) = self.index.as_mut() else {
             return;
         };
-        let on = match flag {
-            Flag::Seen => {
-                envelope.flags.seen = !envelope.flags.seen;
-                envelope.flags.seen
-            }
-            Flag::Flagged => {
-                envelope.flags.flagged = !envelope.flags.flagged;
-                envelope.flags.flagged
-            }
-            Flag::Answered => {
-                envelope.flags.answered = !envelope.flags.answered;
-                envelope.flags.answered
-            }
+        let has = |flags: &muttrs_mail::Flags| match flag {
+            Flag::Seen => flags.seen,
+            Flag::Flagged => flags.flagged,
+            Flag::Answered => flags.answered,
         };
+        let on = !uids
+            .iter()
+            .filter_map(|&uid| index.find(uid))
+            .all(|envelope| has(&envelope.flags));
+        let mut changed = 0;
+        for &uid in &uids {
+            let Some(envelope) = index.find_mut(uid) else {
+                continue;
+            };
+            if has(&envelope.flags) != on {
+                changed += 1;
+            }
+            match flag {
+                Flag::Seen => envelope.flags.seen = on,
+                Flag::Flagged => envelope.flags.flagged = on,
+                Flag::Answered => envelope.flags.answered = on,
+            }
+        }
         if let Some(state) = self.accounts.get_mut(account) {
             if flag == Flag::Seen
                 && let Some(counts) = state.counts.get_mut(&mailbox)
             {
                 counts.unread = if on {
-                    counts.unread.saturating_sub(1)
+                    counts.unread.saturating_sub(changed)
                 } else {
-                    counts.unread + 1
+                    counts.unread + changed
                 };
             }
             state.client.send(client::Request::Flag {
                 mailbox,
-                uids: vec![uid],
+                uids,
                 flag,
                 on,
             });
         }
     }
 
-    /// Deletes (to Trash) or archives the Message an action is for, going on to the next one.
+    /// Deletes (to Trash) or archives the Messages an action is for, going on to the next one.
     fn remove(&mut self, archive: bool) {
-        let Some((account, mailbox, uid)) = self.target() else {
+        let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
         let Some(state) = self.accounts.get(account) else {
             return;
         };
         // The worker knows where to: the Mailbox with the Role, by the server or the configuration. Without one it
-        // says so, and lists the Mailbox again, which brings the Message back.
+        // says so, and lists the Mailbox again, which brings the Messages back.
         state.client.send(if archive {
             client::Request::Archive {
                 mailbox,
-                uids: vec![uid],
+                uids: uids.clone(),
             }
         } else {
             client::Request::Delete {
                 mailbox,
-                uids: vec![uid],
+                uids: uids.clone(),
             }
         });
+        self.taken_out(&uids);
+    }
+
+    /// Takes the Messages `uids` out of the Index, as they've gone elsewhere, going on to the next one in the Pager.
+    fn taken_out(&mut self, uids: &[u32]) {
         if let Some(index) = &mut self.index {
-            index.remove(&[uid]);
+            index.remove(uids);
         }
         if self.pager.is_some() {
             self.close_pager();
             self.open_current();
         }
+    }
+
+    /// Lists the Account's other Mailboxes, to move the Messages an action is for to one.
+    fn choose_mailbox(&mut self) {
+        let Some((account, mailbox, uids)) = self.targets() else {
+            return;
+        };
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let rows: Vec<Line<'static>> = self
+            .moving_to(account, &mailbox)
+            .iter()
+            .map(|other| {
+                Line::from(vec![
+                    Span::styled(sidebar::icon(&self.icons, other.role), self.theme.dim),
+                    Span::raw(other.path.join("/")),
+                ])
+            })
+            .collect();
+        if rows.is_empty() {
+            self.say(&format!("{} has no other Mailbox", state.name), false);
+            return;
+        }
+        let what = match uids.len() {
+            1 => "Move to".to_owned(),
+            count => format!("Move {count} to"),
+        };
+        self.overlay = Some(Overlay::new(overlay::Kind::Mailboxes, what, rows));
+    }
+
+    /// The Mailboxes of `account` Messages of `mailbox` can be moved to, in the sidebar's order.
+    fn moving_to(&self, account: usize, mailbox: &str) -> Vec<muttrs_mail::Mailbox> {
+        sidebar::rows(&self.accounts)
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Mailbox(at, name) if at == account && name != mailbox => {
+                    self.accounts[at].mailbox(&name).cloned()
+                }
+                _ => None,
+            })
+            .filter(|other| other.selectable)
+            .collect()
+    }
+
+    /// Moves the Messages an action is for to the `chosen`th of the Mailboxes they can go to.
+    fn move_to(&mut self, chosen: usize) {
+        let Some((account, mailbox, uids)) = self.targets() else {
+            return;
+        };
+        let Some(target) = self.moving_to(account, &mailbox).into_iter().nth(chosen) else {
+            return;
+        };
+        if let Some(state) = self.accounts.get(account) {
+            state.client.send(client::Request::Move {
+                mailbox,
+                uids: uids.clone(),
+                to: target.name,
+            });
+        }
+        self.taken_out(&uids);
     }
 
     fn on_terminal(&mut self, event: &TerminalEvent) {
@@ -875,8 +952,10 @@ impl App {
             KeyCode::Char('n') => index.next_match(true),
             KeyCode::Char('N') => index.next_match(false),
             KeyCode::Esc => {
-                // Back from what a search on the server found, once there's no search of the Index to clear.
+                // Back from what a search on the server found, once there's no search of the Index, nor a
+                // Selection, to clear.
                 if !index.clear_search()
+                    && !index.clear_selected()
                     && index.found.is_some()
                     && let Some(searched) = self.searched.take()
                 {
@@ -886,10 +965,12 @@ impl App {
             KeyCode::Char('/') => self.prompt(PromptKind::Search),
             KeyCode::Char('S') => self.prompt(PromptKind::Server),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_current(),
+            KeyCode::Char(' ') => index.toggle_selected(),
             KeyCode::Char('F') => self.toggle(Flag::Flagged),
             KeyCode::Char('U') => self.toggle(Flag::Seen),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
+            KeyCode::Char('s') => self.choose_mailbox(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
@@ -973,6 +1054,7 @@ impl App {
             KeyCode::Char('U') => self.toggle(Flag::Seen),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
+            KeyCode::Char('s') => self.choose_mailbox(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
@@ -1213,8 +1295,9 @@ impl App {
                         ("T", "threads, or newest first"),
                         ("za zM zR", "fold the thread, all, none"),
                         ("J K", "in the Pager: the next Message, the previous"),
-                        ("F U", "flag, mark Unread or read"),
-                        ("d a", "delete (to Trash), archive"),
+                        ("Space", "select, or not, and move down"),
+                        ("F U", "flag, mark Unread or read: the selected, or this"),
+                        ("d a s", "delete (to Trash), archive, move to a Mailbox"),
                         ("Tab h l", "the sidebar, the Index"),
                         ("\\", "show or hide the sidebar"),
                         ("$ :refresh", "ask for what's new"),
@@ -1240,6 +1323,12 @@ impl App {
     }
 
     fn chosen(&mut self, kind: overlay::Kind, index: usize, verb: Verb) {
+        // Moving needs no Pager: what's moved is in the Index.
+        if kind == overlay::Kind::Mailboxes {
+            self.overlay = None;
+            self.move_to(index);
+            return;
+        }
         let Some(pager) = &self.pager else { return };
         match kind {
             overlay::Kind::Links => {
@@ -1276,7 +1365,7 @@ impl App {
                 }
                 self.overlay = None;
             }
-            overlay::Kind::Help => {}
+            overlay::Kind::Mailboxes | overlay::Kind::Help => {}
         }
     }
 
@@ -1418,7 +1507,11 @@ impl App {
                 1 => "1 Message".to_owned(),
                 count => format!("{count} Messages"),
             };
-            format!(" · {messages}, {unread} Unread{listed}")
+            let selected = match index.selected() {
+                0 => String::new(),
+                count => format!(" · {count} selected"),
+            };
+            format!(" · {messages}, {unread} Unread{listed}{selected}")
         } else {
             String::new()
         };

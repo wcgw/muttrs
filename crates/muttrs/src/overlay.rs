@@ -1,4 +1,5 @@
-//! Lists that pop up over what's on screen: a Message's Links, its Attachments, the keys.
+//! Lists that pop up over what's on screen: a Message's Links, its Attachments, the Mailboxes to move to, the
+//! keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -13,6 +14,8 @@ use crate::theme::Theme;
 pub(crate) enum Kind {
     Links,
     Attachments,
+    /// The Mailboxes to move Messages to, narrowed as their names are typed.
+    Mailboxes,
     Help,
 }
 
@@ -40,6 +43,12 @@ pub(crate) struct Overlay {
     kind: Kind,
     title: String,
     rows: Vec<Line<'static>>,
+    /// What each row is found by, in lower case, where typing narrows the list.
+    names: Vec<String>,
+    /// What's typed to narrow the list.
+    filter: String,
+    /// The rows listed, narrowed by `filter`, by their index in `rows`.
+    shown: Vec<usize>,
     /// The keys it takes, shown at its foot.
     hint: &'static str,
     cursor: usize,
@@ -54,11 +63,25 @@ impl Overlay {
         let hint = match kind {
             Kind::Links => " 1-9 Enter open · y copy · Esc ",
             Kind::Attachments => " Enter open · s save · Esc ",
+            Kind::Mailboxes => " type to narrow · ↑ ↓ Enter move · Esc ",
             Kind::Help => " Esc ",
         };
+        let names = rows
+            .iter()
+            .map(|row| {
+                row.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .collect();
         Self {
             kind,
             title: title.into(),
+            shown: (0..rows.len()).collect(),
+            names,
+            filter: String::new(),
             rows,
             hint,
             cursor: 0,
@@ -71,9 +94,51 @@ impl Overlay {
         self.kind
     }
 
+    /// Narrows the list to the rows whose names hold what's typed.
+    fn narrow(&mut self) {
+        let filter = self.filter.to_lowercase();
+        self.shown = (0..self.rows.len())
+            .filter(|&row| self.names[row].contains(&filter))
+            .collect();
+        self.cursor = self.cursor.min(self.shown.len().saturating_sub(1));
+    }
+
     pub(crate) fn key(&mut self, key: KeyEvent) -> Outcome {
-        let count = self.rows.len();
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.kind == Kind::Mailboxes {
+            match key.code {
+                KeyCode::Esc => return Outcome::Close,
+                KeyCode::Char('c') if control => return Outcome::Close,
+                KeyCode::Down | KeyCode::Tab => {
+                    self.cursor = (self.cursor + 1).min(self.shown.len().saturating_sub(1));
+                }
+                KeyCode::Char('n') if control => {
+                    self.cursor = (self.cursor + 1).min(self.shown.len().saturating_sub(1));
+                }
+                KeyCode::Up | KeyCode::BackTab => self.cursor = self.cursor.saturating_sub(1),
+                KeyCode::Char('p') if control => self.cursor = self.cursor.saturating_sub(1),
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.narrow();
+                }
+                KeyCode::Char('u') if control => {
+                    self.filter.clear();
+                    self.narrow();
+                }
+                KeyCode::Char(character) => {
+                    self.filter.push(character);
+                    self.narrow();
+                }
+                KeyCode::Enter => {
+                    if let Some(&row) = self.shown.get(self.cursor) {
+                        return Outcome::Chosen(row, Verb::Open);
+                    }
+                }
+                _ => {}
+            }
+            return Outcome::Stay;
+        }
+        let count = self.rows.len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
             KeyCode::Char('c') if control => return Outcome::Close,
@@ -120,6 +185,7 @@ impl Overlay {
             .max(self.title.width() + 6)
             .max(self.hint.width() + 4)
             .min(usize::from(area.width.saturating_sub(4)));
+        // A list narrowed by typing keeps its size, rather than shrink under the typing.
         let height = (self.rows.len() + 2).min(usize::from(area.height.saturating_sub(2)));
         // Both within the area's u16s, by the mins.
         let (width, height) = (
@@ -136,7 +202,14 @@ impl Overlay {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme.accent)
-            .title(Span::styled(format!(" {} ", self.title), theme.accent))
+            .title(Span::styled(
+                if self.kind == Kind::Mailboxes {
+                    format!(" {}: {}▏", self.title, self.filter)
+                } else {
+                    format!(" {} ", self.title)
+                },
+                theme.accent,
+            ))
             .title_bottom(Line::styled(self.hint, theme.dim).right_aligned());
         let inner = block.inner(popup);
         block.render(popup, buffer);
@@ -147,9 +220,14 @@ impl Overlay {
         } else if visible > 0 && self.cursor >= self.top + visible {
             self.top = self.cursor + 1 - visible;
         }
-        for (index, row) in self.rows.iter().enumerate().skip(self.top).take(visible) {
+        for (index, &row) in self.shown.iter().enumerate().skip(self.top).take(visible) {
             let y = inner.y + u16::try_from(index - self.top).unwrap_or(0);
-            buffer.set_line(inner.x + 1, y, row, inner.width.saturating_sub(2));
+            buffer.set_line(
+                inner.x + 1,
+                y,
+                &self.rows[row],
+                inner.width.saturating_sub(2),
+            );
             if index == self.cursor && self.kind != Kind::Help {
                 buffer.set_style(Rect::new(inner.x, y, inner.width, 1), theme.cursor);
             }
@@ -211,5 +289,38 @@ mod tests {
             Outcome::Chosen(0, Verb::Copy)
         );
         assert_eq!(press(&mut links, KeyCode::Esc), Outcome::Close);
+    }
+
+    #[test]
+    fn mailboxes_narrow_as_their_names_are_typed() {
+        let rows = ["Inbox", "Archive", "Work/Reports", "Receipts"]
+            .into_iter()
+            .map(Line::raw)
+            .collect();
+        let mut mailboxes = Overlay::new(Kind::Mailboxes, "Move to", rows);
+        for character in "re".chars() {
+            assert_eq!(
+                press(&mut mailboxes, KeyCode::Char(character)),
+                Outcome::Stay
+            );
+        }
+        // "re" is in Work/Reports and Receipts.
+        assert_eq!(press(&mut mailboxes, KeyCode::Down), Outcome::Stay);
+        assert_eq!(
+            press(&mut mailboxes, KeyCode::Enter),
+            Outcome::Chosen(3, Verb::Open)
+        );
+        press(&mut mailboxes, KeyCode::Char('x'));
+        assert_eq!(
+            press(&mut mailboxes, KeyCode::Enter),
+            Outcome::Stay,
+            "nothing's listed"
+        );
+        press(&mut mailboxes, KeyCode::Backspace);
+        press(&mut mailboxes, KeyCode::Up);
+        assert_eq!(
+            press(&mut mailboxes, KeyCode::Enter),
+            Outcome::Chosen(2, Verb::Open)
+        );
     }
 }

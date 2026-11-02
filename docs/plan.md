@@ -121,7 +121,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       listed as an Index of their own until `Esc`
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
 - [ ] An Envelope cache, kept up to date with CONDSTORE, so that a Mailbox opens at once
-- [ ] Moving to a Mailbox by name (`s`), and Selections to act on several Messages
+- [x] Moving to a Mailbox by name (`s`, narrowed as it's typed), and Selections (`Space`) to act on several
+      Messages; a folded thread is acted on whole
 - [ ] Address completion from the Envelopes seen, in the Draft's headers
 - [ ] Signatures; per-Account `From` identities
 - [ ] Mouse wheel scrolling; themes from files

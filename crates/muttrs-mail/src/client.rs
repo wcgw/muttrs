@@ -69,6 +69,15 @@ pub enum Request {
         /// The Role of the Mailbox to move them to.
         role: Role,
     },
+    /// Move Messages to another Mailbox, by its name.
+    Move {
+        /// The Mailbox they're in, by its name on the server.
+        mailbox: String,
+        /// Their UIDs there.
+        uids: Vec<u32>,
+        /// The Mailbox to move them to, by its name on the server.
+        to: String,
+    },
     /// Move Messages to Trash, or expunge them from Trash.
     Delete {
         /// The Mailbox they're in, by its name on the server.
@@ -503,6 +512,9 @@ impl Worker {
             } => {
                 self.move_to(session, &mailbox, &uids, role).await?;
             }
+            Request::Move { mailbox, uids, to } => {
+                self.move_named(session, &mailbox, &uids, &to).await?;
+            }
             Request::Delete { mailbox, uids } => {
                 self.delete(session, &mailbox, &uids).await?;
             }
@@ -865,13 +877,25 @@ impl Worker {
             self.tell_window(mailbox);
             return Ok(());
         };
+        self.move_named(session, mailbox, uids, &target).await
+    }
+
+    /// Moves the Messages `uids` of `mailbox` to the Mailbox named `target` on the server.
+    async fn move_named(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        uids: &[u32],
+        target: &str,
+    ) -> Result<(), imap::Error> {
         if target == mailbox {
+            self.tell_window(mailbox);
             return Ok(());
         }
         self.select(session, mailbox).await?;
-        match session.move_to(uids, &target).await {
+        match session.move_to(uids, target).await {
             Ok(()) => {
-                let label = crate::mailbox::decode(&target);
+                let label = crate::mailbox::decode(target);
                 (self.notify)(Update::Done(format!(
                     "Moved {} to {label}",
                     count(uids.len())
@@ -880,7 +904,7 @@ impl Worker {
             Err(error) => (self.notify)(Update::Failed(format!("Moving: {error}"))),
         }
         self.refresh_window(session, mailbox).await?;
-        self.count(session, &target).await
+        self.count(session, target).await
     }
 
     async fn delete(

@@ -40,6 +40,8 @@ struct Row {
     head: u32,
     /// How many replies are folded into it.
     folded: usize,
+    /// The UIDs of the replies folded into it, which what's done to it is done to.
+    folded_uids: Vec<u32>,
     /// Whether any of them is Unread.
     folded_unread: bool,
     /// Whether its subject shows: not when it's its thread head's, as a reply's usually is.
@@ -62,6 +64,8 @@ pub(crate) struct Index {
     threaded: bool,
     /// The threads folded, by the UID of the Message heading them.
     folded: HashSet<u32>,
+    /// The Messages selected, to act on together, by UID.
+    selected: HashSet<u32>,
     /// How many Messages the Mailbox has, of which `envelopes` are the newest.
     pub(crate) exists: u32,
     /// Whether the Envelopes have come.
@@ -99,6 +103,7 @@ impl Index {
             rows: Vec::new(),
             threaded,
             folded: HashSet::new(),
+            selected: HashSet::new(),
             exists: 0,
             loaded: false,
             more: More::Idle,
@@ -154,6 +159,7 @@ impl Index {
                     tree: String::new(),
                     head: self.envelopes[envelope].uid,
                     folded: 0,
+                    folded_uids: Vec::new(),
                     folded_unread: false,
                     subject: true,
                 })
@@ -189,6 +195,14 @@ impl Index {
                     tree: String::new(),
                     head,
                     folded: if folded { message.replies } else { 0 },
+                    folded_uids: if folded {
+                        replies
+                            .iter()
+                            .map(|reply| self.envelopes[reply.envelope].uid)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     folded_unread,
                     subject: true,
                 });
@@ -208,6 +222,7 @@ impl Index {
                     tree,
                     head,
                     folded: 0,
+                    folded_uids: Vec::new(),
                     folded_unread: false,
                     subject: thread::base_subject(&envelope.subject) != head_subject,
                 });
@@ -254,6 +269,54 @@ impl Index {
         self.arrange(at);
     }
 
+    /// Selects the Message at the cursor (and the replies folded into it), or unselects it, and moves down.
+    pub(crate) fn toggle_selected(&mut self) {
+        let uids = self.at_cursor();
+        let Some(first) = uids.first() else { return };
+        if self.selected.contains(first) {
+            for uid in &uids {
+                self.selected.remove(uid);
+            }
+        } else {
+            self.selected.extend(uids);
+        }
+        self.move_by(1);
+    }
+
+    /// Unselects everything; `false` if nothing was.
+    pub(crate) fn clear_selected(&mut self) -> bool {
+        let any = !self.selected.is_empty();
+        self.selected.clear();
+        any
+    }
+
+    /// How many Messages are selected.
+    pub(crate) fn selected(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// The UIDs of the Message at the cursor and of the replies folded into it.
+    fn at_cursor(&self) -> Vec<u32> {
+        let Some(row) = self.rows.get(self.cursor) else {
+            return Vec::new();
+        };
+        std::iter::once(self.envelopes[row.envelope].uid)
+            .chain(row.folded_uids.iter().copied())
+            .collect()
+    }
+
+    /// The UIDs of the Messages an action is for: those selected, or else the one at the cursor (with the replies
+    /// folded into it).
+    pub(crate) fn targets(&self) -> Vec<u32> {
+        if self.selected.is_empty() {
+            self.at_cursor()
+        } else {
+            let mut uids: Vec<u32> = self.selected.iter().copied().collect();
+            uids.sort_unstable();
+            uids
+        }
+    }
+
     /// Whether to ask for older Envelopes: the cursor is near the end of those listed, and the Mailbox has more.
     /// Asking is noted, so that it's asked once.
     pub(crate) fn wants_more(&mut self) -> bool {
@@ -275,6 +338,10 @@ impl Index {
     pub(crate) fn current_mut(&mut self) -> Option<&mut Envelope> {
         let row = self.rows.get(self.cursor)?;
         self.envelopes.get_mut(row.envelope)
+    }
+
+    pub(crate) fn find(&self, uid: u32) -> Option<&Envelope> {
+        self.envelopes.iter().find(|envelope| envelope.uid == uid)
     }
 
     pub(crate) fn find_mut(&mut self, uid: u32) -> Option<&mut Envelope> {
@@ -299,6 +366,7 @@ impl Index {
     pub(crate) fn remove(&mut self, uids: &[u32]) {
         self.envelopes
             .retain(|envelope| !uids.contains(&envelope.uid));
+        self.selected.retain(|uid| !uids.contains(uid));
         // The cursor stays on its row: on what followed what's taken out.
         self.arrange(None);
     }
@@ -453,6 +521,9 @@ impl Index {
                 buffer.set_style(row_area, style);
             } else if matches.is_some_and(|matches| matches.contains(&index)) {
                 buffer.set_style(Rect::new(area.x, y, 1, 1), cx.theme.found);
+            }
+            if self.selected.contains(&self.envelopes[row.envelope].uid) {
+                buffer.set_string(area.x, y, "▌", cx.theme.accent);
             }
         }
     }
@@ -663,13 +734,29 @@ mod tests {
         );
         assert_eq!(index.rows[0].folded, 2);
         assert!(index.rows[0].folded_unread);
+        assert_eq!(
+            index.targets(),
+            [1, 2, 3],
+            "what's done to a folded thread is done to it all"
+        );
         index.fold_all(false);
         assert_eq!(shown(&index).len(), 4);
+        assert_eq!(index.targets(), [1]);
+        index.toggle_selected();
+        index.toggle_selected();
+        assert_eq!(
+            (index.targets(), index.current().unwrap().uid),
+            (vec![1, 2], 3)
+        );
+        index.remove(&[2]);
+        assert_eq!(index.targets(), [1], "what's gone isn't selected");
+        assert!(index.clear_selected());
 
+        let at = index.current().unwrap().uid;
         assert!(!index.toggle_threads());
         assert_eq!(
             index.current().unwrap().uid,
-            1,
+            at,
             "the cursor stays on its Message"
         );
         assert_eq!(
