@@ -6,7 +6,7 @@ muttrs reads mail over IMAP and sends it over SMTP, each over TLS or STARTTLS, a
 words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what's built and what's next is in
 [docs/plan.md](docs/plan.md).
 
-> Work in progress: see the plan for what works yet.
+> Work in progress: reading works; writing is next. See the plan.
 
 ## Requirements
 
@@ -20,6 +20,61 @@ words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what'
 ```sh
 cargo install --locked --path crates/muttrs
 ```
+
+## Accounts
+
+Each Account is an `[[account]]` in the configuration (below). For your own server:
+
+```toml
+[[account]]
+name = "home"                                         # in the sidebar, and in `muttrs login home`
+email = "alex@example.com"
+display_name = "Alex"
+imap = { host = "imap.example.com", tls = "ssl" }     # "ssl" (993) or "starttls" (143); port = … for others
+smtp = { host = "smtp.example.com", tls = "starttls" } # "ssl" (465) or "starttls" (587)
+# username = "alex"                                   # the address, by default
+# password_command = "pass show mail/home"            # without it, the password is in the keyring
+# mailboxes = { archive = "Archive" }                 # Roles the server doesn't say (SPECIAL-USE)
+```
+
+then `muttrs login home` asks for the password and keeps it in the keyring (the Secret Service through
+`secret-tool` on Linux, the login Keychain on macOS), and checks it signs in.
+
+### Gmail
+
+```toml
+[[account]]
+name = "gmail"
+email = "alex@gmail.com"
+provider = "gmail"           # Gmail's servers, OAuth2, and its quirks
+
+[account.oauth2]
+client_id = "….apps.googleusercontent.com"
+client_secret = "…"          # or client_secret_command = "…"
+```
+
+Gmail signs in with OAuth2, and muttrs ships no OAuth client of its own: each user brings theirs. In the
+[Google Cloud console](https://console.cloud.google.com/apis/credentials), create a project, configure its OAuth
+consent screen (an external app, with yourself as a test user), and create an OAuth client ID of type "Desktop app".
+Its id and secret go above. Then `muttrs login gmail` opens the browser to sign in, and keeps the refresh token in
+the keyring. Google lets the refresh tokens of apps still "in testing" last 7 days, after which `muttrs login gmail`
+again, or publish the app. With an [app password](https://myaccount.google.com/apppasswords) instead, set
+`auth = "password"`.
+
+Gmail's labels are Mailboxes; deleting moves to its Trash, archiving (`a`) takes a Message out of the Inbox, and
+what's sent isn't copied to Sent, as Gmail does that itself. `provider = "outlook"` does the same for Outlook and
+Microsoft 365, with a client registered in Microsoft Entra (untested so far).
+
+## Keys
+
+They work as in mutt and vim. `?` shows the ones that apply.
+
+| Where | Keys |
+|---|---|
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox |
+| Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` as in the Index · `q` back |
 
 ## Reading a Message from a file
 

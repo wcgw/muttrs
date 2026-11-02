@@ -2,10 +2,13 @@
 
 mod config;
 mod icons;
+mod index;
+mod login;
 mod overlay;
 mod pager;
 mod pictures;
 mod remote;
+mod sidebar;
 mod theme;
 mod ui;
 mod xdg;
@@ -24,6 +27,8 @@ const USAGE: &str = "\
 muttrs, a terminal mail client
 
 Usage:
+  muttrs               read and write mail, with the accounts in the configuration
+  muttrs login NAME    sign in to account NAME, keeping its password or OAuth2 token in the keyring
   muttrs view FILE     show a Message saved as a file (.eml), in the Pager
   muttrs --help        show this
   muttrs --version     show the version
@@ -46,6 +51,8 @@ fn main() -> ExitCode {
             println!("muttrs {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        [] => run(mail()),
+        ["login", name] => run(login::login(name)),
         ["view", path] => run(view(path)),
         _ => {
             eprintln!("{USAGE}");
@@ -125,6 +132,24 @@ fn setup() -> anyhow::Result<ui::Setup> {
         icons,
         protocol,
     })
+}
+
+async fn mail() -> anyhow::Result<()> {
+    let setup = setup()?;
+    if setup.config.accounts.is_empty() {
+        bail!(
+            "there are no accounts in {}: add an [[account]] (see the README), or `muttrs view FILE` reads a file",
+            Config::path().map_or_else(|| "config.toml".into(), |path| path.display().to_string())
+        );
+    }
+    let accounts = setup
+        .config
+        .accounts
+        .iter()
+        .cloned()
+        .map(muttrs_mail::AccountConfig::resolve)
+        .collect::<Result<Vec<_>, _>>()?;
+    ui::mail(setup, accounts).await
 }
 
 async fn view(path: &str) -> anyhow::Result<()> {

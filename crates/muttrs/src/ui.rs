@@ -11,7 +11,8 @@ use crossterm::event::{
 };
 use futures_util::StreamExt as _;
 use muttrs_gfx::{CellSize, Prepared, Protocol};
-use muttrs_mail::Message;
+use muttrs_mail::client::{self, Client, Connection, Flag, Update};
+use muttrs_mail::{Account, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -21,10 +22,12 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::config::Config;
 use crate::icons::Icons;
+use crate::index::{self, Index};
 use crate::overlay::{self, Outcome, Overlay, Verb};
 use crate::pager::{self, Pager, Request};
 use crate::pictures::{self, Pictures};
 use crate::remote::Fetcher;
+use crate::sidebar::{self, AccountState, Row, Sidebar};
 use crate::theme::Theme;
 use crate::xdg;
 
@@ -38,6 +41,8 @@ pub(crate) enum Event {
         image: usize,
         bytes: Option<Vec<u8>>,
     },
+    /// What an Account says, by its place in the sidebar.
+    Account(usize, Update),
 }
 
 /// What the UI is set up with.
@@ -60,6 +65,21 @@ enum PromptKind {
     Command,
 }
 
+/// Which pane keys go to, when the Pager isn't open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Focus {
+    Sidebar,
+    Index,
+}
+
+/// A Message of an Account's Mailbox, by its UID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Opened {
+    account: usize,
+    mailbox: String,
+    uid: u32,
+}
+
 /// A word for the user at the foot of the screen, until the next key.
 struct Notice {
     text: String,
@@ -73,16 +93,30 @@ pub(crate) struct App {
     pictures: Pictures,
     fetcher: Option<Fetcher>,
     events: mpsc::UnboundedSender<Event>,
+    accounts: Vec<AccountState>,
+    sidebar: Sidebar,
+    sidebar_shown: bool,
+    focus: Focus,
+    index: Option<Index>,
     pager: Option<Pager>,
+    /// The Message the Pager shows, or is waiting for.
+    opened: Option<Opened>,
     overlay: Option<Overlay>,
     prompt: Option<Prompt>,
     notice: Option<Notice>,
     next_pager: u64,
+    /// Whether the Pager is all there is, as `muttrs view` opens it.
+    standalone: bool,
     quit: bool,
 }
 
 impl App {
-    fn new(setup: Setup, events: mpsc::UnboundedSender<Event>) -> Self {
+    fn new(
+        setup: Setup,
+        events: mpsc::UnboundedSender<Event>,
+        accounts: Vec<AccountState>,
+        standalone: bool,
+    ) -> Self {
         let fetcher = match Fetcher::new() {
             Ok(fetcher) => Some(fetcher),
             Err(error) => {
@@ -97,11 +131,18 @@ impl App {
             icons: setup.icons,
             fetcher,
             events,
+            accounts,
+            sidebar: Sidebar::default(),
+            sidebar_shown: true,
+            focus: Focus::Index,
+            index: None,
             pager: None,
+            opened: None,
             overlay: None,
             prompt: None,
             notice: None,
             next_pager: 1,
+            standalone,
             quit: false,
         }
     }
@@ -161,8 +202,238 @@ impl App {
                     open.fetched(image, bytes);
                 }
             }
+            Event::Account(account, update) => self.on_account(account, update),
         }
         Ok(())
+    }
+
+    fn on_account(&mut self, account: usize, update: Update) {
+        let Some(state) = self.accounts.get_mut(account) else {
+            return;
+        };
+        match update {
+            Update::Connection(connection) => {
+                match &connection {
+                    Connection::SignInFailed(why) => {
+                        let text = format!("{}: signing in failed: {why}", state.name);
+                        self.say(&text, true);
+                    }
+                    Connection::Offline(why) if state.connection == Connection::Online => {
+                        let text = format!("{}: offline: {why}", state.name);
+                        self.say(&text, true);
+                    }
+                    _ => {}
+                }
+                if let Some(state) = self.accounts.get_mut(account) {
+                    state.connection = connection;
+                }
+            }
+            Update::Mailboxes(mailboxes) => {
+                state.mailboxes = mailboxes;
+                // The first Account's Inbox, to start with.
+                if self.index.is_none()
+                    && let Some(inbox) =
+                        state.with_role(Role::Inbox).map(|inbox| inbox.name.clone())
+                {
+                    self.open_mailbox(account, &inbox);
+                }
+            }
+            Update::Counts { mailbox, counts } => {
+                state.counts.insert(mailbox, counts);
+            }
+            Update::Envelopes {
+                mailbox,
+                envelopes,
+                exists,
+            } => {
+                if let Some(index) = self
+                    .index
+                    .as_mut()
+                    .filter(|index| index.account == account && index.mailbox == mailbox)
+                {
+                    index.set(envelopes, exists);
+                }
+            }
+            Update::Body { mailbox, uid, body } => {
+                let wanted = Opened {
+                    account,
+                    mailbox,
+                    uid,
+                };
+                if self.opened.as_ref() != Some(&wanted) {
+                    return;
+                }
+                match body {
+                    Ok(bytes) => match Message::parse(bytes.as_ref().clone()) {
+                        Ok(message) => self.open(Arc::new(message)),
+                        Err(error) => self.say(&error.to_string(), true),
+                    },
+                    Err(why) => self.say(&format!("Couldn't fetch the Message: {why}"), true),
+                }
+            }
+            Update::Done(done) => self.say(&done, false),
+            Update::Failed(failed) => self.say(&failed, true),
+        }
+    }
+
+    /// Shows the Index of `account`'s Mailbox `name`.
+    fn open_mailbox(&mut self, account: usize, name: &str) {
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let Some(mailbox) = state.mailbox(name) else {
+            return;
+        };
+        if !mailbox.selectable {
+            self.say(
+                &format!("{} only holds other Mailboxes", mailbox.label()),
+                false,
+            );
+            return;
+        }
+        let index = Index::new(
+            account,
+            name.to_owned(),
+            mailbox.label().to_owned(),
+            mailbox.role,
+        );
+        state.client.send(client::Request::Open(name.to_owned()));
+        self.sidebar
+            .select(&self.accounts, &Row::Mailbox(account, name.to_owned()));
+        self.index = Some(index);
+        self.focus = Focus::Index;
+    }
+
+    /// Fetches the Message at the Index's cursor, to show in the Pager, marking it Seen.
+    fn open_current(&mut self) {
+        let Some(index) = &mut self.index else { return };
+        let (account, mailbox) = (index.account, index.mailbox.clone());
+        let Some(envelope) = index.current_mut() else {
+            return;
+        };
+        let uid = envelope.uid;
+        let unread = !envelope.flags.seen;
+        envelope.flags.seen = true;
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        state.client.send(client::Request::Body {
+            mailbox: mailbox.clone(),
+            uid,
+        });
+        if unread {
+            state.client.send(client::Request::Flag {
+                mailbox: mailbox.clone(),
+                uids: vec![uid],
+                flag: Flag::Seen,
+                on: true,
+            });
+            if let Some(counts) = self.accounts[account].counts.get_mut(&mailbox) {
+                counts.unread = counts.unread.saturating_sub(1);
+            }
+        }
+        self.opened = Some(Opened {
+            account,
+            mailbox,
+            uid,
+        });
+        if self.pager.is_none() {
+            self.say("Fetching the Message…", false);
+        }
+    }
+
+    /// The Messages an action is for: the one the Pager shows, or the one at the Index's cursor.
+    fn target(&self) -> Option<(usize, String, u32)> {
+        if self.pager.is_some() {
+            let opened = self.opened.as_ref()?;
+            return Some((opened.account, opened.mailbox.clone(), opened.uid));
+        }
+        let index = self.index.as_ref()?;
+        Some((index.account, index.mailbox.clone(), index.current()?.uid))
+    }
+
+    /// Toggles `flag` on the Message an action is for.
+    fn toggle(&mut self, flag: Flag) {
+        let Some((account, mailbox, uid)) = self.target() else {
+            return;
+        };
+        let Some(envelope) = self.index.as_mut().and_then(|index| index.find_mut(uid)) else {
+            return;
+        };
+        let on = match flag {
+            Flag::Seen => {
+                envelope.flags.seen = !envelope.flags.seen;
+                envelope.flags.seen
+            }
+            Flag::Flagged => {
+                envelope.flags.flagged = !envelope.flags.flagged;
+                envelope.flags.flagged
+            }
+            Flag::Answered => {
+                envelope.flags.answered = !envelope.flags.answered;
+                envelope.flags.answered
+            }
+        };
+        if let Some(state) = self.accounts.get_mut(account) {
+            if flag == Flag::Seen
+                && let Some(counts) = state.counts.get_mut(&mailbox)
+            {
+                counts.unread = if on {
+                    counts.unread.saturating_sub(1)
+                } else {
+                    counts.unread + 1
+                };
+            }
+            state.client.send(client::Request::Flag {
+                mailbox,
+                uids: vec![uid],
+                flag,
+                on,
+            });
+        }
+    }
+
+    /// Deletes (to Trash) or archives the Message an action is for, going on to the next one.
+    fn remove(&mut self, archive: bool) {
+        let Some((account, mailbox, uid)) = self.target() else {
+            return;
+        };
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let role = if archive {
+            if state.gmail {
+                Role::All
+            } else {
+                Role::Archive
+            }
+        } else {
+            Role::Trash
+        };
+        if state.with_role(role).is_none()
+            && !(role == Role::Trash && state.with_role(Role::Trash).is_some())
+        {
+            // The worker knows the configuration's names too: it says so if there's none.
+            tracing::debug!(?role, "no Mailbox listed with the Role");
+        }
+        state.client.send(if archive {
+            client::Request::Archive {
+                mailbox,
+                uids: vec![uid],
+            }
+        } else {
+            client::Request::Delete {
+                mailbox,
+                uids: vec![uid],
+            }
+        });
+        if let Some(index) = &mut self.index {
+            index.remove(&[uid]);
+        }
+        if self.pager.is_some() {
+            self.close_pager();
+            self.open_current();
+        }
     }
 
     fn on_terminal(&mut self, event: &TerminalEvent) {
@@ -207,6 +478,127 @@ impl App {
         }
         if self.pager.is_some() {
             self.pager_key(key);
+        } else {
+            self.main_key(key);
+        }
+    }
+
+    /// Keys for the sidebar and the Index.
+    fn main_key(&mut self, key: KeyEvent) {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q') => {
+                self.quit = true;
+                return;
+            }
+            KeyCode::Char(':') => {
+                self.prompt(PromptKind::Command);
+                return;
+            }
+            KeyCode::Char('?') => {
+                self.help();
+                return;
+            }
+            KeyCode::Char('\\') => {
+                self.sidebar_shown = !self.sidebar_shown;
+                self.focus = if self.sidebar_shown {
+                    Focus::Sidebar
+                } else {
+                    Focus::Index
+                };
+                return;
+            }
+            KeyCode::Tab | KeyCode::BackTab if self.sidebar_shown => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Index,
+                    Focus::Index => Focus::Sidebar,
+                };
+                return;
+            }
+            KeyCode::Char('$') => {
+                self.refresh();
+                return;
+            }
+            KeyCode::Char('r') if control => {
+                self.refresh();
+                return;
+            }
+            _ => {}
+        }
+        match self.focus {
+            Focus::Sidebar => self.sidebar_key(key),
+            Focus::Index => self.index_key(key),
+        }
+    }
+
+    fn sidebar_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.sidebar.move_by(&self.accounts, 1),
+            KeyCode::Char('k') | KeyCode::Up => self.sidebar.move_by(&self.accounts, -1),
+            KeyCode::Char('g') | KeyCode::Home => self.sidebar.top(),
+            KeyCode::Char('G') | KeyCode::End => self.sidebar.bottom(&self.accounts),
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Esc => self.focus = Focus::Index,
+            KeyCode::Enter => match self.sidebar.current(&self.accounts) {
+                Some(Row::Mailbox(account, name)) => self.open_mailbox(account, &name),
+                Some(Row::Account(account)) => {
+                    if let Some(state) = self.accounts.get(account) {
+                        state.client.send(client::Request::Refresh);
+                    }
+                }
+                None => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn index_key(&mut self, key: KeyEvent) {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, KeyCode::Char('h') | KeyCode::Left) && self.sidebar_shown {
+            self.focus = Focus::Sidebar;
+            return;
+        }
+        let Some(index) = &mut self.index else { return };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => index.move_by(1),
+            KeyCode::Char('k') | KeyCode::Up => index.move_by(-1),
+            KeyCode::Char('d') if control => index.move_pages(0.5),
+            KeyCode::Char('u') if control => index.move_pages(-0.5),
+            KeyCode::Char('f') if control => index.move_pages(1.0),
+            KeyCode::Char('b') if control => index.move_pages(-1.0),
+            KeyCode::PageDown => index.move_pages(1.0),
+            KeyCode::PageUp => index.move_pages(-1.0),
+            KeyCode::Char('g') | KeyCode::Home => index.top(),
+            KeyCode::Char('G') | KeyCode::End => index.bottom(),
+            KeyCode::Char('n') => index.next_match(true),
+            KeyCode::Char('N') => index.next_match(false),
+            KeyCode::Esc => {
+                index.clear_search();
+            }
+            KeyCode::Char('/') => self.prompt(PromptKind::Search),
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_current(),
+            KeyCode::Char('F') => self.toggle(Flag::Flagged),
+            KeyCode::Char('U') => self.toggle(Flag::Seen),
+            KeyCode::Char('d') => self.remove(false),
+            KeyCode::Char('a') => self.remove(true),
+            KeyCode::Char('m' | 'r' | 'R' | 'f') => self.say("Writing isn't there yet", false),
+            _ => {}
+        }
+    }
+
+    fn prompt(&mut self, kind: PromptKind) {
+        self.prompt = Some(Prompt {
+            kind,
+            text: String::new(),
+        });
+    }
+
+    /// Asks every Account what's new, connecting again any that's offline.
+    fn refresh(&mut self) {
+        for account in &self.accounts {
+            account.client.send(client::Request::Refresh);
+        }
+        if !self.accounts.is_empty() {
+            self.say("Asking for what's new…", false);
         }
     }
 
@@ -261,15 +653,43 @@ impl App {
                 }
             }
             KeyCode::Char('q') => self.close_pager(),
+            _ if self.standalone => {}
+            KeyCode::Char('J') => self.step(true),
+            KeyCode::Char('K') => self.step(false),
+            KeyCode::Char('F') => self.toggle(Flag::Flagged),
+            KeyCode::Char('U') => self.toggle(Flag::Seen),
+            KeyCode::Char('d') => self.remove(false),
+            KeyCode::Char('a') => self.remove(true),
+            KeyCode::Char('m' | 'r' | 'R' | 'f') => self.say("Writing isn't there yet", false),
             _ => {}
+        }
+    }
+
+    /// Opens the next Message, older, or the previous one, newer.
+    fn step(&mut self, older: bool) {
+        let Some(index) = &mut self.index else { return };
+        if index.step(older) {
+            self.open_current();
+        } else {
+            self.say(
+                if older {
+                    "No older Message"
+                } else {
+                    "No newer Message"
+                },
+                false,
+            );
         }
     }
 
     fn close_pager(&mut self) {
         self.pager = None;
+        self.opened = None;
         self.pictures.keep(None, |_| false);
         // Standing alone, as `muttrs view` opens it, the Pager is all there is.
-        self.quit = true;
+        if self.standalone {
+            self.quit = true;
+        }
     }
 
     fn prompt_key(&mut self, key: KeyEvent) {
@@ -296,6 +716,8 @@ impl App {
                     PromptKind::Search if !text.is_empty() => {
                         if let Some(pager) = &mut self.pager {
                             pager.search_for(text);
+                        } else if let Some(index) = &mut self.index {
+                            index.search_for(text);
                         }
                     }
                     PromptKind::Search => {}
@@ -307,11 +729,39 @@ impl App {
     }
 
     fn command(&mut self, command: &str) {
-        match command {
+        let (name, argument) = command
+            .split_once(' ')
+            .map_or((command, ""), |(name, argument)| (name, argument.trim()));
+        match name {
             "" => {}
             "q" | "quit" | "q!" | "qa" => self.quit = true,
             "help" | "h" => self.help(),
+            "refresh" | "sync" => self.refresh(),
+            "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             _ => self.say(&format!("Not a command: {command}"), true),
+        }
+    }
+
+    /// Opens the Mailbox called `wanted` (by its name for people, or on the server), of the Account shown first.
+    fn change_mailbox(&mut self, wanted: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        let found = self.accounts.get(account).and_then(|state| {
+            state
+                .mailboxes
+                .iter()
+                .find(|mailbox| {
+                    mailbox.label().eq_ignore_ascii_case(wanted)
+                        || mailbox.name.eq_ignore_ascii_case(wanted)
+                        || mailbox.path.join("/").eq_ignore_ascii_case(wanted)
+                })
+                .map(|mailbox| mailbox.name.clone())
+        });
+        match found {
+            Some(name) => {
+                self.close_pager();
+                self.open_mailbox(account, &name);
+            }
+            None => self.say(&format!("No Mailbox called {wanted}"), true),
         }
     }
 
@@ -399,7 +849,25 @@ impl App {
                         ("v", "Attachments: open or save"),
                     ],
                 ),
-                ("Anywhere", &[("?", "these keys"), (":q q", "quit")]),
+                (
+                    "Mailboxes",
+                    &[
+                        ("j k g G", "move"),
+                        ("Enter", "open"),
+                        ("/ n N", "search senders and subjects"),
+                        ("J K", "in the Pager: the next Message, the previous"),
+                        ("F U", "flag, mark Unread or read"),
+                        ("d a", "delete (to Trash), archive"),
+                        ("Tab h l", "the sidebar, the Index"),
+                        ("\\", "show or hide the sidebar"),
+                        ("$ :refresh", "ask for what's new"),
+                        (":cd NAME", "open a Mailbox by name"),
+                    ],
+                ),
+                (
+                    "Anywhere",
+                    &[("?", "these keys"), (":q q", "quit, or close the Pager")],
+                ),
             ],
         ));
     }
@@ -470,11 +938,98 @@ impl App {
                 pixel_ratio: self.config.pixel_ratio,
             };
             pager.draw(body, buffer, &mut cx);
+        } else if !self.standalone {
+            self.draw_main(body, buffer);
         }
         if let Some(overlay) = &mut self.overlay {
             overlay.draw(body, buffer, &self.theme);
         }
         self.draw_status(status, frame);
+    }
+
+    /// The sidebar, then the Index.
+    fn draw_main(&mut self, area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+        let sidebar_width = if self.sidebar_shown {
+            (area.width / 4).clamp(18, 32).min(area.width / 2)
+        } else {
+            0
+        };
+        if sidebar_width > 0 {
+            let open = self
+                .index
+                .as_ref()
+                .map(|index| (index.account, index.mailbox.as_str()));
+            self.sidebar.draw(
+                Rect {
+                    width: sidebar_width,
+                    ..area
+                },
+                buffer,
+                &sidebar::Draw {
+                    accounts: &self.accounts,
+                    open,
+                    focused: self.focus == Focus::Sidebar,
+                    theme: &self.theme,
+                    icons: &self.icons,
+                },
+            );
+        }
+        let index_area = Rect {
+            x: area.x + sidebar_width,
+            width: area.width - sidebar_width,
+            ..area
+        };
+        if let Some(index) = &mut self.index {
+            index.draw(
+                index_area,
+                buffer,
+                &index::Draw {
+                    theme: &self.theme,
+                    icons: &self.icons,
+                    focused: self.focus == Focus::Index,
+                },
+            );
+        } else {
+            let waiting = Line::styled(
+                format!(" {}Connecting…", self.icons.loading),
+                self.theme.dim,
+            );
+            buffer.set_line(index_area.x, index_area.y, &waiting, index_area.width);
+        }
+    }
+
+    /// What the status line says on its left when there's no notice.
+    fn status_left(&self) -> String {
+        if let Some(pager) = &self.pager {
+            return format!(" {}", pager.message().subject);
+        }
+        let Some(index) = &self.index else {
+            return " muttrs".into();
+        };
+        let account = self
+            .accounts
+            .get(index.account)
+            .map_or("", |state| state.name.as_str());
+        let counts = self
+            .accounts
+            .get(index.account)
+            .and_then(|state| state.counts.get(&index.mailbox));
+        let unread = counts.map_or(index.unread(), |counts| counts.unread as usize);
+        let messages = if index.loaded {
+            let listed = if u32::try_from(index.len()).unwrap_or(u32::MAX) < index.exists {
+                format!(" (newest {} listed)", index.len())
+            } else {
+                String::new()
+            };
+            let messages = match index.exists {
+                1 => "1 Message".to_owned(),
+                count => format!("{count} Messages"),
+            };
+            format!(" · {messages}, {unread} Unread{listed}")
+        } else {
+            String::new()
+        };
+        format!(" {account} › {}{messages}", index.label)
     }
 
     fn draw_status(&self, area: Rect, frame: &mut Frame<'_>) {
@@ -506,6 +1061,12 @@ impl App {
                 pager::Body::Plain => "Plain".to_owned(),
             });
             right.push(pager.position());
+        } else if let Some((query, at, of)) = self.index.as_ref().and_then(Index::search_status) {
+            right.push(match (at, of) {
+                (_, 0) => format!("/{query}: no match"),
+                (Some(at), of) => format!("/{query} {at}/{of}"),
+                (None, of) => format!("/{query} ({of})"),
+            });
         }
         right.push("? keys".to_owned());
         let right = format!(" {} ", right.join(" · "));
@@ -518,8 +1079,7 @@ impl App {
                     self.theme.status
                 },
             ),
-            (None, Some(pager)) => Span::raw(format!(" {}", pager.message().subject)),
-            (None, None) => Span::raw(" muttrs"),
+            (None, _) => Span::raw(self.status_left()),
         };
         let room = usize::from(area.width).saturating_sub(right.width());
         let left = Span::styled(truncate(&left.content, room), left.style);
@@ -613,11 +1173,49 @@ fn open_attachment(pager: u64, name: &str, bytes: &[u8]) -> anyhow::Result<PathB
 ///
 /// If the terminal can't be used.
 pub(crate) async fn view(setup: Setup, message: Message) -> anyhow::Result<()> {
-    let (events, mut received) = mpsc::unbounded_channel();
-    let kitty = setup.protocol == Some(Protocol::Kitty);
-    let mut app = App::new(setup, events);
+    let (events, received) = mpsc::unbounded_channel();
+    let mut app = App::new(setup, events, Vec::new(), true);
     app.open(Arc::new(message));
+    run(app, received).await
+}
 
+/// The mail client, on `accounts`, until the user quits.
+///
+/// # Errors
+///
+/// If the terminal can't be used, or TLS can't be set up for an Account.
+pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result<()> {
+    let (events, received) = mpsc::unbounded_channel();
+    let mut states = Vec::new();
+    for (index, account) in accounts.into_iter().enumerate() {
+        let name = account.name.clone();
+        let gmail = account.gmail;
+        let cache = xdg::cache_dir().map(|cache| cache.join("accounts").join(&name).join("bodies"));
+        let sender = events.clone();
+        let client = Client::spawn(
+            account,
+            muttrs_mail::cache::Cache::new(cache),
+            Arc::new(move |update| {
+                let _ = sender.send(Event::Account(index, update));
+            }),
+        )
+        .with_context(|| format!("setting up account {name:?}"))?;
+        states.push(AccountState {
+            name,
+            client,
+            connection: Connection::Connecting,
+            mailboxes: Vec::new(),
+            counts: std::collections::HashMap::new(),
+            gmail,
+        });
+    }
+    let app = App::new(setup, events, states, false);
+    run(app, received).await
+}
+
+/// Draws `app` as events come, until it quits.
+async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyhow::Result<()> {
+    let kitty = app.pictures.is_kitty();
     let mut terminal = ratatui::try_init().context("setting up the terminal")?;
     let mut out = io::stdout();
     let outcome = async {

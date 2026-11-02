@@ -85,10 +85,14 @@ Tested against GreenMail and Dovecot in containers ([development.md](development
 TLS, STARTTLS, XOAUTH2, refusals, and an Account's client end to end, IDLE included. Not tested against Gmail or
 Outlook themselves.
 
-### 5. The TUI over Accounts
+### 5. The TUI over Accounts ✅
 
-- [ ] Sidebar of Accounts and Mailboxes, Index, Pager, status line, `:` commands, help
-- [ ] Keys after mutt and vim (see the README)
+- [x] Sidebar of Accounts and Mailboxes (Roles first, then the hierarchy), Index, Pager, status line, `:` commands,
+      help
+- [x] Keys after mutt and vim (see the README); flags, deleting and archiving show at once, before the server says
+- [x] `muttrs login NAME`
+
+Tried in tmux against the test servers: reading, stepping with `J`/`K`, flagging, deleting to Trash, `:cd`.
 
 ### 6. Writing (muttrs-mail + muttrs)
 

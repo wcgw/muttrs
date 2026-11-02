@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
+use muttrs_mail::AccountConfig;
 use serde::Deserialize;
 
 use crate::xdg;
@@ -31,6 +32,9 @@ pub(crate) struct Config {
     pub(crate) pixel_ratio: Option<f32>,
     /// Where Attachments are saved; `~/Downloads` by default.
     pub(crate) download_dir: Option<String>,
+    /// The Accounts, as `[[account]]` tables, in the sidebar's order.
+    #[serde(rename = "account")]
+    pub(crate) accounts: Vec<AccountConfig>,
 }
 
 impl Default for Config {
@@ -45,6 +49,7 @@ impl Default for Config {
             max_picture_rows: 24,
             pixel_ratio: None,
             download_dir: None,
+            accounts: Vec::new(),
         }
     }
 }
@@ -132,6 +137,16 @@ impl Config {
         {
             bail!("in {}: pixel_ratio is between 0.25 and 8", path.display());
         }
+        let mut names = std::collections::HashSet::new();
+        for account in &config.accounts {
+            if !names.insert(account.name.as_str()) {
+                bail!(
+                    "in {}: two accounts are called {:?}",
+                    path.display(),
+                    account.name
+                );
+            }
+        }
         if config.pager_width < 20 {
             bail!("in {}: pager_width is at least 20", path.display());
         }
@@ -173,6 +188,24 @@ mod tests {
         assert_eq!(config.images, Images::Blocks);
         assert_eq!(config.prefer, Prefer::Plain);
         assert_eq!(config.pager_width, 80);
+    }
+
+    #[test]
+    fn accounts() {
+        let config = parse(
+            "[[account]]\nname = \"work\"\nemail = \"a@example.com\"\nprovider = \"gmail\"\n\
+             [account.oauth2]\nclient_id = \"id\"\n\n\
+             [[account]]\nname = \"home\"\nemail = \"b@example.com\"\nimap = { host = \"imap.example.com\" }\n\
+             smtp = { host = \"smtp.example.com\", port = 587, tls = \"starttls\" }\n",
+        )
+        .unwrap();
+        let names: Vec<&str> = config
+            .accounts
+            .iter()
+            .map(|account| account.name.as_str())
+            .collect();
+        assert_eq!(names, ["work", "home"]);
+        assert!(parse("[[account]]\nname = \"a\"\nemail = \"a@x\"\n[[account]]\nname = \"a\"\nemail = \"b@x\"").is_err());
     }
 
     #[test]

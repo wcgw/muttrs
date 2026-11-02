@@ -53,6 +53,11 @@ impl Pictures {
         }
     }
 
+    /// Whether Pictures are drawn through kitty's placeholders, which live in the terminal's memory.
+    pub(crate) fn is_kitty(&self) -> bool {
+        self.protocol == Some(Protocol::Kitty)
+    }
+
     /// Whether Pictures are drawn at all.
     pub(crate) fn enabled(&self) -> bool {
         self.protocol.is_some()
