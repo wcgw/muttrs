@@ -20,9 +20,9 @@ use crate::{oauth2, secret, smtp, tls};
 /// How many of a Mailbox's newest Messages are listed when it's first opened.
 const WINDOW: u32 = 300;
 /// How long IDLE waits before starting again: Gmail drops it after about 30 minutes.
-const IDLE_RENEWAL: Duration = Duration::from_secs(25 * 60);
+const IDLE_RENEWAL: Duration = Duration::from_mins(25);
 /// How often a server without IDLE is asked what's new, and an idle session is kept alive.
-const POLL: Duration = Duration::from_secs(5 * 60);
+const POLL: Duration = Duration::from_mins(5);
 /// The longest wait before connecting again.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
