@@ -644,6 +644,7 @@ fn read_envelope(fetch: &Fetch) -> Option<Envelope> {
 }
 
 /// UIDs as a UID set, runs of consecutive UIDs as ranges: `1:3,7`.
+#[must_use]
 pub fn uid_set(uids: &[u32]) -> String {
     let mut sorted = uids.to_vec();
     sorted.sort_unstable();

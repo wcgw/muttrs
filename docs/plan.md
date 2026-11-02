@@ -117,7 +117,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] Threads in the Index (client-side, after JWZ, without grouping by subject): replies under what they reply
       to, threads by their latest Message, repeated subjects hidden, folding (`za`, `zM`, `zR`); `T` switches
 - [ ] Gmail's own threads (`X-GM-THRID`), for Messages whose References don't say
-- [ ] Search on the server: `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`
+- [x] Search on the server (`S`): `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`; the newest 300 found
+      listed as an Index of their own until `Esc`
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
 - [ ] An Envelope cache, kept up to date with CONDSTORE, so that a Mailbox opens at once
 - [ ] Moving to a Mailbox by name (`s`), and Selections to act on several Messages

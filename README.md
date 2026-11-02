@@ -97,10 +97,16 @@ They work as in mutt and vim. `?` shows the ones that apply.
 |---|---|
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
+
+## Searching
+
+`/` searches what the Index lists, by sender and subject, as you'd search in vim. `S` searches the whole Mailbox on
+the server, for text anywhere in its Messages, and lists the newest 300 it finds as an Index of their own until
+`Esc`. On Gmail, `S` takes Gmail's own syntax: `from:ann has:attachment after:2026/10/01`.
 
 ## Writing
 
