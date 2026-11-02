@@ -44,8 +44,6 @@ struct Row {
     folded_uids: Vec<u32>,
     /// Whether any of them is Unread.
     folded_unread: bool,
-    /// Whether its subject shows: not when it's its thread head's, as a reply's usually is.
-    subject: bool,
 }
 
 pub(crate) struct Index {
@@ -161,7 +159,6 @@ impl Index {
                     folded: 0,
                     folded_uids: Vec::new(),
                     folded_unread: false,
-                    subject: true,
                 })
                 .collect()
         };
@@ -177,13 +174,11 @@ impl Index {
     fn threads(&self) -> Vec<Row> {
         let threaded = thread::threads(&self.envelopes);
         let mut rows: Vec<Row> = Vec::with_capacity(threaded.len());
-        let mut head_subject = "";
         let mut head = 0;
         for (at, message) in threaded.iter().enumerate() {
             let envelope = &self.envelopes[message.envelope];
             if message.depth == 0 {
                 head = envelope.uid;
-                head_subject = thread::base_subject(&envelope.subject);
                 let folded = self.folded.contains(&head) && message.replies > 0;
                 let replies = &threaded[at + 1..at + 1 + message.replies];
                 let folded_unread = folded
@@ -204,7 +199,6 @@ impl Index {
                         Vec::new()
                     },
                     folded_unread,
-                    subject: true,
                 });
             } else if !self.folded.contains(&head) {
                 let tree = message
@@ -224,7 +218,6 @@ impl Index {
                     folded: 0,
                     folded_uids: Vec::new(),
                     folded_unread: false,
-                    subject: thread::base_subject(&envelope.subject) != head_subject,
                 });
             }
         }
@@ -595,14 +588,12 @@ impl Index {
             room = room.saturating_sub(count.width());
             spans.push(Span::styled(count, theme.accent));
         }
-        if row.subject {
-            let subject = if envelope.subject.is_empty() {
-                "(no subject)"
-            } else {
-                &envelope.subject
-            };
-            spans.push(Span::styled(truncate(subject, room), text));
-        }
+        let subject = if envelope.subject.is_empty() {
+            "(no subject)"
+        } else {
+            &envelope.subject
+        };
+        spans.push(Span::styled(truncate(subject, room), text));
         Line::from(spans)
     }
 }
@@ -717,28 +708,43 @@ mod tests {
             ],
             4,
         );
-        let shown = |index: &Index| -> Vec<(u32, String, bool)> {
+        let shown = |index: &Index| -> Vec<(u32, String)> {
             index
                 .rows
                 .iter()
-                .map(|row| {
-                    (
-                        index.envelopes[row.envelope].uid,
-                        row.tree.clone(),
-                        row.subject,
-                    )
-                })
+                .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
                 .collect()
         };
         // The Lunch thread's latest reply (day 4) is newer than the Report (day 3).
         assert_eq!(
             shown(&index),
             [
-                (1, String::new(), true),
-                (2, "└─".into(), false),
-                (3, "  └─".into(), false),
-                (4, String::new(), true)
+                (1, String::new()),
+                (2, "└─".into()),
+                (3, "  └─".into()),
+                (4, String::new())
             ]
+        );
+
+        // Every row says its subject, replies' too, the same as their thread's head's though it is.
+        let theme = crate::theme::Theme::named("terminal", &Icons::PLAIN).unwrap();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 4));
+        index.draw(
+            buffer.area,
+            &mut buffer,
+            &Draw {
+                theme: &theme,
+                icons: &Icons::PLAIN,
+                focused: true,
+            },
+        );
+        let row = |y: u16| -> String { (0..100).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(0).trim_end().ends_with(" Lunch"), "{:?}", row(0));
+        assert!(row(1).trim_end().ends_with("└─ Re: Lunch"), "{:?}", row(1));
+        assert!(
+            row(2).trim_end().ends_with("  └─ Re: Lunch"),
+            "{:?}",
+            row(2)
         );
         index.move_by(2);
         index.toggle_fold();

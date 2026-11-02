@@ -116,7 +116,7 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] Resuming a Postponed Draft (`e` in Drafts): its headers, Bcc too, Markdown and Attachments, the copy kept
       expunged once it's sent or postponed again
 - [x] Threads in the Index (client-side, after JWZ, without grouping by subject): replies under what they reply
-      to, threads by their latest Message, repeated subjects hidden, folding (`za`, `zM`, `zR`); `T` switches
+      to, threads by their latest Message, folding (`za`, `zM`, `zR`); `T` switches
 - [ ] Gmail's own threads (`X-GM-THRID`), for Messages whose References don't say
 - [x] Search on the server (`S`): `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`; the newest 300 found
       listed as an Index of their own until `Esc`

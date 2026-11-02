@@ -209,23 +209,6 @@ fn flatten(node: &Node, depth: usize, ancestors: &[Branch], head: usize, rows: &
     }
 }
 
-/// `subject` without its `Re:`s and `Fwd:`s, as the subject of a thread's replies is compared to its head's.
-#[must_use]
-pub fn base_subject(subject: &str) -> &str {
-    let mut rest = subject.trim();
-    loop {
-        let lower = rest.to_ascii_lowercase();
-        let stripped = ["re:", "fwd:", "fw:", "aw:", "sv:", "réf:"]
-            .iter()
-            .find(|prefix| lower.starts_with(*prefix))
-            .map(|prefix| rest[prefix.len()..].trim_start());
-        match stripped {
-            Some(after) => rest = after,
-            None => return rest,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,12 +302,5 @@ mod tests {
         ];
         let rows = threads(&envelopes);
         assert_eq!(rows.len(), 4, "every Message once: {:?}", drawn(&envelopes));
-    }
-
-    #[test]
-    fn base_subjects() {
-        assert_eq!(base_subject("Re: RE: Fwd: Lunch"), "Lunch");
-        assert_eq!(base_subject("Lunch"), "Lunch");
-        assert_eq!(base_subject("Rebate"), "Rebate");
     }
 }
