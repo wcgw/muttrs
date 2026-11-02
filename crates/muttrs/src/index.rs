@@ -81,6 +81,8 @@ pub(crate) struct Index {
     cursor: usize,
     top: usize,
     height: usize,
+    /// The first row drawn around the cursor, as above the Pager.
+    around: usize,
     search: Option<Search>,
 }
 
@@ -116,6 +118,7 @@ impl Index {
             cursor: 0,
             top: 0,
             height: 0,
+            around: 0,
             search: None,
         }
     }
@@ -355,11 +358,6 @@ impl Index {
         self.envelopes.get(row.envelope)
     }
 
-    pub(crate) fn current_mut(&mut self) -> Option<&mut Envelope> {
-        let row = self.rows.get(self.cursor)?;
-        self.envelopes.get_mut(row.envelope)
-    }
-
     pub(crate) fn find(&self, uid: u32) -> Option<&Envelope> {
         self.envelopes.iter().find(|envelope| envelope.uid == uid)
     }
@@ -416,7 +414,15 @@ impl Index {
     /// Puts the cursor on the row drawn `offset` rows down from the top of the Index; `false` if it was there
     /// already, as a second click is, or there's no row there.
     pub(crate) fn click(&mut self, offset: usize) -> bool {
-        let row = self.top + offset;
+        self.put_cursor(self.top + offset)
+    }
+
+    /// As [`Index::click`], on the rows drawn around the cursor.
+    pub(crate) fn click_around_cursor(&mut self, offset: usize) -> bool {
+        self.put_cursor(self.around + offset)
+    }
+
+    fn put_cursor(&mut self, row: usize) -> bool {
         if row >= self.rows.len() || row == self.cursor {
             return false;
         }
@@ -511,8 +517,29 @@ impl Index {
         ))
     }
 
+    /// Draws the rows around the cursor's, it a third of the way down (unless near the top or the end), as mutt's
+    /// mini-index above the Pager, leaving where the Index itself is scrolled to as it was.
+    pub(crate) fn draw_around_cursor(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
+        let height = usize::from(area.height);
+        self.around = self
+            .cursor
+            .saturating_sub(height / 3)
+            .min(self.rows.len().saturating_sub(height));
+        self.draw_rows(self.around, area, buffer, cx);
+    }
+
     pub(crate) fn draw(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
         self.height = usize::from(area.height);
+        if self.cursor < self.top {
+            self.top = self.cursor;
+        } else if self.height > 0 && self.cursor >= self.top + self.height {
+            self.top = self.cursor + 1 - self.height;
+        }
+        self.draw_rows(self.top, area, buffer, cx);
+    }
+
+    /// Draws the rows from `top` down, in `area`.
+    fn draw_rows(&self, top: usize, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
         if !self.loaded {
             let waiting = Line::styled(
                 format!(" {}Fetching {}…", cx.icons.loading, self.label),
@@ -530,21 +557,16 @@ impl Index {
             );
             return;
         }
-        if self.cursor < self.top {
-            self.top = self.cursor;
-        } else if self.height > 0 && self.cursor >= self.top + self.height {
-            self.top = self.cursor + 1 - self.height;
-        }
         let now = Zoned::now();
         let matches = self.search.as_ref().map(|search| search.matches.as_slice());
         for (index, row) in self
             .rows
             .iter()
             .enumerate()
-            .skip(self.top)
-            .take(self.height)
+            .skip(top)
+            .take(usize::from(area.height))
         {
-            let y = area.y + u16::try_from(index - self.top).unwrap_or(0);
+            let y = area.y + u16::try_from(index - top).unwrap_or(0);
             let line = self.line(row, usize::from(area.width), &now, cx);
             buffer.set_line(area.x, y, &line, area.width);
             let row_area = Rect::new(area.x, y, area.width, 1);
@@ -889,6 +911,77 @@ mod tests {
                 .collect::<String>(),
             ""
         );
+    }
+
+    #[test]
+    fn around_the_cursor_it_a_third_of_the_way_down() {
+        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None, false);
+        let day = |uid: u32| i8::try_from(uid).unwrap();
+        index.set(
+            (1..=10)
+                .map(|uid| envelope(uid, day(uid), &format!("m{uid}"), "Ann"))
+                .collect(),
+            10,
+        );
+        let theme = crate::theme::Theme::named("terminal", &Icons::PLAIN).unwrap();
+        // The subjects of the 6 rows drawn, newest first: m10 the first row.
+        let drawn = |index: &mut Index| -> Vec<String> {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
+            index.draw_around_cursor(
+                buffer.area,
+                &mut buffer,
+                &Draw {
+                    theme: &theme,
+                    icons: &Icons::PLAIN,
+                    focused: false,
+                },
+            );
+            (0..6)
+                .map(|y| {
+                    let row: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
+                    row.split_whitespace().last().unwrap_or_default().to_owned()
+                })
+                .collect()
+        };
+        assert_eq!(
+            drawn(&mut index),
+            ["m10", "m9", "m8", "m7", "m6", "m5"],
+            "near the top"
+        );
+        index.move_by(5);
+        assert_eq!(
+            drawn(&mut index),
+            ["m7", "m6", "m5", "m4", "m3", "m2"],
+            "m5, the cursor's, on the third row"
+        );
+        assert!(index.click_around_cursor(0));
+        assert_eq!(
+            index.current().map(|e| e.uid),
+            Some(7),
+            "the row drawn first"
+        );
+        index.move_by(6);
+        assert_eq!(
+            drawn(&mut index),
+            ["m6", "m5", "m4", "m3", "m2", "m1"],
+            "near the end"
+        );
+
+        // The Index itself, drawn whole again, is scrolled as it was, though it was drawn from m9 around m7.
+        index.move_by(-6);
+        assert_eq!(drawn(&mut index)[0], "m9");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
+        index.draw(
+            buffer.area,
+            &mut buffer,
+            &Draw {
+                theme: &theme,
+                icons: &Icons::PLAIN,
+                focused: true,
+            },
+        );
+        let first: String = (0..60).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(first.trim_end().ends_with("m10"), "{first:?}");
     }
 
     #[test]
