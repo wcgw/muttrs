@@ -70,29 +70,19 @@ pub fn threads(envelopes: &[Envelope]) -> Vec<Threaded> {
     let mut own: Vec<usize> = Vec::with_capacity(envelopes.len());
     for (index, envelope) in envelopes.iter().enumerate() {
         // A Message without an ID, or with one another has, gets a container of its own.
-        let container = match envelope.message_id.as_deref() {
-            Some(id) => {
-                let found = container_of(id, &mut containers);
-                if containers[found].envelope.is_none() {
-                    found
-                } else {
-                    containers.push(Container {
-                        envelope: None,
-                        parent: None,
-                        children: Vec::new(),
-                    });
-                    containers.len() - 1
-                }
-            }
-            None => {
-                containers.push(Container {
-                    envelope: None,
-                    parent: None,
-                    children: Vec::new(),
-                });
-                containers.len() - 1
-            }
-        };
+        let listed = envelope
+            .message_id
+            .as_deref()
+            .map(|id| container_of(id, &mut containers))
+            .filter(|&found| containers[found].envelope.is_none());
+        let container = listed.unwrap_or_else(|| {
+            containers.push(Container {
+                envelope: None,
+                parent: None,
+                children: Vec::new(),
+            });
+            containers.len() - 1
+        });
         containers[container].envelope = Some(index);
         own.push(container);
     }
@@ -147,7 +137,7 @@ pub fn threads(envelopes: &[Envelope]) -> Vec<Threaded> {
     let mut rows = Vec::with_capacity(envelopes.len());
     for thread in &threads {
         let head = rows.len();
-        flatten(thread, 0, &mut Vec::new(), head, &mut rows);
+        flatten(thread, 0, &[], head, &mut rows);
         rows[head].replies = rows.len() - head - 1;
     }
     rows
@@ -195,23 +185,17 @@ fn latest(node: &Node, date: &impl Fn(&Node) -> Option<Timestamp>) -> Option<Tim
 }
 
 /// `node` and its replies as rows, after the branches of its ancestors' levels.
-fn flatten(
-    node: &Node,
-    depth: usize,
-    ancestors: &mut Vec<Branch>,
-    head: usize,
-    rows: &mut Vec<Threaded>,
-) {
+fn flatten(node: &Node, depth: usize, ancestors: &[Branch], head: usize, rows: &mut Vec<Threaded>) {
     rows.push(Threaded {
         envelope: node.envelope,
         depth,
-        branches: ancestors.clone(),
+        branches: ancestors.to_vec(),
         head,
         replies: 0,
     });
     for (index, child) in node.children.iter().enumerate() {
         let last = index + 1 == node.children.len();
-        let mut branches = ancestors.clone();
+        let mut branches = ancestors.to_vec();
         // What this level is for the levels below: a line through, if more replies follow.
         if let Some(own) = branches.last_mut() {
             *own = match *own {
@@ -221,7 +205,7 @@ fn flatten(
             };
         }
         branches.push(if last { Branch::Corner } else { Branch::Tee });
-        flatten(child, depth + 1, &mut branches, head, rows);
+        flatten(child, depth + 1, &branches, head, rows);
     }
 }
 
