@@ -116,8 +116,9 @@ the server, for text anywhere in its Messages, and lists the newest 300 it finds
 
 ## Writing
 
-`m`, `r`, `R` and `f` open a Draft in your editor (`editor` in the configuration, else `$VISUAL`, `$EDITOR` or `vi`)
-as a file of headers, a blank line, then the body:
+`m` asks whom the Message is to (`Tab` and `Shift-Tab` complete addresses, from those muttrs has seen, most often
+seen first) and its subject, as mutt does. Then `m`, `r`, `R` and `f` open a Draft in your editor (`editor` in the
+configuration, else `$VISUAL`, `$EDITOR` or `vi`) as a file of headers, a blank line, then the body:
 
 ```
 From: Alex <alex@example.com>
@@ -132,6 +133,10 @@ Thursday works, see you at **noon**.
 On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
 > Lunch on Thursday?
 ```
+
+The addresses muttrs has seen are kept in `~/.cache/muttrs/addresses.txt`, one a line, which vim and Neovim can
+complete from in the Draft's headers too (`Ctrl-X Ctrl-K`), with `autocmd FileType mail setlocal
+dictionary+=~/.cache/muttrs/addresses.txt iskeyword+=@-@,.,-`.
 
 The Account's signature goes in after a `-- ` line, above the quote in a reply. A reply is from the address of the
 Account's (its own, or one of its `identities`) the Message was sent to. Quitting the editor on a new Draft without

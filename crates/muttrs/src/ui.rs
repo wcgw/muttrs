@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::addresses::AddressBook;
 use crate::compose::{self, Compose};
 use crate::config::Config;
 use crate::icons::Icons;
@@ -58,6 +59,27 @@ pub(crate) struct Setup {
 struct Prompt {
     kind: PromptKind,
     text: String,
+    /// The completions `Tab` goes through, while it does.
+    completing: Option<Completing>,
+}
+
+impl Prompt {
+    fn new(kind: PromptKind, text: String) -> Self {
+        Self {
+            kind,
+            text,
+            completing: None,
+        }
+    }
+}
+
+/// Completions of the address being typed.
+struct Completing {
+    /// What's before it: the addresses typed already.
+    before: String,
+    candidates: Vec<String>,
+    /// The one shown.
+    at: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,6 +90,10 @@ enum PromptKind {
     Attach,
     /// What to search the server for.
     Server,
+    /// Whom a new Message is to, before its subject is asked.
+    To,
+    /// A new Message's subject, after whom it's to.
+    Subject,
 }
 
 /// What's being written.
@@ -137,6 +163,10 @@ pub(crate) struct App {
     write_when_fetched: Option<Writing>,
     /// The first key of a pair typed, as `z` of `za`.
     pending: Option<char>,
+    /// Whom the new Message is to, while its subject is asked.
+    writing_to: Option<Vec<muttrs_mail::Address>>,
+    /// The addresses seen, to complete with.
+    addresses: AddressBook,
     quit: bool,
 }
 
@@ -179,12 +209,26 @@ impl App {
             edit: false,
             write_when_fetched: None,
             pending: None,
+            writing_to: None,
+            addresses: if standalone {
+                AddressBook::default()
+            } else {
+                AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
+            },
             quit: false,
         }
     }
 
     /// Opens `message` in the Pager.
     fn open(&mut self, message: Arc<Message>) {
+        self.addresses.learn(
+            message
+                .from
+                .iter()
+                .chain(&message.to)
+                .chain(&message.cc)
+                .chain(&message.reply_to),
+        );
         let id = self.next_pager;
         self.next_pager += 1;
         let mut pager = Pager::new(
@@ -282,6 +326,9 @@ impl App {
                 envelopes,
                 exists,
             } => {
+                self.addresses.learn(envelopes.iter().flat_map(|envelope| {
+                    envelope.from.iter().chain(&envelope.to).chain(&envelope.cc)
+                }));
                 // While a search's results show, the Mailbox's Index is kept up to date aside.
                 let index = match &mut self.searched {
                     Some(searched) => Some(searched),
@@ -377,12 +424,8 @@ impl App {
             return;
         }
         if writing == Writing::New {
-            let account = self.index.as_ref().map_or(0, |index| index.account);
-            let Some(state) = self.accounts.get(account) else {
-                return;
-            };
-            let draft = muttrs_mail::compose::Draft::new(&state.sender);
-            self.start(account, draft, None);
+            // Whom to, then what about, as mutt asks, before the editor.
+            self.prompt = Some(Prompt::new(PromptKind::To, String::new()));
             return;
         }
         if let (Some(pager), Some(opened)) = (&self.pager, &self.opened) {
@@ -1046,10 +1089,7 @@ impl App {
     }
 
     fn prompt(&mut self, kind: PromptKind) {
-        self.prompt = Some(Prompt {
-            kind,
-            text: String::new(),
-        });
+        self.prompt = Some(Prompt::new(kind, String::new()));
     }
 
     /// Asks every Account what's new, connecting again any that's offline.
@@ -1081,16 +1121,10 @@ impl App {
             KeyCode::Char('n') => pager.next_match(true),
             KeyCode::Char('N') => pager.next_match(false),
             KeyCode::Char('/') => {
-                self.prompt = Some(Prompt {
-                    kind: PromptKind::Search,
-                    text: String::new(),
-                });
+                self.prompt = Some(Prompt::new(PromptKind::Search, String::new()));
             }
             KeyCode::Char(':') => {
-                self.prompt = Some(Prompt {
-                    kind: PromptKind::Command,
-                    text: String::new(),
-                });
+                self.prompt = Some(Prompt::new(PromptKind::Command, String::new()));
             }
             KeyCode::Char('T') => {
                 if !pager.toggle_body() {
@@ -1162,8 +1196,14 @@ impl App {
         let Some(prompt) = &mut self.prompt else {
             return;
         };
+        if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            prompt.completing = None;
+        }
         match key.code {
-            KeyCode::Esc => self.prompt = None,
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.writing_to = None;
+            }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.prompt = None;
             }
@@ -1175,9 +1215,13 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 prompt.text.clear();
             }
+            KeyCode::Tab | KeyCode::BackTab if prompt.kind == PromptKind::To => {
+                let forward = key.code == KeyCode::Tab;
+                Self::complete(prompt, &self.addresses, forward);
+            }
             KeyCode::Char(character) => prompt.text.push(character),
             KeyCode::Enter => {
-                let Prompt { kind, text } = self.prompt.take().expect("a prompt");
+                let Prompt { kind, text, .. } = self.prompt.take().expect("a prompt");
                 match kind {
                     PromptKind::Search if !text.is_empty() => {
                         if let Some(pager) = &mut self.pager {
@@ -1190,10 +1234,70 @@ impl App {
                     PromptKind::Command => self.command(text.trim()),
                     PromptKind::Attach => self.attach(text.trim()),
                     PromptKind::Server => self.search_server(text.trim()),
+                    PromptKind::To => self.addressed(text),
+                    PromptKind::Subject => self.subject(&text),
                 }
             }
             _ => {}
         }
+    }
+
+    /// Completes the address being typed in `prompt` from `addresses`, going through the completions as `Tab` (or,
+    /// backwards, `Shift-Tab`) is pressed again.
+    fn complete(prompt: &mut Prompt, addresses: &AddressBook, forward: bool) {
+        if let Some(completing) = &mut prompt.completing {
+            let count = completing.candidates.len();
+            completing.at = if forward {
+                (completing.at + 1) % count
+            } else {
+                (completing.at + count - 1) % count
+            };
+            prompt.text = format!(
+                "{}{}",
+                completing.before, completing.candidates[completing.at]
+            );
+            return;
+        }
+        let (before, fragment) = match prompt.text.rsplit_once(',') {
+            Some((before, fragment)) => (format!("{before}, "), fragment),
+            None => (String::new(), prompt.text.as_str()),
+        };
+        let candidates = addresses.complete(fragment);
+        if let Some(first) = candidates.first() {
+            prompt.text = format!("{before}{first}");
+            prompt.completing = Some(Completing {
+                before,
+                candidates,
+                at: 0,
+            });
+        }
+    }
+
+    /// Takes whom a new Message is to, and asks its subject.
+    fn addressed(&mut self, to: String) {
+        match muttrs_mail::compose::parse_addresses(to.trim().trim_end_matches(',')) {
+            Ok(addresses) => {
+                self.writing_to = Some(addresses);
+                self.prompt = Some(Prompt::new(PromptKind::Subject, String::new()));
+            }
+            Err(error) => {
+                self.say(&error.to_string(), true);
+                self.prompt = Some(Prompt::new(PromptKind::To, to));
+            }
+        }
+    }
+
+    /// Takes a new Message's subject, and opens it in the editor.
+    fn subject(&mut self, subject: &str) {
+        let to = self.writing_to.take().unwrap_or_default();
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let mut draft = muttrs_mail::compose::Draft::new(&state.sender);
+        draft.to = to;
+        subject.trim().clone_into(&mut draft.subject);
+        self.start(account, draft, None);
     }
 
     fn command(&mut self, command: &str) {
@@ -1595,6 +1699,8 @@ impl App {
                 PromptKind::Command => ":",
                 PromptKind::Attach => "Attach: ",
                 PromptKind::Server => "Search the server: ",
+                PromptKind::To => "To: ",
+                PromptKind::Subject => "Subject: ",
             };
             let line = Line::from(vec![Span::raw(lead), Span::raw(prompt.text.clone())]);
             buffer.set_line(area.x, area.y, &line, area.width);
@@ -1817,6 +1923,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
         }
     }
     .await;
+    app.addresses.save();
     if kitty {
         let _ = muttrs_gfx::forget_all(&mut out);
     }
