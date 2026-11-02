@@ -6,7 +6,7 @@ muttrs reads mail over IMAP and sends it over SMTP, each over TLS or STARTTLS, a
 words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what's built and what's next is in
 [docs/plan.md](docs/plan.md).
 
-> Work in progress: reading works; writing is next. See the plan.
+> Work in progress: reading and writing work; threads and server-side search are next. See the plan.
 
 ## Requirements
 
@@ -75,6 +75,33 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
 | Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` as in the Index · `q` back |
+| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
+| A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
+
+## Writing
+
+`m`, `r`, `R` and `f` open a Draft in your editor (`editor` in the configuration, else `$VISUAL`, `$EDITOR` or `vi`)
+as a file of headers, a blank line, then the body:
+
+```
+From: Alex <alex@example.com>
+To: Ann <ann@example.com>
+Cc:
+Bcc:
+Subject: Re: Lunch
+Attach: ~/menu.pdf
+
+Thursday works, see you at **noon**.
+
+On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
+> Lunch on Thursday?
+```
+
+Its name ends in `.eml`, so that vim and Neovim edit it as mail. The body is Markdown, sent as it is (the plain text)
+and as the HTML it makes, in which each new line breaks the line, as in plain text mail. `Attach:` lines attach
+files. Saving and quitting shows the Draft as it will be sent, until `y` sends it through the Account's SMTP server;
+a copy goes to Sent (but on Gmail, which keeps its own), and what it replies to is flagged answered. `P` postpones it
+to the Drafts Mailbox.
 
 ## Reading a Message from a file
 
@@ -101,6 +128,7 @@ pager_width = 100             # the widest bodies are laid out, in cells
 max_picture_rows = 24         # the most rows a Picture takes
 # pixel_ratio = 2.0           # the terminal's pixels to a CSS pixel; guessed from the cells' size otherwise
 # download_dir = "~/Downloads"
+# editor = "nvim"             # what Drafts are written in; $VISUAL, $EDITOR or vi by default
 ```
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.

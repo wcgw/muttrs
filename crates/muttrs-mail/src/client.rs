@@ -11,10 +11,11 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::account::{Account, Auth, PasswordSource, Secret};
 use crate::cache::Cache;
+use crate::compose::Built;
 use crate::envelope::{Envelope, Flags};
 use crate::imap::{self, Credentials, Session};
 use crate::mailbox::{Counts, Mailbox, Role};
-use crate::{oauth2, secret, tls};
+use crate::{oauth2, secret, smtp, tls};
 
 /// How many of a Mailbox's newest Messages are listed when it's first opened.
 const WINDOW: u32 = 300;
@@ -82,6 +83,14 @@ pub enum Request {
         /// Whether it's a Draft, to be flagged Draft as well as Seen.
         draft: bool,
     },
+    /// Send a Message through the Account's SMTP server, then keep a copy in Sent (unless the server does) and
+    /// flag what it answers as answered.
+    Send {
+        /// The Message, made from its Draft.
+        built: Box<Built>,
+        /// The Message it answers, by its Mailbox and UID.
+        answers: Option<(String, u32)>,
+    },
 }
 
 /// A Flag the UI sets.
@@ -110,6 +119,8 @@ impl Flag {
 pub enum Update {
     /// Where the connection stands.
     Connection(Connection),
+    /// A Message was sent, or couldn't be, for this reason.
+    Sent(Result<(), String>),
     /// Its Mailboxes, as the server lists them.
     Mailboxes(Vec<Mailbox>),
     /// A Mailbox's Messages, counted.
@@ -178,6 +189,7 @@ impl Client {
         let (requests, received) = mpsc::unbounded_channel();
         let (inbox_changed, changes) = mpsc::unbounded_channel();
         let worker = Worker {
+            own: requests.clone(),
             account: Arc::clone(&account),
             tls: Arc::clone(&tls),
             credentials: Arc::clone(&credentials),
@@ -316,6 +328,8 @@ struct Window {
 }
 
 struct Worker {
+    /// What the worker asks of itself, after sending.
+    own: mpsc::UnboundedSender<Request>,
     account: Arc<Account>,
     tls: Arc<ClientConfig>,
     credentials: Arc<CredentialSource>,
@@ -474,6 +488,7 @@ impl Worker {
                 };
                 self.move_to(session, &mailbox, &uids, role).await?;
             }
+            Request::Send { built, answers } => self.send(*built, answers),
             Request::Append {
                 role,
                 message,
@@ -497,6 +512,49 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    /// Sends `built` in the background, so that reading goes on meanwhile; then asks for the copy in Sent and
+    /// the answered flag.
+    fn send(&self, built: Built, answers: Option<(String, u32)>) {
+        let (account, credentials, notify, own) = (
+            Arc::clone(&self.account),
+            Arc::clone(&self.credentials),
+            Arc::clone(&self.notify),
+            self.own.clone(),
+        );
+        tokio::spawn(async move {
+            let sent = async {
+                let signing_in = credentials.credentials().await?;
+                smtp::send(
+                    &account.smtp,
+                    account.ca_file.as_deref(),
+                    &signing_in,
+                    &built,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            }
+            .await;
+            if sent.is_ok() {
+                if account.copy_to_sent {
+                    let _ = own.send(Request::Append {
+                        role: Role::Sent,
+                        message: built.kept,
+                        draft: false,
+                    });
+                }
+                if let Some((mailbox, uid)) = answers {
+                    let _ = own.send(Request::Flag {
+                        mailbox,
+                        uids: vec![uid],
+                        flag: Flag::Answered,
+                        on: true,
+                    });
+                }
+            }
+            notify(Update::Sent(sent));
+        });
     }
 
     /// `result`, unless it failed in a way that leaves the connection fine (the server refused a command, say),

@@ -94,20 +94,35 @@ Outlook themselves.
 
 Tried in tmux against the test servers: reading, stepping with `J`/`K`, flagging, deleting to Trash, `:cd`.
 
-### 6. Writing (muttrs-mail + muttrs)
+### 6. Writing (muttrs-mail + muttrs) ✅
 
-- [ ] Compose, reply, reply all, forward, in `$EDITOR`, headers on top of the body
-- [ ] Markdown bodies sent as plain text plus HTML
-- [ ] Attachments
-- [ ] SMTP over `ssl` or `starttls`, password or XOAUTH2; a copy in Sent unless the server keeps one (Gmail)
-- [ ] Postponing to Drafts, and resuming
+- [x] Compose, reply, reply all, forward, in `$EDITOR` (a `.eml` file, so vim edits it as mail), headers on top of
+      the body; the TUI lets go of the terminal while the editor has it
+- [x] Markdown bodies sent as plain text plus HTML, new lines breaking lines; raw HTML in a Draft stays text
+- [x] Attachments: `Attach:` lines, `a` and `D` on the Draft; a forward keeps the original's
+- [x] SMTP over `ssl` or `starttls`, password or XOAUTH2; a copy in Sent unless the server keeps one (Gmail); what's
+      answered flagged so
+- [x] Postponing to Drafts
+
+Tried in tmux with Neovim as the editor, sending through the test servers: replies arrive with `In-Reply-To`, both
+bodies and their Attachments, and land in Sent. Postponing needs a recipient, as building the Message does.
+
+### 7. Next
+
+- [ ] Resuming a Postponed Draft (open it from Drafts, `e`)
+- [ ] Threads in the Index (client-side, after JWZ), and `X-GM-THRID` on Gmail
+- [ ] Search on the server: `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`
+- [ ] More of a Mailbox than its newest 300 Envelopes, as the Index scrolls; an Envelope cache with CONDSTORE
+- [ ] Moving to a Mailbox by name (`s`), and Selections to act on several Messages
+- [ ] Address completion from the Envelopes seen, in the Draft's headers
+- [ ] Signatures; per-Account `From` identities
+- [ ] Mouse wheel scrolling; themes from files
 
 ### Later
 
-- Threads (client-side, after JWZ), search on the server (`X-GM-RAW` on Gmail), an Envelope cache with CONDSTORE
-- Several Accounts side by side in one sidebar (the configuration already takes several)
 - Pictures inline in text (icons), animated GIFs, syntax highlighting in `<pre>`
 - PGP/S-MIME, notmuch
+- iTerm2's inline images, on macOS
 
 ## Testing
 

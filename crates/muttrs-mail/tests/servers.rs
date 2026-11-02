@@ -329,3 +329,160 @@ async fn an_accounts_client_lists_opens_reads_and_sees_new_mail() {
     assert_eq!(session.counts("Trash").await.unwrap().messages, 1);
     let _ = std::fs::remove_dir_all(cache);
 }
+
+/// A Draft from `from` to `to`, built.
+fn built(from: &str, to: &str, subject: &str) -> muttrs_mail::compose::Built {
+    use muttrs_mail::compose::Draft;
+    let mut draft = Draft::new(muttrs_mail::Address {
+        name: Some("Tester".into()),
+        email: from.into(),
+    });
+    draft.to = vec![muttrs_mail::Address {
+        name: None,
+        email: to.into(),
+    }];
+    draft.subject = subject.into();
+    draft.body = format!("**{subject}**, in Markdown.\n");
+    draft
+        .build(&muttrs_mail::compose::message_id(from))
+        .unwrap()
+}
+
+/// Waits until GreenMail has delivered a Message to `user`'s Inbox, and gives its subjects.
+async fn delivered(user: &str) -> Vec<String> {
+    let config = tls::client_config(Some(&ca())).unwrap();
+    for _ in 0..40 {
+        let mut session = Session::connect(
+            &endpoint(3993, Tls::Ssl),
+            Arc::clone(&config),
+            &password(user, "any"),
+        )
+        .await
+        .unwrap();
+        let selected = session.select("INBOX").await.unwrap();
+        if selected.exists > 0 {
+            return session
+                .newest(selected.exists, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|envelope| envelope.subject)
+                .collect();
+        }
+        session.logout().await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("nothing was delivered to {user}");
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn sending_over_tls_to_greenmail() {
+    let (from, to) = (user("smtps-from"), user("smtps-to"));
+    let sent = built(&from, &to, "over TLS");
+    muttrs_mail::smtp::send(
+        &endpoint(3465, Tls::Ssl),
+        Some(&ca()),
+        &password(&from, "any"),
+        &sent,
+    )
+    .await
+    .unwrap();
+    assert_eq!(delivered(&to).await, ["over TLS"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn sending_with_xoauth2() {
+    let (from, to) = (user("xoauth2-from"), user("xoauth2-to"));
+    let credentials = Credentials::Bearer {
+        username: from.clone(),
+        token: "ya29.any".into(),
+    };
+    muttrs_mail::smtp::send(
+        &endpoint(3465, Tls::Ssl),
+        Some(&ca()),
+        &credentials,
+        &built(&from, &to, "with XOAUTH2"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delivered(&to).await, ["with XOAUTH2"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn sending_with_starttls_through_dovecot() {
+    let to = user("starttls-to");
+    let from = "alex@localhost";
+    muttrs_mail::smtp::send(
+        &endpoint(31587, Tls::Starttls),
+        Some(&ca()),
+        &password("alex", "secret"),
+        &built(from, &to, "with STARTTLS"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delivered(&to).await, ["with STARTTLS"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn a_refused_password_is_no_sending() {
+    let error = muttrs_mail::smtp::send(
+        &endpoint(31587, Tls::Starttls),
+        Some(&ca()),
+        &password("alex", "wrong"),
+        &built("alex@localhost", "nobody@localhost", "refused"),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("31587"), "{error}");
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn an_accounts_client_sends_and_keeps_a_copy() {
+    let username = user("sender");
+    let to = user("sent-to");
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 31587, tls = \"starttls\" }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Send {
+        built: Box::new(built(&username, &to, "kept in Sent")),
+        answers: None,
+    });
+    let sent = until(&mut updates, |update| match update {
+        Update::Sent(sent) => Some(sent.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(sent, Ok(()));
+    assert_eq!(delivered(&to).await, ["kept in Sent"]);
+    let counts = until(&mut updates, |update| match update {
+        Update::Counts { mailbox, counts } if mailbox == "Sent" && counts.messages > 0 => {
+            Some(*counts)
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(counts.messages, 1);
+}

@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::compose::{self, Compose};
 use crate::config::Config;
 use crate::icons::Icons;
 use crate::index::{self, Index};
@@ -63,6 +64,17 @@ struct Prompt {
 enum PromptKind {
     Search,
     Command,
+    /// The path of a file to attach to the Draft.
+    Attach,
+}
+
+/// What's being written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Writing {
+    New,
+    Reply,
+    ReplyAll,
+    Forward,
 }
 
 /// Which pane keys go to, when the Pager isn't open.
@@ -86,6 +98,8 @@ struct Notice {
     error: bool,
 }
 
+// The flags are each what the UI is doing, not a state machine folded into bools.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct App {
     config: Config,
     theme: Theme,
@@ -107,6 +121,14 @@ pub(crate) struct App {
     next_pager: u64,
     /// Whether the Pager is all there is, as `muttrs view` opens it.
     standalone: bool,
+    /// The Draft being written.
+    compose: Option<Compose>,
+    /// How many Drafts this run has started, to name their files.
+    drafts: u64,
+    /// Whether the Draft is to be edited in `$EDITOR`, which the loop does between draws.
+    edit: bool,
+    /// What to write once the Message being fetched comes, as when replying from the Index.
+    write_when_fetched: Option<Writing>,
     quit: bool,
 }
 
@@ -143,6 +165,10 @@ impl App {
             notice: None,
             next_pager: 1,
             standalone,
+            compose: None,
+            drafts: 0,
+            edit: false,
+            write_when_fetched: None,
             quit: false,
         }
     }
@@ -265,7 +291,16 @@ impl App {
                 }
                 match body {
                     Ok(bytes) => match Message::parse(bytes.as_ref().clone()) {
-                        Ok(message) => self.open(Arc::new(message)),
+                        Ok(message) => {
+                            let message = Arc::new(message);
+                            match self.write_when_fetched.take() {
+                                Some(writing) => {
+                                    self.opened = None;
+                                    self.write_about(writing, account, &message, uid);
+                                }
+                                None => self.open(message),
+                            }
+                        }
                         Err(error) => self.say(&error.to_string(), true),
                     },
                     Err(why) => self.say(&format!("Couldn't fetch the Message: {why}"), true),
@@ -273,6 +308,208 @@ impl App {
             }
             Update::Done(done) => self.say(&done, false),
             Update::Failed(failed) => self.say(&failed, true),
+            Update::Sent(Ok(())) => {
+                if let Some(compose) = self
+                    .compose
+                    .take_if(|compose| compose.account == account && compose.sending)
+                {
+                    compose.finish();
+                }
+                self.say("Sent", false);
+            }
+            Update::Sent(Err(why)) => {
+                if let Some(compose) = &mut self.compose {
+                    compose.sending = false;
+                }
+                self.say(&format!("Not sent: {why}"), true);
+            }
+        }
+    }
+
+    /// Starts writing: a new Message, or one about the Message the Pager shows or the Index's cursor is on.
+    fn write(&mut self, writing: Writing) {
+        if self.standalone {
+            self.say("Writing needs an Account: run muttrs without `view`", true);
+            return;
+        }
+        if writing == Writing::New {
+            let account = self.index.as_ref().map_or(0, |index| index.account);
+            let Some(state) = self.accounts.get(account) else {
+                return;
+            };
+            let draft = muttrs_mail::compose::Draft::new(state.from.clone());
+            self.start(account, draft, None);
+            return;
+        }
+        if let (Some(pager), Some(opened)) = (&self.pager, &self.opened) {
+            let (message, account, uid) = (Arc::clone(pager.message()), opened.account, opened.uid);
+            self.write_about(writing, account, &message, uid);
+            return;
+        }
+        // From the Index: once the Message is fetched.
+        self.write_when_fetched = Some(writing);
+        self.open_current();
+    }
+
+    fn write_about(&mut self, writing: Writing, account: usize, message: &Message, uid: u32) {
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let me = state.from.clone();
+        let text = compose::quotable(message);
+        let mailbox = self
+            .index
+            .as_ref()
+            .map(|index| index.mailbox.clone())
+            .unwrap_or_default();
+        let (draft, answers) = match writing {
+            Writing::Reply | Writing::ReplyAll => (
+                muttrs_mail::compose::Draft::reply(
+                    message,
+                    me,
+                    writing == Writing::ReplyAll,
+                    &text,
+                ),
+                Some((mailbox, uid)),
+            ),
+            Writing::Forward | Writing::New => (
+                muttrs_mail::compose::Draft::forward(message, me, &text),
+                None,
+            ),
+        };
+        self.start(account, draft, answers);
+    }
+
+    /// Opens `draft` in `$EDITOR`.
+    fn start(
+        &mut self,
+        account: usize,
+        draft: muttrs_mail::compose::Draft,
+        answers: Option<(String, u32)>,
+    ) {
+        if self.compose.is_some() {
+            self.say("A Draft is being written already", true);
+            return;
+        }
+        self.drafts += 1;
+        match Compose::new(account, draft, answers, self.drafts) {
+            Ok(compose) => {
+                self.compose = Some(compose);
+                self.edit = true;
+            }
+            Err(error) => self.say(&format!("Couldn't write the Draft's file: {error}"), true),
+        }
+    }
+
+    /// Takes the Draft back from `$EDITOR`, which exited as `status` says.
+    fn edited(&mut self, status: std::io::Result<std::process::ExitStatus>) {
+        self.notice = None;
+        let Some(compose) = &mut self.compose else {
+            return;
+        };
+        match status {
+            Err(error) => {
+                self.say(&format!("Couldn't run the editor: {error}"), true);
+                return;
+            }
+            Ok(status) if !status.success() => {
+                self.say(
+                    &format!("The editor exited with {status}: the Draft is as it was"),
+                    true,
+                );
+                return;
+            }
+            Ok(_) => {}
+        }
+        if let Err(error) = compose.reread() {
+            self.say(&format!("{error:#}; e edits it again"), true);
+            return;
+        }
+        if compose.draft.is_empty() {
+            if let Some(compose) = self.compose.take() {
+                compose.finish();
+            }
+            self.say("Not sent: the Draft says nothing", false);
+        }
+    }
+
+    /// Keys while a Draft is shown.
+    fn compose_key(&mut self, key: KeyEvent) {
+        let Some(compose) = &mut self.compose else {
+            return;
+        };
+        if compose.sending {
+            return;
+        }
+        let discarding = std::mem::take(&mut compose.discarding);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => compose.scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => compose.scroll_by(-1),
+            KeyCode::Char('e') => self.edit = true,
+            KeyCode::Char('y') => self.send(),
+            KeyCode::Char('P') => self.postpone(),
+            KeyCode::Char('a') => self.prompt(PromptKind::Attach),
+            KeyCode::Char('D') => {
+                if compose.draft.attachments.pop().is_some() {
+                    let _ = compose.rewrite();
+                }
+            }
+            KeyCode::Char('q') if discarding => {
+                if let Some(compose) = self.compose.take() {
+                    compose.finish();
+                }
+                self.say("Discarded", false);
+            }
+            KeyCode::Char('q') => {
+                compose.discarding = true;
+                self.say("q again discards the Draft", false);
+            }
+            KeyCode::Char('?') => self.help(),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self) {
+        let Some(compose) = &mut self.compose else {
+            return;
+        };
+        let Some(state) = self.accounts.get(compose.account) else {
+            return;
+        };
+        let id = muttrs_mail::compose::message_id(&state.from.email);
+        match compose.draft.build(&id) {
+            Ok(built) => {
+                compose.sending = true;
+                state.client.send(client::Request::Send {
+                    built: Box::new(built),
+                    answers: compose.answers.clone(),
+                });
+                self.say("Sending…", false);
+            }
+            Err(error) => self.say(&format!("Not sent: {error}"), true),
+        }
+    }
+
+    /// Saves the Draft to the Drafts Mailbox, to finish later.
+    fn postpone(&mut self) {
+        let Some(compose) = &self.compose else { return };
+        let Some(state) = self.accounts.get(compose.account) else {
+            return;
+        };
+        let id = muttrs_mail::compose::message_id(&state.from.email);
+        match compose.draft.build(&id) {
+            Ok(built) => {
+                state.client.send(client::Request::Append {
+                    role: Role::Drafts,
+                    message: built.kept,
+                    draft: true,
+                });
+                if let Some(compose) = self.compose.take() {
+                    compose.finish();
+                }
+                self.say("Postponed to Drafts", false);
+            }
+            Err(error) => self.say(&format!("Not postponed: {error}"), true),
         }
     }
 
@@ -476,7 +713,9 @@ impl App {
             }
             return;
         }
-        if self.pager.is_some() {
+        if self.compose.is_some() {
+            self.compose_key(key);
+        } else if self.pager.is_some() {
             self.pager_key(key);
         } else {
             self.main_key(key);
@@ -580,7 +819,10 @@ impl App {
             KeyCode::Char('U') => self.toggle(Flag::Seen),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
-            KeyCode::Char('m' | 'r' | 'R' | 'f') => self.say("Writing isn't there yet", false),
+            KeyCode::Char('m') => self.write(Writing::New),
+            KeyCode::Char('r') => self.write(Writing::Reply),
+            KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
     }
@@ -660,7 +902,10 @@ impl App {
             KeyCode::Char('U') => self.toggle(Flag::Seen),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
-            KeyCode::Char('m' | 'r' | 'R' | 'f') => self.say("Writing isn't there yet", false),
+            KeyCode::Char('m') => self.write(Writing::New),
+            KeyCode::Char('r') => self.write(Writing::Reply),
+            KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
     }
@@ -722,6 +967,7 @@ impl App {
                     }
                     PromptKind::Search => {}
                     PromptKind::Command => self.command(text.trim()),
+                    PromptKind::Attach => self.attach(text.trim()),
                 }
             }
             _ => {}
@@ -763,6 +1009,26 @@ impl App {
             }
             None => self.say(&format!("No Mailbox called {wanted}"), true),
         }
+    }
+
+    /// Attaches the file at `path` to the Draft.
+    fn attach(&mut self, path: &str) {
+        let Some(compose) = &mut self.compose else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        let path = xdg::expand(path);
+        if !path.is_file() {
+            self.say(&format!("{} isn't a file", path.display()), true);
+            return;
+        }
+        compose
+            .draft
+            .attachments
+            .push(muttrs_mail::compose::Attachment::file(path));
+        let _ = compose.rewrite();
     }
 
     fn say(&mut self, text: &str, error: bool) {
@@ -865,6 +1131,16 @@ impl App {
                     ],
                 ),
                 (
+                    "Writing",
+                    &[
+                        ("m", "a new Message"),
+                        ("r R f", "reply, reply to all, forward"),
+                        ("y e", "with a Draft: send, edit again"),
+                        ("a D", "attach a file, detach the last"),
+                        ("P q q", "postpone to Drafts, discard"),
+                    ],
+                ),
+                (
                     "Anywhere",
                     &[("?", "these keys"), (":q q", "quit, or close the Pager")],
                 ),
@@ -928,7 +1204,15 @@ impl App {
             ..area
         };
         let buffer = frame.buffer_mut();
-        if let Some(pager) = &mut self.pager {
+        if let Some(compose) = &mut self.compose {
+            compose.draw(
+                body,
+                buffer,
+                &self.theme,
+                &self.icons,
+                self.config.pager_width,
+            );
+        } else if let Some(pager) = &mut self.pager {
             let mut cx = pager::Cx {
                 theme: &self.theme,
                 icons: &self.icons,
@@ -1000,6 +1284,13 @@ impl App {
 
     /// What the status line says on its left when there's no notice.
     fn status_left(&self) -> String {
+        if let Some(compose) = &self.compose {
+            return if compose.sending {
+                " Sending…".into()
+            } else {
+                " Draft · y send · e edit · a attach · D detach · P postpone · q discard".into()
+            };
+        }
         if let Some(pager) = &self.pager {
             return format!(" {}", pager.message().subject);
         }
@@ -1039,16 +1330,19 @@ impl App {
             let lead = match prompt.kind {
                 PromptKind::Search => "/",
                 PromptKind::Command => ":",
+                PromptKind::Attach => "Attach: ",
             };
             let line = Line::from(vec![Span::raw(lead), Span::raw(prompt.text.clone())]);
             buffer.set_line(area.x, area.y, &line, area.width);
             buffer.set_style(area, Style::new());
-            let cursor = u16::try_from(1 + prompt.text.width()).unwrap_or(area.width);
+            let cursor = u16::try_from(lead.width() + prompt.text.width()).unwrap_or(area.width);
             frame.set_cursor_position((area.x + cursor.min(area.width.saturating_sub(1)), area.y));
             return;
         }
         let mut right = Vec::new();
-        if let Some(pager) = &self.pager {
+        if self.compose.is_some() {
+            // The Draft hides the Pager, and what the Pager would say.
+        } else if let Some(pager) = &self.pager {
             if let Some((query, at, of)) = pager.search_status() {
                 right.push(if of == 0 {
                     format!("/{query}: no match")
@@ -1190,6 +1484,10 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
         let gmail = account.gmail;
+        let from = muttrs_mail::Address {
+            name: account.display_name.clone(),
+            email: account.email.clone(),
+        };
         let cache = xdg::cache_dir().map(|cache| cache.join("accounts").join(&name).join("bodies"));
         let sender = events.clone();
         let client = Client::spawn(
@@ -1207,6 +1505,7 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             mailboxes: Vec::new(),
             counts: std::collections::HashMap::new(),
             gmail,
+            from,
         });
     }
     let app = App::new(setup, events, states, false);
@@ -1229,6 +1528,24 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
             terminal.draw(|frame| app.draw(frame))?;
             if app.quit {
                 return Ok::<_, anyhow::Error>(());
+            }
+            if std::mem::take(&mut app.edit)
+                && let Some(path) = app.compose.as_ref().map(|compose| compose.path.clone())
+            {
+                // The editor takes the terminal: the input stream lets go of it first, so as not to read its keys.
+                drop(input);
+                ratatui::restore();
+                let status = compose::edit(&compose::editor(app.config.editor.as_deref()), &path);
+                terminal = ratatui::try_init().context("setting up the terminal again")?;
+                // Cleared directly: `Terminal::clear` asks the terminal where its cursor is, an answer the
+                // input stream that just let go can still take, which leaves the question unanswered.
+                crossterm::execute!(
+                    io::stdout(),
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                )?;
+                input = EventStream::new();
+                app.edited(status);
+                continue;
             }
             tokio::select! {
                 event = input.next() => match event {

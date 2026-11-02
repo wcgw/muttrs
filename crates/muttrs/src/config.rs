@@ -32,6 +32,8 @@ pub(crate) struct Config {
     pub(crate) pixel_ratio: Option<f32>,
     /// Where Attachments are saved; `~/Downloads` by default.
     pub(crate) download_dir: Option<String>,
+    /// The editor Drafts are written in; `$VISUAL`, `$EDITOR` or `vi` by default.
+    pub(crate) editor: Option<String>,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -49,6 +51,7 @@ impl Default for Config {
             max_picture_rows: 24,
             pixel_ratio: None,
             download_dir: None,
+            editor: None,
             accounts: Vec::new(),
         }
     }

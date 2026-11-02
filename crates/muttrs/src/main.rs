@@ -1,5 +1,6 @@
 //! muttrs: a terminal mail client after mutt and vim, that renders HTML mail, images included.
 
+mod compose;
 mod config;
 mod icons;
 mod index;

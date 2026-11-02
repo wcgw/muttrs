@@ -3,12 +3,14 @@
 pub mod account;
 pub mod cache;
 pub mod client;
+pub mod compose;
 pub mod envelope;
 pub mod imap;
 pub mod mailbox;
 pub mod message;
 pub mod oauth2;
 pub mod secret;
+pub mod smtp;
 pub mod tls;
 
 pub use account::{Account, AccountConfig};
