@@ -34,6 +34,8 @@ pub(crate) struct Config {
     pub(crate) download_dir: Option<String>,
     /// The editor Drafts are written in; `$VISUAL`, `$EDITOR` or `vi` by default.
     pub(crate) editor: Option<String>,
+    /// Whether the Index shows Messages in threads, at first; `T` switches.
+    pub(crate) threads: bool,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -52,6 +54,7 @@ impl Default for Config {
             pixel_ratio: None,
             download_dir: None,
             editor: None,
+            threads: true,
             accounts: Vec::new(),
         }
     }

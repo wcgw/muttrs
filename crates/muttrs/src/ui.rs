@@ -129,6 +129,8 @@ pub(crate) struct App {
     edit: bool,
     /// What to write once the Message being fetched comes, as when replying from the Index.
     write_when_fetched: Option<Writing>,
+    /// The first key of a pair typed, as `z` of `za`.
+    pending: Option<char>,
     quit: bool,
 }
 
@@ -169,6 +171,7 @@ impl App {
             drafts: 0,
             edit: false,
             write_when_fetched: None,
+            pending: None,
             quit: false,
         }
     }
@@ -536,6 +539,7 @@ impl App {
             name.to_owned(),
             mailbox.label().to_owned(),
             mailbox.role,
+            self.config.threads,
         );
         state.client.send(client::Request::Open(name.to_owned()));
         self.sidebar
@@ -800,7 +804,28 @@ impl App {
             return;
         }
         let Some(index) = &mut self.index else { return };
+        if self.pending.take() == Some('z') {
+            match key.code {
+                KeyCode::Char('a' | 'A' | 'c' | 'o') => index.toggle_fold(),
+                KeyCode::Char('M') => index.fold_all(true),
+                KeyCode::Char('R') => index.fold_all(false),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
+            KeyCode::Char('z') => self.pending = Some('z'),
+            KeyCode::Char('T') => {
+                let threaded = index.toggle_threads();
+                self.say(
+                    if threaded {
+                        "In threads"
+                    } else {
+                        "Newest first"
+                    },
+                    false,
+                );
+            }
             KeyCode::Char('j') | KeyCode::Down => index.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => index.move_by(-1),
             KeyCode::Char('d') if control => index.move_pages(0.5),
@@ -1125,6 +1150,8 @@ impl App {
                         ("j k g G", "move"),
                         ("Enter", "open"),
                         ("/ n N", "search senders and subjects"),
+                        ("T", "threads, or newest first"),
+                        ("za zM zR", "fold the thread, all, none"),
                         ("J K", "in the Pager: the next Message, the previous"),
                         ("F U", "flag, mark Unread or read"),
                         ("d a", "delete (to Trash), archive"),

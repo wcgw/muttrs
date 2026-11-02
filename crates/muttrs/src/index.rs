@@ -1,7 +1,11 @@
-//! The Index: the Envelopes of the open Mailbox, newest first, one a row.
+//! The Index: the Envelopes of the open Mailbox, one a row, newest first, or in threads, each under what it
+//! replies to and threads with the latest replies first. A thread can be folded into the row heading it.
+
+use std::collections::HashSet;
 
 use jiff::Zoned;
 use jiff::tz::TimeZone;
+use muttrs_mail::thread::{self, Branch};
 use muttrs_mail::{Envelope, Role};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -25,6 +29,23 @@ enum More {
     Exhausted,
 }
 
+/// A row of the Index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Row {
+    /// The Envelope it shows, by its index.
+    envelope: usize,
+    /// The tree drawn before its subject.
+    tree: String,
+    /// The UID of the Message heading its thread; its own, flat.
+    head: u32,
+    /// How many replies are folded into it.
+    folded: usize,
+    /// Whether any of them is Unread.
+    folded_unread: bool,
+    /// Whether its subject shows: not when it's its thread head's, as a reply's usually is.
+    subject: bool,
+}
+
 pub(crate) struct Index {
     /// The Account the Mailbox is of, by its place in the sidebar.
     pub(crate) account: usize,
@@ -34,7 +55,13 @@ pub(crate) struct Index {
     pub(crate) label: String,
     /// Whether the Mailbox holds what the user sent, so that rows show whom to rather than whom from.
     sent: bool,
+    /// The Envelopes listed, newest first.
     envelopes: Vec<Envelope>,
+    rows: Vec<Row>,
+    /// Whether rows are in threads.
+    threaded: bool,
+    /// The threads folded, by the UID of the Message heading them.
+    folded: HashSet<u32>,
     /// How many Messages the Mailbox has, of which `envelopes` are the newest.
     pub(crate) exists: u32,
     /// Whether the Envelopes have come.
@@ -54,13 +81,22 @@ struct Search {
 }
 
 impl Index {
-    pub(crate) fn new(account: usize, mailbox: String, label: String, role: Option<Role>) -> Self {
+    pub(crate) fn new(
+        account: usize,
+        mailbox: String,
+        label: String,
+        role: Option<Role>,
+        threaded: bool,
+    ) -> Self {
         Self {
             account,
             mailbox,
             label,
             sent: matches!(role, Some(Role::Sent | Role::Drafts)),
             envelopes: Vec::new(),
+            rows: Vec::new(),
+            threaded,
+            folded: HashSet::new(),
             exists: 0,
             loaded: false,
             more: More::Idle,
@@ -84,24 +120,125 @@ impl Index {
         self.envelopes = envelopes;
         self.exists = exists;
         self.loaded = true;
-        if let Some(uid) = at
-            && let Some(row) = self
-                .envelopes
-                .iter()
-                .position(|envelope| envelope.uid == uid)
-        {
-            self.cursor = row;
-        }
-        self.cursor = self.cursor.min(self.envelopes.len().saturating_sub(1));
+        self.arrange(at);
+    }
+
+    /// Lays the rows out again, the cursor on Message `at` if it still shows.
+    fn arrange(&mut self, at: Option<u32>) {
+        let row = self.cursor;
+        self.rows = if self.threaded {
+            self.threads()
+        } else {
+            (0..self.envelopes.len())
+                .map(|envelope| Row {
+                    envelope,
+                    tree: String::new(),
+                    head: self.envelopes[envelope].uid,
+                    folded: 0,
+                    folded_unread: false,
+                    subject: true,
+                })
+                .collect()
+        };
+        self.cursor = at
+            .and_then(|uid| self.position(uid))
+            .unwrap_or(row)
+            .min(self.rows.len().saturating_sub(1));
         if let Some(search) = self.search.take() {
             self.search_for(search.query);
         }
     }
 
+    fn threads(&self) -> Vec<Row> {
+        let threaded = thread::threads(&self.envelopes);
+        let mut rows: Vec<Row> = Vec::with_capacity(threaded.len());
+        let mut head_subject = "";
+        let mut head = 0;
+        for (at, message) in threaded.iter().enumerate() {
+            let envelope = &self.envelopes[message.envelope];
+            if message.depth == 0 {
+                head = envelope.uid;
+                head_subject = thread::base_subject(&envelope.subject);
+                let folded = self.folded.contains(&head) && message.replies > 0;
+                let replies = &threaded[at + 1..at + 1 + message.replies];
+                let folded_unread = folded
+                    && replies
+                        .iter()
+                        .any(|reply| !self.envelopes[reply.envelope].flags.seen);
+                rows.push(Row {
+                    envelope: message.envelope,
+                    tree: String::new(),
+                    head,
+                    folded: if folded { message.replies } else { 0 },
+                    folded_unread,
+                    subject: true,
+                });
+            } else if !self.folded.contains(&head) {
+                let tree = message
+                    .branches
+                    .iter()
+                    .map(|branch| match branch {
+                        Branch::Through => "│ ",
+                        Branch::Blank => "  ",
+                        Branch::Tee => "├─",
+                        Branch::Corner => "└─",
+                    })
+                    .collect();
+                rows.push(Row {
+                    envelope: message.envelope,
+                    tree,
+                    head,
+                    folded: 0,
+                    folded_unread: false,
+                    subject: thread::base_subject(&envelope.subject) != head_subject,
+                });
+            }
+        }
+        rows
+    }
+
+    /// The row showing Message `uid`.
+    fn position(&self, uid: u32) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| self.envelopes[row.envelope].uid == uid)
+    }
+
+    /// Shows rows in threads, or not.
+    pub(crate) fn toggle_threads(&mut self) -> bool {
+        let at = self.current().map(|envelope| envelope.uid);
+        self.threaded = !self.threaded;
+        self.arrange(at);
+        self.threaded
+    }
+
+    /// Folds the thread at the cursor into its head's row, or unfolds it.
+    pub(crate) fn toggle_fold(&mut self) {
+        let Some(row) = self.rows.get(self.cursor) else {
+            return;
+        };
+        let head = row.head;
+        if !self.folded.remove(&head) {
+            self.folded.insert(head);
+        }
+        self.arrange(Some(head));
+    }
+
+    /// Folds every thread, or unfolds them all.
+    pub(crate) fn fold_all(&mut self, fold: bool) {
+        let at = self.rows.get(self.cursor).map(|row| row.head);
+        self.folded = if fold {
+            self.rows.iter().map(|row| row.head).collect()
+        } else {
+            HashSet::new()
+        };
+        self.arrange(at);
+    }
+
     /// Whether to ask for older Envelopes: the cursor is near the end of those listed, and the Mailbox has more.
     /// Asking is noted, so that it's asked once.
     pub(crate) fn wants_more(&mut self) -> bool {
-        let near_end = self.cursor + MORE_WITHIN >= self.envelopes.len();
+        let near_end = self.cursor + MORE_WITHIN >= self.rows.len();
         let has_more = u32::try_from(self.envelopes.len()).unwrap_or(u32::MAX) < self.exists;
         if self.loaded && near_end && has_more && self.more == More::Idle {
             self.more = More::Asked(self.envelopes.len());
@@ -112,11 +249,13 @@ impl Index {
     }
 
     pub(crate) fn current(&self) -> Option<&Envelope> {
-        self.envelopes.get(self.cursor)
+        let row = self.rows.get(self.cursor)?;
+        self.envelopes.get(row.envelope)
     }
 
     pub(crate) fn current_mut(&mut self) -> Option<&mut Envelope> {
-        self.envelopes.get_mut(self.cursor)
+        let row = self.rows.get(self.cursor)?;
+        self.envelopes.get_mut(row.envelope)
     }
 
     pub(crate) fn find_mut(&mut self, uid: u32) -> Option<&mut Envelope> {
@@ -141,14 +280,15 @@ impl Index {
     pub(crate) fn remove(&mut self, uids: &[u32]) {
         self.envelopes
             .retain(|envelope| !uids.contains(&envelope.uid));
-        self.cursor = self.cursor.min(self.envelopes.len().saturating_sub(1));
+        // The cursor stays on its row: on what followed what's taken out.
+        self.arrange(None);
     }
 
     pub(crate) fn move_by(&mut self, rows: isize) {
         self.cursor = self
             .cursor
             .saturating_add_signed(rows)
-            .min(self.envelopes.len().saturating_sub(1));
+            .min(self.rows.len().saturating_sub(1));
     }
 
     pub(crate) fn move_pages(&mut self, pages: f32) {
@@ -163,12 +303,12 @@ impl Index {
     }
 
     pub(crate) fn bottom(&mut self) {
-        self.cursor = self.envelopes.len().saturating_sub(1);
+        self.cursor = self.rows.len().saturating_sub(1);
     }
 
-    /// Moves to the next Message, or the previous: what's the next one older, or newer. `false` if there's none.
-    pub(crate) fn step(&mut self, older: bool) -> bool {
-        let next = if older {
+    /// Moves to the next row, or the previous. `false` if there's none.
+    pub(crate) fn step(&mut self, down: bool) -> bool {
+        let next = if down {
             self.cursor + 1
         } else {
             match self.cursor.checked_sub(1) {
@@ -176,7 +316,7 @@ impl Index {
                 None => return false,
             }
         };
-        if next < self.envelopes.len() {
+        if next < self.rows.len() {
             self.cursor = next;
             true
         } else {
@@ -188,10 +328,11 @@ impl Index {
     pub(crate) fn search_for(&mut self, query: String) {
         let lower = query.to_lowercase();
         let matches: Vec<usize> = self
-            .envelopes
+            .rows
             .iter()
             .enumerate()
-            .filter(|(_, envelope)| {
+            .filter(|(_, row)| {
+                let envelope = &self.envelopes[row.envelope];
                 envelope.subject.to_lowercase().contains(&lower)
                     || envelope
                         .from
@@ -257,7 +398,7 @@ impl Index {
             buffer.set_line(area.x, area.y, &waiting, area.width);
             return;
         }
-        if self.envelopes.is_empty() {
+        if self.rows.is_empty() {
             buffer.set_line(
                 area.x,
                 area.y,
@@ -273,45 +414,43 @@ impl Index {
         }
         let now = Zoned::now();
         let matches = self.search.as_ref().map(|search| search.matches.as_slice());
-        for (row, envelope) in self
-            .envelopes
+        for (index, row) in self
+            .rows
             .iter()
             .enumerate()
             .skip(self.top)
             .take(self.height)
         {
-            let y = area.y + u16::try_from(row - self.top).unwrap_or(0);
-            let line = self.row(envelope, usize::from(area.width), &now, cx);
+            let y = area.y + u16::try_from(index - self.top).unwrap_or(0);
+            let line = self.line(row, usize::from(area.width), &now, cx);
             buffer.set_line(area.x, y, &line, area.width);
             let row_area = Rect::new(area.x, y, area.width, 1);
-            if row == self.cursor {
+            if index == self.cursor {
                 let style = if cx.focused {
                     cx.theme.cursor
                 } else {
                     cx.theme.cursor_unfocused
                 };
                 buffer.set_style(row_area, style);
-            } else if matches.is_some_and(|matches| matches.contains(&row)) {
+            } else if matches.is_some_and(|matches| matches.contains(&index)) {
                 buffer.set_style(Rect::new(area.x, y, 1, 1), cx.theme.found);
             }
         }
     }
 
-    fn row(&self, envelope: &Envelope, width: usize, now: &Zoned, cx: &Draw<'_>) -> Line<'static> {
+    fn line(&self, row: &Row, width: usize, now: &Zoned, cx: &Draw<'_>) -> Line<'static> {
+        let envelope = &self.envelopes[row.envelope];
         let theme = cx.theme;
         let icons = cx.icons;
-        let text = if envelope.flags.seen {
-            theme.read
-        } else {
-            theme.unread
-        };
+        let unread = !envelope.flags.seen || row.folded_unread;
+        let text = if unread { theme.unread } else { theme.read };
         let mark = |on: bool, icon: &str, style| {
             let blank = " ".repeat(icon.width());
             Span::styled(if on { icon.to_owned() } else { blank }, style)
         };
         let flags = vec![
             Span::raw(" "),
-            mark(!envelope.flags.seen, icons.unread, theme.accent),
+            mark(unread, icons.unread, theme.accent),
             mark(envelope.flags.flagged, icons.flagged, theme.flagged),
             mark(envelope.flags.answered, icons.answered, theme.dim),
             mark(envelope.has_attachments, icons.attachment, theme.attachment),
@@ -332,19 +471,32 @@ impl Index {
                 .map_or_else(String::new, |from| from.short().to_owned())
         };
         let who_width = (width / 4).clamp(12, 28);
-        let subject_width = width.saturating_sub(flags_width + 7 + who_width + 2);
-        let subject = if envelope.subject.is_empty() {
-            "(no subject)"
-        } else {
-            &envelope.subject
-        };
         let mut spans = flags;
         spans.push(Span::styled(format!("{date:>6} "), theme.dim));
         let who = truncate(&who, who_width);
         let who_padding = who_width.saturating_sub(who.width());
         spans.push(Span::styled(who, text));
         spans.push(Span::raw(" ".repeat(who_padding + 2)));
-        spans.push(Span::styled(truncate(subject, subject_width), text));
+        let mut room = width.saturating_sub(flags_width + 7 + who_width + 2);
+        if !row.tree.is_empty() {
+            let tree = truncate(&row.tree, room);
+            room = room.saturating_sub(tree.width() + 1);
+            spans.push(Span::styled(tree, theme.dim));
+            spans.push(Span::raw(" "));
+        }
+        if row.folded > 0 {
+            let count = format!("({}) ", row.folded + 1);
+            room = room.saturating_sub(count.width());
+            spans.push(Span::styled(count, theme.accent));
+        }
+        if row.subject {
+            let subject = if envelope.subject.is_empty() {
+                "(no subject)"
+            } else {
+                &envelope.subject
+            };
+            spans.push(Span::styled(truncate(subject, room), text));
+        }
         Line::from(spans)
     }
 }
@@ -392,7 +544,7 @@ mod tests {
             to: Vec::new(),
             cc: Vec::new(),
             subject: subject.into(),
-            message_id: None,
+            message_id: Some(format!("{uid}@example.com")),
             in_reply_to: Vec::new(),
             references: Vec::new(),
             size: 0,
@@ -400,9 +552,28 @@ mod tests {
         }
     }
 
+    fn reply(uid: u32, day: i8, to: &[u32]) -> Envelope {
+        let references: Vec<String> = to.iter().map(|uid| format!("{uid}@example.com")).collect();
+        Envelope {
+            in_reply_to: references.last().cloned().into_iter().collect(),
+            references,
+            ..envelope(uid, day, "Re: Lunch", "Bob")
+        }
+    }
+
+    fn index(threaded: bool) -> Index {
+        Index::new(
+            0,
+            "INBOX".into(),
+            "Inbox".into(),
+            Some(Role::Inbox),
+            threaded,
+        )
+    }
+
     #[test]
     fn newest_first_and_the_cursor_stays_on_its_message() {
-        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), Some(Role::Inbox));
+        let mut index = index(false);
         index.set(
             vec![envelope(1, 1, "old", "Ann"), envelope(2, 2, "new", "Bob")],
             2,
@@ -429,8 +600,72 @@ mod tests {
     }
 
     #[test]
+    fn threads_fold_into_their_heads() {
+        let mut index = index(true);
+        index.set(
+            vec![
+                envelope(1, 1, "Lunch", "Ann"),
+                reply(2, 2, &[1]),
+                reply(3, 4, &[1, 2]),
+                envelope(4, 3, "Report", "Cy"),
+            ],
+            4,
+        );
+        let shown = |index: &Index| -> Vec<(u32, String, bool)> {
+            index
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        index.envelopes[row.envelope].uid,
+                        row.tree.clone(),
+                        row.subject,
+                    )
+                })
+                .collect()
+        };
+        // The Lunch thread's latest reply (day 4) is newer than the Report (day 3).
+        assert_eq!(
+            shown(&index),
+            [
+                (1, String::new(), true),
+                (2, "└─".into(), false),
+                (3, "  └─".into(), false),
+                (4, String::new(), true)
+            ]
+        );
+        index.move_by(2);
+        index.toggle_fold();
+        assert_eq!(shown(&index).len(), 2);
+        assert_eq!(
+            index.current().unwrap().uid,
+            1,
+            "the cursor goes to the thread's head"
+        );
+        assert_eq!(index.rows[0].folded, 2);
+        assert!(index.rows[0].folded_unread);
+        index.fold_all(false);
+        assert_eq!(shown(&index).len(), 4);
+
+        assert!(!index.toggle_threads());
+        assert_eq!(
+            index.current().unwrap().uid,
+            1,
+            "the cursor stays on its Message"
+        );
+        assert_eq!(
+            index
+                .rows
+                .iter()
+                .map(|row| row.tree.as_str())
+                .collect::<String>(),
+            ""
+        );
+    }
+
+    #[test]
     fn searching_senders_and_subjects() {
-        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None);
+        let mut index = index(false);
         index.set(
             vec![
                 envelope(1, 1, "Lunch", "Ann"),
@@ -450,7 +685,7 @@ mod tests {
 
     #[test]
     fn older_envelopes_are_asked_for_once_near_the_end() {
-        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None);
+        let mut index = index(false);
         let page = |count: u32| {
             (1..=count)
                 .map(|uid| envelope(uid, 1, "s", "Ann"))

@@ -46,6 +46,11 @@ _Avoid_: starred, important
 The list of the Messages of the open Mailbox, newest first.
 _Avoid_: list, inbox (the Inbox is a Mailbox)
 
+**Thread**:
+Messages linked by what they reply to (their `References` and `In-Reply-To`), each under its parent. The Index shows
+them so, the thread whose latest Message is newest first; one can be folded into the Message heading it.
+_Avoid_: conversation
+
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
 _Avoid_: preview, viewer, reader

@@ -6,7 +6,7 @@ muttrs reads mail over IMAP and sends it over SMTP, each over TLS or STARTTLS, a
 words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what's built and what's next is in
 [docs/plan.md](docs/plan.md).
 
-> Work in progress: reading and writing work; threads and server-side search are next. See the plan.
+> Work in progress: reading, threads and writing work; searching the server is next. See the plan.
 
 ## Requirements
 
@@ -97,7 +97,7 @@ They work as in mutt and vim. `?` shows the ones that apply.
 |---|---|
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
@@ -153,6 +153,7 @@ max_picture_rows = 24         # the most rows a Picture takes
 # pixel_ratio = 2.0           # the terminal's pixels to a CSS pixel; guessed from the cells' size otherwise
 # download_dir = "~/Downloads"
 # editor = "nvim"             # what Drafts are written in; $VISUAL, $EDITOR or vi by default
+threads = true                # the Index in threads (T switches), or newest first
 ```
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.

@@ -11,6 +11,7 @@ pub mod message;
 pub mod oauth2;
 pub mod secret;
 pub mod smtp;
+pub mod thread;
 pub mod tls;
 
 pub use account::{Account, AccountConfig};
