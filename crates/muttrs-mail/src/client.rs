@@ -785,6 +785,8 @@ impl Worker {
             (self.notify)(Update::Failed(format!(
                 "There's no {role:?} Mailbox: set it under [account.mailboxes]"
             )));
+            // What the UI took out before asking comes back.
+            self.tell_window(mailbox);
             return Ok(());
         };
         if target == mailbox {

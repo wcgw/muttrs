@@ -11,6 +11,8 @@ words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what'
 ## Requirements
 
 - Linux or macOS, and Rust 1.88 or newer to build it.
+- To keep passwords and OAuth2 tokens in the keyring: `secret-tool` (from libsecret) and a Secret Service (GNOME
+  Keyring, KeePassXC, …) on Linux; `security`, which macOS has, on macOS. Or `password_command`, for any other.
 - For Pictures at full resolution, a terminal with kitty's Unicode placeholders: [Ghostty](https://ghostty.org) or
   [kitty](https://sw.kovidgoyal.net/kitty/). Any other terminal draws them with half blocks.
 - For icons, a [Nerd Font](https://www.nerdfonts.com). Ghostty, kitty and WezTerm have the symbols built in.

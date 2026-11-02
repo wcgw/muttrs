@@ -303,7 +303,10 @@ impl App {
                         }
                         Err(error) => self.say(&error.to_string(), true),
                     },
-                    Err(why) => self.say(&format!("Couldn't fetch the Message: {why}"), true),
+                    Err(why) => {
+                        self.write_when_fetched = None;
+                        self.say(&format!("Couldn't fetch the Message: {why}"), true);
+                    }
                 }
             }
             Update::Done(done) => self.say(&done, false),
@@ -638,21 +641,8 @@ impl App {
         let Some(state) = self.accounts.get(account) else {
             return;
         };
-        let role = if archive {
-            if state.gmail {
-                Role::All
-            } else {
-                Role::Archive
-            }
-        } else {
-            Role::Trash
-        };
-        if state.with_role(role).is_none()
-            && !(role == Role::Trash && state.with_role(Role::Trash).is_some())
-        {
-            // The worker knows the configuration's names too: it says so if there's none.
-            tracing::debug!(?role, "no Mailbox listed with the Role");
-        }
+        // The worker knows where to: the Mailbox with the Role, by the server or the configuration. Without one it
+        // says so, and lists the Mailbox again, which brings the Message back.
         state.client.send(if archive {
             client::Request::Archive {
                 mailbox,
@@ -1483,7 +1473,6 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     let mut states = Vec::new();
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
-        let gmail = account.gmail;
         let from = muttrs_mail::Address {
             name: account.display_name.clone(),
             email: account.email.clone(),
@@ -1504,7 +1493,6 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             connection: Connection::Connecting,
             mailboxes: Vec::new(),
             counts: std::collections::HashMap::new(),
-            gmail,
             from,
         });
     }

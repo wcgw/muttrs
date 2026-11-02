@@ -21,8 +21,6 @@ pub(crate) struct AccountState {
     pub(crate) connection: Connection,
     pub(crate) mailboxes: Vec<Mailbox>,
     pub(crate) counts: HashMap<String, Counts>,
-    /// Whether it's on Gmail, whose archive is All Mail.
-    pub(crate) gmail: bool,
     /// Who it sends as.
     pub(crate) from: muttrs_mail::Address,
 }
