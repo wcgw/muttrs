@@ -225,6 +225,8 @@ impl App {
 
     /// Opens `message` in the Pager.
     fn open(&mut self, message: Arc<Message>) {
+        // "Fetching the Message…" is done with.
+        self.notice = None;
         self.addresses.learn(
             message
                 .from
@@ -681,13 +683,17 @@ impl App {
             );
             return;
         }
-        let index = Index::new(
+        let mut index = Index::new(
             account,
             name.to_owned(),
             mailbox.label().to_owned(),
             mailbox.role,
             self.config.threads,
         );
+        // As last listed, until the server says what's changed.
+        if let Some(listed) = state.cache.envelopes(name) {
+            index.set(listed.envelopes, listed.exists);
+        }
         state.client.send(client::Request::Open(name.to_owned()));
         self.sidebar
             .select(&self.accounts, &Row::Mailbox(account, name.to_owned()));
@@ -1916,11 +1922,13 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
         let sender_of_drafts = account.sender();
-        let cache = xdg::cache_dir().map(|cache| cache.join("accounts").join(&name).join("bodies"));
+        let cache = muttrs_mail::cache::Cache::new(
+            xdg::cache_dir().map(|cache| cache.join("accounts").join(&name)),
+        );
         let sender = events.clone();
         let client = Client::spawn(
             account,
-            muttrs_mail::cache::Cache::new(cache),
+            cache.clone(),
             Arc::new(move |update| {
                 let _ = sender.send(Event::Account(index, update));
             }),
@@ -1930,12 +1938,23 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             name,
             client,
             connection: Connection::Connecting,
-            mailboxes: Vec::new(),
+            // As last listed, until the server lists them.
+            mailboxes: cache.mailboxes().unwrap_or_default(),
             counts: std::collections::HashMap::new(),
             sender: sender_of_drafts,
+            cache,
         });
     }
-    let app = App::new(setup, events, states, false);
+    let mut app = App::new(setup, events, states, false);
+    // The first Account's Inbox, as last listed, while the server's asked.
+    if let Some(inbox) = app
+        .accounts
+        .first()
+        .and_then(|state| state.with_role(Role::Inbox))
+        .map(|inbox| inbox.name.clone())
+    {
+        app.open_mailbox(0, &inbox);
+    }
     run(app, received).await
 }
 

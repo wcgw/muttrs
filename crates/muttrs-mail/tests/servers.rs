@@ -724,3 +724,109 @@ async fn searching_dovecot() {
 async fn searching_greenmail() {
     search(3993, Tls::Ssl, &user("search"), "any").await;
 }
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn offline_what_was_listed_and_read_is_still_there() {
+    let username = user("offline");
+    let cache_root =
+        std::env::temp_dir().join(format!("muttrs-offline-test-{}", std::process::id()));
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session
+        .append("INBOX", "()", &message("kept"))
+        .await
+        .unwrap();
+    let account = |port: u16| -> muttrs_mail::Account {
+        let config: AccountConfig = toml::from_str(&format!(
+            "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+             imap = {{ host = \"localhost\", port = {port}, tls = \"starttls\" }}\n\
+             smtp = {{ host = \"localhost\", port = {port}, tls = \"starttls\" }}",
+            ca().display().to_string()
+        ))
+        .unwrap();
+        config.resolve().unwrap()
+    };
+    let spawn = |account| {
+        let (sender, updates) = tokio::sync::mpsc::unbounded_channel();
+        let sender = Arc::new(Mutex::new(sender));
+        let client = Client::spawn(
+            account,
+            Cache::new(Some(cache_root.clone())),
+            Arc::new(move |update| {
+                let _ = sender.lock().unwrap().send(update);
+            }),
+        )
+        .unwrap();
+        (client, updates)
+    };
+
+    // Online: listed, and read.
+    let (online, mut updates) = spawn(account(31143));
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    online.send(Request::Open("INBOX".into()));
+    let uid = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } => envelopes.first().map(|envelope| envelope.uid),
+        _ => None,
+    })
+    .await;
+    online.send(Request::Body {
+        mailbox: "INBOX".into(),
+        uid,
+    });
+    until(&mut updates, |update| {
+        matches!(update, Update::Body { .. }).then_some(())
+    })
+    .await;
+    drop(online);
+
+    // Offline, on a port nothing listens on: what the cache keeps.
+    let (offline, mut updates) = spawn(account(1));
+    let mut next = async || {
+        tokio::time::timeout(Duration::from_secs(20), updates.recv())
+            .await
+            .expect("an update in time")
+            .expect("updates")
+    };
+    loop {
+        if let Update::Connection(Connection::Offline(_)) = next().await {
+            break;
+        }
+    }
+    offline.send(Request::Open("INBOX".into()));
+    offline.send(Request::Body {
+        mailbox: "INBOX".into(),
+        uid,
+    });
+    offline.send(Request::Send {
+        built: Box::new(built(&username, "nobody@localhost", "stays")),
+        answers: None,
+    });
+    let mut seen = (false, false, false);
+    while seen != (true, true, true) {
+        match next().await {
+            Update::Envelopes { envelopes, .. } => {
+                assert_eq!(envelopes[0].subject, "kept");
+                seen.0 = true;
+            }
+            Update::Body { body, .. } => {
+                assert!(String::from_utf8_lossy(&body.unwrap()).contains("Hello from kept."));
+                seen.1 = true;
+            }
+            Update::Sent(sent) => {
+                assert!(sent.unwrap_err().contains("offline"));
+                seen.2 = true;
+            }
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_dir_all(cache_root);
+}

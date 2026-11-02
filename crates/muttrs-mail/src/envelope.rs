@@ -10,7 +10,7 @@ pub(crate) const FIELDS: &str =
     "FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-ID";
 
 /// The Flags a Message carries.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 // One bool a Flag, as IMAP has them: each is on or off whatever the others are, so they aren't a state machine.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Flags {
@@ -46,7 +46,7 @@ impl Flags {
 }
 
 /// What the Index shows of a Message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Envelope {
     /// Its UID in its Mailbox.
     pub uid: u32,

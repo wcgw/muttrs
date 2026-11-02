@@ -121,7 +121,9 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] Search on the server (`S`): `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`; the newest 300 found
       listed as an Index of their own until `Esc`
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
-- [ ] An Envelope cache, kept up to date with CONDSTORE, so that a Mailbox opens at once
+- [x] An Envelope cache: the Mailboxes and each Mailbox's Envelopes kept, shown at once (before the server says) and
+      brought up to date rather than fetched again; offline, what's cached can be listed and read
+- [ ] CONDSTORE/QRESYNC, to bring the cache up to date by what changed rather than by every listed Message's Flags
 - [x] Moving to a Mailbox by name (`s`, narrowed as it's typed), and Selections (`Space`) to act on several
       Messages; a folded thread is acted on whole
 - [x] Address completion from the Envelopes and Messages seen: `m` asks To (`Tab` completes) and Subject before the

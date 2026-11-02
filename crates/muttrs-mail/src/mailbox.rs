@@ -6,7 +6,9 @@ use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::NO_PAD;
 
 /// What a Mailbox is for, when it has a special use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Role {
     /// Where new mail arrives.
     Inbox,
@@ -27,7 +29,7 @@ pub enum Role {
 }
 
 /// A Mailbox on an Account's server.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Mailbox {
     /// Its name as the server knows it, in modified UTF-7: what commands name it by.
     pub name: String,

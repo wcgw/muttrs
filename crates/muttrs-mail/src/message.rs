@@ -6,7 +6,7 @@ use jiff::Timestamp;
 use mail_parser::{MessageParser, MessagePart, PartKind};
 
 /// An address, as a header names it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Address {
     /// The name shown with it, if any.
     pub name: Option<String>,

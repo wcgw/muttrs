@@ -10,7 +10,7 @@ use rustls::ClientConfig;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::account::{Account, Auth, PasswordSource, Secret};
-use crate::cache::Cache;
+use crate::cache::{Cache, Listed};
 use crate::compose::Built;
 use crate::envelope::{Envelope, Flags};
 use crate::imap::{self, Credentials, Session};
@@ -397,7 +397,7 @@ impl Worker {
                 Err(Failure::SignIn(why)) => {
                     tracing::warn!(account = self.account.name, why, "signing in failed");
                     (self.notify)(Update::Connection(Connection::SignInFailed(why)));
-                    if !wait_for_refresh(&mut requests, None).await {
+                    if !self.offline(&mut requests, None).await {
                         return;
                     }
                     continue;
@@ -405,7 +405,7 @@ impl Worker {
                 Err(Failure::Network(why)) => {
                     tracing::info!(account = self.account.name, why, "offline");
                     (self.notify)(Update::Connection(Connection::Offline(why)));
-                    if !wait_for_refresh(&mut requests, Some(backoff)).await {
+                    if !self.offline(&mut requests, Some(backoff)).await {
                         return;
                     }
                     backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -422,6 +422,55 @@ impl Worker {
                     (self.notify)(Update::Connection(Connection::Offline(error.to_string())));
                 }
             }
+        }
+    }
+
+    /// Waits for [`Request::Refresh`], or `timeout` when there is one, doing meanwhile what the cache can: opening a
+    /// Mailbox it keeps the Envelopes of, reading a Message it keeps. `false` if nothing more can be asked.
+    async fn offline(
+        &mut self,
+        requests: &mut mpsc::UnboundedReceiver<Request>,
+        timeout: Option<Duration>,
+    ) -> bool {
+        let waiting = async {
+            loop {
+                match requests.recv().await {
+                    Some(Request::Refresh) => return true,
+                    Some(Request::Open(mailbox)) => {
+                        self.open = Some(mailbox.clone());
+                        self.listed_from_cache(&mailbox);
+                        self.tell_window(&mailbox);
+                    }
+                    Some(Request::Body { mailbox, uid }) => {
+                        let validity = self.windows.get(&mailbox).map(|window| window.uid_validity);
+                        let body = match validity {
+                            Some(validity) => self.cache.body(&mailbox, validity, uid).await,
+                            None => None,
+                        };
+                        (self.notify)(Update::Body {
+                            mailbox,
+                            uid,
+                            body: body
+                                .map(Arc::new)
+                                .ok_or_else(|| "offline, and it isn't cached".to_owned()),
+                        });
+                    }
+                    Some(Request::Send { .. }) => {
+                        (self.notify)(Update::Sent(Err(
+                            "offline: the Draft stays, to send once online".into(),
+                        )));
+                    }
+                    // What changes the server waits for it.
+                    Some(_) => {
+                        (self.notify)(Update::Failed("Offline: that waits for the server".into()));
+                    }
+                    None => return false,
+                }
+            }
+        };
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, waiting).await.unwrap_or(true),
+            None => waiting.await,
         }
     }
 
@@ -620,6 +669,7 @@ impl Worker {
 
     async fn list(&mut self, session: &mut Session) -> Result<(), imap::Error> {
         self.mailboxes = session.mailboxes().await?;
+        self.cache.keep_mailboxes(&self.mailboxes);
         (self.notify)(Update::Mailboxes(self.mailboxes.clone()));
         Ok(())
     }
@@ -682,6 +732,8 @@ impl Worker {
 
     /// Opens `mailbox`, and tells its Envelopes: the newest, the first time; what's new and changed since, after.
     async fn open(&mut self, session: &mut Session, mailbox: &str) -> Result<(), imap::Error> {
+        // What the cache keeps is brought up to date, rather than fetched again.
+        self.listed_from_cache(mailbox);
         let selected = self.select(session, mailbox).await?;
         let window = self.windows.entry(mailbox.to_owned()).or_default();
         if window.uid_validity != selected.uid_validity || window.envelopes.is_empty() {
@@ -812,13 +864,42 @@ impl Worker {
         Ok(())
     }
 
+    /// Tells the UI the Envelopes of `mailbox` listed, keeping them in the cache, so that they show at once the next
+    /// time, and offline.
     fn tell_window(&self, mailbox: &str) {
         if let Some(window) = self.windows.get(mailbox) {
+            let listed = Listed {
+                uid_validity: window.uid_validity,
+                exists: window.exists,
+                envelopes: window.envelopes.values().cloned().collect(),
+            };
+            self.cache.keep_envelopes(mailbox, &listed);
             (self.notify)(Update::Envelopes {
                 mailbox: mailbox.to_owned(),
-                envelopes: window.envelopes.values().cloned().collect(),
-                exists: window.exists,
+                envelopes: listed.envelopes,
+                exists: listed.exists,
             });
+        }
+    }
+
+    /// The Envelopes of `mailbox` kept in the cache, listed again, unless some are listed already.
+    fn listed_from_cache(&mut self, mailbox: &str) {
+        if self.windows.contains_key(mailbox) {
+            return;
+        }
+        if let Some(listed) = self.cache.envelopes(mailbox) {
+            self.windows.insert(
+                mailbox.to_owned(),
+                Window {
+                    uid_validity: listed.uid_validity,
+                    exists: listed.exists,
+                    envelopes: listed
+                        .envelopes
+                        .into_iter()
+                        .map(|envelope| (envelope.uid, envelope))
+                        .collect(),
+                },
+            );
         }
     }
 
@@ -949,27 +1030,6 @@ fn count(messages: usize) -> String {
         "a Message".into()
     } else {
         format!("{messages} Messages")
-    }
-}
-
-/// Waits for [`Request::Refresh`], or `timeout` when there is one; `false` if nothing more can be asked. Other
-/// requests are dropped: they can't be done offline.
-async fn wait_for_refresh(
-    requests: &mut mpsc::UnboundedReceiver<Request>,
-    timeout: Option<Duration>,
-) -> bool {
-    let waiting = async {
-        loop {
-            match requests.recv().await {
-                Some(Request::Refresh) => return true,
-                Some(_) => {}
-                None => return false,
-            }
-        }
-    };
-    match timeout {
-        Some(timeout) => tokio::time::timeout(timeout, waiting).await.unwrap_or(true),
-        None => waiting.await,
     }
 }
 

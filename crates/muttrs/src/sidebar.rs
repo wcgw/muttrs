@@ -23,6 +23,8 @@ pub(crate) struct AccountState {
     pub(crate) counts: HashMap<String, Counts>,
     /// Who it sends as.
     pub(crate) sender: muttrs_mail::compose::Sender,
+    /// What's kept of it on disk: what shows before the server says.
+    pub(crate) cache: muttrs_mail::cache::Cache,
 }
 
 impl AccountState {

@@ -180,6 +180,9 @@ mouse = true                  # the wheel scrolls, clicks choose (and open, clic
 A theme of your own is a file, `~/.config/muttrs/themes/NAME.toml`, that restyles a built-in theme:
 [`themes/catppuccin-mocha.toml`](themes/catppuccin-mocha.toml) shows every style there is, and how they're written.
 
+muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.cache/muttrs/accounts/`, readable by
+you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline.
+
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.
 
 ## License
