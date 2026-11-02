@@ -634,3 +634,90 @@ async fn older_envelopes_come_page_by_page() {
     assert_eq!(listed.len(), 350);
     assert_eq!(listed[0].subject, "m1");
 }
+
+/// Appends Messages about lunch and about a report as `username` at `port`, then searches them through an
+/// Account's client.
+async fn search(port: u16, tls: Tls, username: &str, password_word: &str) {
+    let mut session = Session::connect(
+        &endpoint(port, tls),
+        tls::client_config(&roots()).unwrap(),
+        &password(username, password_word),
+    )
+    .await
+    .unwrap();
+    for subject in [
+        "lunch on Thursday",
+        "the quarterly report",
+        "re lunch",
+        "coffee \"au lait\"",
+    ] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    let tls_name = if tls == Tls::Ssl { "ssl" } else { "starttls" };
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo {password_word}\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = {port}, tls = \"{tls_name}\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    for (query, wanted) in [
+        ("lunch", vec!["lunch on Thursday", "re lunch"]),
+        ("quarterly", vec!["the quarterly report"]),
+        ("\"au lait\"", vec!["coffee \"au lait\""]),
+        ("nothing like it", vec![]),
+    ] {
+        client.send(Request::Search {
+            mailbox: "INBOX".into(),
+            query: query.into(),
+        });
+        let (found, count) = until(&mut updates, |update| match update {
+            Update::Found {
+                envelopes, count, ..
+            } => Some((envelopes.clone(), *count)),
+            Update::Failed(failed) => panic!("{failed}"),
+            _ => None,
+        })
+        .await;
+        let mut subjects: Vec<String> =
+            found.into_iter().map(|envelope| envelope.subject).collect();
+        subjects.sort();
+        assert_eq!(
+            (subjects, count),
+            (
+                wanted.iter().map(|s| (*s).to_owned()).collect(),
+                wanted.len()
+            ),
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn searching_dovecot() {
+    search(31143, Tls::Starttls, &user("search"), "secret").await;
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn searching_greenmail() {
+    search(3993, Tls::Ssl, &user("search"), "any").await;
+}

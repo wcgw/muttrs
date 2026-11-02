@@ -66,6 +66,8 @@ enum PromptKind {
     Command,
     /// The path of a file to attach to the Draft.
     Attach,
+    /// What to search the server for.
+    Server,
 }
 
 /// What's being written.
@@ -112,6 +114,8 @@ pub(crate) struct App {
     sidebar_shown: bool,
     focus: Focus,
     index: Option<Index>,
+    /// The Mailbox's Index, while the Index shows what a search found in it.
+    searched: Option<Index>,
     pager: Option<Pager>,
     /// The Message the Pager shows, or is waiting for.
     opened: Option<Opened>,
@@ -160,6 +164,7 @@ impl App {
             sidebar_shown: true,
             focus: Focus::Index,
             index: None,
+            searched: None,
             pager: None,
             opened: None,
             overlay: None,
@@ -275,13 +280,43 @@ impl App {
                 envelopes,
                 exists,
             } => {
-                if let Some(index) = self
-                    .index
-                    .as_mut()
-                    .filter(|index| index.account == account && index.mailbox == mailbox)
+                // While a search's results show, the Mailbox's Index is kept up to date aside.
+                let index = match &mut self.searched {
+                    Some(searched) => Some(searched),
+                    None => self.index.as_mut(),
+                };
+                if let Some(index) =
+                    index.filter(|index| index.account == account && index.mailbox == mailbox)
                 {
                     index.set(envelopes, exists);
                 }
+            }
+            Update::Found {
+                mailbox,
+                query,
+                envelopes,
+                count,
+            } => {
+                let Some(index) = self
+                    .index
+                    .take_if(|index| index.account == account && index.mailbox == mailbox)
+                else {
+                    return;
+                };
+                let found = index.found(query, envelopes, count);
+                if index.found.is_none() {
+                    self.searched = Some(index);
+                }
+                self.say(
+                    &match count {
+                        0 => "Nothing found".to_owned(),
+                        1 => "Found 1 Message".to_owned(),
+                        count => format!("Found {count} Messages"),
+                    },
+                    false,
+                );
+                self.index = Some(found);
+                self.focus = Focus::Index;
             }
             Update::Body { mailbox, uid, body } => {
                 let wanted = Opened {
@@ -544,6 +579,7 @@ impl App {
         state.client.send(client::Request::Open(name.to_owned()));
         self.sidebar
             .select(&self.accounts, &Row::Mailbox(account, name.to_owned()));
+        self.searched = None;
         self.index = Some(index);
         self.focus = Focus::Index;
     }
@@ -839,9 +875,16 @@ impl App {
             KeyCode::Char('n') => index.next_match(true),
             KeyCode::Char('N') => index.next_match(false),
             KeyCode::Esc => {
-                index.clear_search();
+                // Back from what a search on the server found, once there's no search of the Index to clear.
+                if !index.clear_search()
+                    && index.found.is_some()
+                    && let Some(searched) = self.searched.take()
+                {
+                    self.index = Some(searched);
+                }
             }
             KeyCode::Char('/') => self.prompt(PromptKind::Search),
+            KeyCode::Char('S') => self.prompt(PromptKind::Server),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.open_current(),
             KeyCode::Char('F') => self.toggle(Flag::Flagged),
             KeyCode::Char('U') => self.toggle(Flag::Seen),
@@ -997,6 +1040,7 @@ impl App {
                     PromptKind::Search => {}
                     PromptKind::Command => self.command(text.trim()),
                     PromptKind::Attach => self.attach(text.trim()),
+                    PromptKind::Server => self.search_server(text.trim()),
                 }
             }
             _ => {}
@@ -1037,6 +1081,21 @@ impl App {
                 self.open_mailbox(account, &name);
             }
             None => self.say(&format!("No Mailbox called {wanted}"), true),
+        }
+    }
+
+    /// Searches the open Mailbox on the server for `query`.
+    fn search_server(&mut self, query: &str) {
+        let Some(index) = &self.index else { return };
+        if query.is_empty() {
+            return;
+        }
+        if let Some(state) = self.accounts.get(index.account) {
+            state.client.send(client::Request::Search {
+                mailbox: index.mailbox.clone(),
+                query: query.to_owned(),
+            });
+            self.say(&format!("Searching {} for {query}…", index.label), false);
         }
     }
 
@@ -1150,6 +1209,7 @@ impl App {
                         ("j k g G", "move"),
                         ("Enter", "open"),
                         ("/ n N", "search senders and subjects"),
+                        ("S", "search the server (Gmail's syntax on Gmail)"),
                         ("T", "threads, or newest first"),
                         ("za zM zR", "fold the thread, all, none"),
                         ("J K", "in the Pager: the next Message, the previous"),
@@ -1336,6 +1396,17 @@ impl App {
             .accounts
             .get(index.account)
             .and_then(|state| state.counts.get(&index.mailbox));
+        if let Some((query, count)) = &index.found {
+            let listed = if index.len() < *count {
+                format!(" (newest {} listed)", index.len())
+            } else {
+                String::new()
+            };
+            return format!(
+                " {account} › {} › “{query}” · {count} found{listed} · Esc back",
+                index.label
+            );
+        }
         let unread = counts.map_or(index.unread(), |counts| counts.unread as usize);
         let messages = if index.loaded {
             let listed = if u32::try_from(index.len()).unwrap_or(u32::MAX) < index.exists {
@@ -1362,6 +1433,7 @@ impl App {
                 PromptKind::Search => "/",
                 PromptKind::Command => ":",
                 PromptKind::Attach => "Attach: ",
+                PromptKind::Server => "Search the server: ",
             };
             let line = Line::from(vec![Span::raw(lead), Span::raw(prompt.text.clone())]);
             buffer.set_line(area.x, area.y, &line, area.width);

@@ -68,6 +68,8 @@ pub(crate) struct Index {
     pub(crate) loaded: bool,
     /// Where asking for older Envelopes stands.
     more: More,
+    /// What a search on the server found, if that's what this lists: its query, and how many it found.
+    pub(crate) found: Option<(String, usize)>,
     cursor: usize,
     top: usize,
     height: usize,
@@ -100,6 +102,7 @@ impl Index {
             exists: 0,
             loaded: false,
             more: More::Idle,
+            found: None,
             cursor: 0,
             top: 0,
             height: 0,
@@ -121,6 +124,22 @@ impl Index {
         self.exists = exists;
         self.loaded = true;
         self.arrange(at);
+    }
+
+    /// What a search of this Index's Mailbox for `query` found: `envelopes`, the newest of `count`.
+    pub(crate) fn found(&self, query: String, envelopes: Vec<Envelope>, count: usize) -> Self {
+        let mut found = Self::new(
+            self.account,
+            self.mailbox.clone(),
+            self.label.clone(),
+            None,
+            self.threaded,
+        );
+        found.sent = self.sent;
+        found.set(envelopes, u32::try_from(count).unwrap_or(u32::MAX));
+        found.more = More::Exhausted;
+        found.found = Some((query, count));
+        found
     }
 
     /// Lays the rows out again, the cursor on Message `at` if it still shows.

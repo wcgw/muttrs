@@ -35,6 +35,13 @@ pub enum Request {
     Open(String),
     /// List older Envelopes of a Mailbox than those listed: as many again as were listed first.
     More(String),
+    /// Search a Mailbox on the server, for the Envelopes of the newest Messages found.
+    Search {
+        /// The Mailbox to search.
+        mailbox: String,
+        /// What to search for: Gmail's own syntax on Gmail, text anywhere in a Message elsewhere.
+        query: String,
+    },
     /// The whole of a Message.
     Body {
         /// The Mailbox it's in, by its name on the server.
@@ -149,6 +156,17 @@ pub enum Update {
         uid: u32,
         /// Its bytes, as RFC 5322 writes it, or why it couldn't be had.
         body: Result<Arc<Vec<u8>>, String>,
+    },
+    /// What a search found: the Envelopes of the newest Messages, oldest first, of how many it found.
+    Found {
+        /// The Mailbox searched.
+        mailbox: String,
+        /// What was searched for.
+        query: String,
+        /// The newest Messages found.
+        envelopes: Vec<Envelope>,
+        /// How many it found in all.
+        count: usize,
     },
     /// Something asked for is done, as this says.
     Done(String),
@@ -464,6 +482,7 @@ impl Worker {
                 self.open(session, &mailbox).await?;
             }
             Request::More(mailbox) => self.more(session, &mailbox).await?,
+            Request::Search { mailbox, query } => self.search(session, mailbox, query).await?,
             Request::Body { mailbox, uid } => self.body(session, &mailbox, uid).await?,
             Request::Flag {
                 mailbox,
@@ -664,6 +683,32 @@ impl Worker {
                 },
             });
         }
+        Ok(())
+    }
+
+    /// Searches `mailbox` for `query`, and tells the Envelopes of the newest Messages found.
+    async fn search(
+        &mut self,
+        session: &mut Session,
+        mailbox: String,
+        query: String,
+    ) -> Result<(), imap::Error> {
+        if self.selected.as_deref() != Some(mailbox.as_str()) {
+            self.select(session, &mailbox).await?;
+        }
+        let uids = session.search(&query, self.account.gmail).await?;
+        let newest = &uids[uids.len().saturating_sub(WINDOW as usize)..];
+        let envelopes = if newest.is_empty() {
+            Vec::new()
+        } else {
+            session.envelopes(&imap::uid_set(newest)).await?
+        };
+        (self.notify)(Update::Found {
+            mailbox,
+            query,
+            envelopes,
+            count: uids.len(),
+        });
         Ok(())
     }
 

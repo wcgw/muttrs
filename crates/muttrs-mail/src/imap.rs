@@ -271,6 +271,31 @@ impl Session {
         Ok(u32::try_from(unseen.len()).unwrap_or(u32::MAX))
     }
 
+    /// The UIDs of the open Mailbox's Messages that `query` finds: Gmail's own search syntax on Gmail
+    /// (`X-GM-RAW`), their text (`TEXT`, headers and bodies) elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, as when it can't search that, or the connection.
+    pub async fn search(&mut self, query: &str, gmail: bool) -> Result<Vec<u32>, Error> {
+        let criterion = if gmail { "X-GM-RAW" } else { "TEXT" };
+        let quoted = format!("\"{}\"", query.replace('\\', "\\\\").replace('"', "\\\""));
+        // Strictly, a quoted string is ASCII; servers that take UTF-8 at all take it so, said to be.
+        let charset = if query.is_ascii() {
+            ""
+        } else {
+            "CHARSET UTF-8 "
+        };
+        let mut uids: Vec<u32> = self
+            .session
+            .uid_search(format!("{charset}{criterion} {quoted}"))
+            .await?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
     /// Opens `mailbox`, to read and change its Messages.
     ///
     /// # Errors
@@ -619,7 +644,7 @@ fn read_envelope(fetch: &Fetch) -> Option<Envelope> {
 }
 
 /// UIDs as a UID set, runs of consecutive UIDs as ranges: `1:3,7`.
-pub(crate) fn uid_set(uids: &[u32]) -> String {
+pub fn uid_set(uids: &[u32]) -> String {
     let mut sorted = uids.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
