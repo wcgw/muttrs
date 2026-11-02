@@ -163,7 +163,7 @@ to open or save, `/` searches it, and `?` shows the keys.
 `~/.config/muttrs/config.toml` (or under `$XDG_CONFIG_HOME`, on macOS too). Everything in it is optional:
 
 ```toml
-theme = "tokyonight-moon"     # or "terminal", the terminal's own colours
+theme = "tokyonight-moon"     # or "terminal", the terminal's own colours, or a theme of your own (below)
 icons = "auto"                # Nerd Font icons: true, false, or "auto" (in Ghostty, kitty and WezTerm)
 images = "auto"               # Pictures: "kitty", "blocks" (half blocks), "off", or "auto" for the terminal's best
 load_remote_content = false   # load Remote Content without being asked
@@ -174,7 +174,11 @@ max_picture_rows = 24         # the most rows a Picture takes
 # download_dir = "~/Downloads"
 # editor = "nvim"             # what Drafts are written in; $VISUAL, $EDITOR or vi by default
 threads = true                # the Index in threads (T switches), or newest first
+mouse = true                  # the wheel scrolls, clicks choose (and open, clicked again); select text with Shift
 ```
+
+A theme of your own is a file, `~/.config/muttrs/themes/NAME.toml`, that restyles a built-in theme:
+[`themes/catppuccin-mocha.toml`](themes/catppuccin-mocha.toml) shows every style there is, and how they're written.
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.
 

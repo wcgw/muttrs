@@ -393,6 +393,22 @@ impl Index {
         self.cursor = self.rows.len().saturating_sub(1);
     }
 
+    /// Puts the cursor on the row drawn `offset` rows down from the top of the Index; `false` if it was there
+    /// already, as a second click is, or there's no row there.
+    pub(crate) fn click(&mut self, offset: usize) -> bool {
+        let row = self.top + offset;
+        if row >= self.rows.len() || row == self.cursor {
+            return false;
+        }
+        self.cursor = row;
+        true
+    }
+
+    /// Whether the row drawn `offset` rows down from the top is the cursor's.
+    pub(crate) fn is_cursor_at(&self, offset: usize) -> bool {
+        self.top + offset == self.cursor && self.cursor < self.rows.len()
+    }
+
     /// Moves to the next row, or the previous. `false` if there's none.
     pub(crate) fn step(&mut self, down: bool) -> bool {
         let next = if down {

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use base64::Engine as _;
 use crossterm::event::{
-    Event as TerminalEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event as TerminalEvent, EventStream, KeyCode,
+    KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use futures_util::StreamExt as _;
 use muttrs_gfx::{CellSize, Prepared, Protocol};
@@ -167,6 +168,8 @@ pub(crate) struct App {
     writing_to: Option<Vec<muttrs_mail::Address>>,
     /// The addresses seen, to complete with.
     addresses: AddressBook,
+    /// Where the sidebar and the Index were last drawn, for the mouse.
+    drawn: (Rect, Rect),
     quit: bool,
 }
 
@@ -215,6 +218,7 @@ impl App {
             } else {
                 AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
             },
+            drawn: (Rect::default(), Rect::default()),
             quit: false,
         }
     }
@@ -891,6 +895,7 @@ impl App {
     fn on_terminal(&mut self, event: &TerminalEvent) {
         match event {
             TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => self.on_key(*key),
+            TerminalEvent::Mouse(mouse) => self.on_mouse(*mouse),
             TerminalEvent::Resize(..) => {
                 let cell = cell_size();
                 if cell != self.pictures.cell() {
@@ -901,6 +906,56 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The wheel scrolls what it's over; a click chooses a row, and a second click on it opens it.
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.overlay.is_some() || self.prompt.is_some() {
+            return;
+        }
+        let lines = match mouse.kind {
+            MouseEventKind::ScrollDown => 3,
+            MouseEventKind::ScrollUp => -3,
+            MouseEventKind::Down(MouseButton::Left) => 0,
+            _ => return,
+        };
+        if let Some(compose) = &mut self.compose {
+            compose.scroll_by(lines);
+            return;
+        }
+        if let Some(pager) = &mut self.pager {
+            pager.scroll_by(lines);
+            return;
+        }
+        let (sidebar, index_area) = self.drawn;
+        let inside = |area: Rect| {
+            mouse.column >= area.x
+                && mouse.column < area.x + area.width
+                && mouse.row >= area.y
+                && mouse.row < area.y + area.height
+        };
+        let offset = |area: Rect| usize::from(mouse.row.saturating_sub(area.y));
+        if inside(sidebar) {
+            if lines != 0 {
+                self.sidebar.move_by(&self.accounts, lines);
+            } else if let Some(row) = self.sidebar.click(&self.accounts, offset(sidebar)) {
+                self.focus = Focus::Sidebar;
+                if let Row::Mailbox(account, name) = row {
+                    self.open_mailbox(account, &name);
+                }
+            }
+        } else if inside(index_area) {
+            let Some(index) = &mut self.index else { return };
+            if lines != 0 {
+                index.move_by(lines);
+            } else {
+                self.focus = Focus::Index;
+                if !index.click(offset(index_area)) && index.is_cursor_at(offset(index_area)) {
+                    self.open_current();
+                }
+            }
+            self.more_if_wanted();
         }
     }
 
@@ -1615,6 +1670,13 @@ impl App {
             width: area.width - sidebar_width,
             ..area
         };
+        self.drawn = (
+            Rect {
+                width: sidebar_width,
+                ..area
+            },
+            index_area,
+        );
         if let Some(index) = &mut self.index {
             index.draw(
                 index_area,
@@ -1880,8 +1942,12 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
 /// Draws `app` as events come, until it quits.
 async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyhow::Result<()> {
     let kitty = app.pictures.is_kitty();
+    let mouse = app.config.mouse;
     let mut terminal = ratatui::try_init().context("setting up the terminal")?;
     let mut out = io::stdout();
+    if mouse {
+        let _ = crossterm::execute!(out, EnableMouseCapture);
+    }
     let outcome = async {
         if kitty {
             muttrs_gfx::forget_all(&mut out)?;
@@ -1899,6 +1965,9 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
             {
                 // The editor takes the terminal: the input stream lets go of it first, so as not to read its keys.
                 drop(input);
+                if mouse {
+                    let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
+                }
                 ratatui::restore();
                 let status = compose::edit(&compose::editor(app.config.editor.as_deref()), &path);
                 terminal = ratatui::try_init().context("setting up the terminal again")?;
@@ -1908,6 +1977,9 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
                     io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
                 )?;
+                if mouse {
+                    let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
+                }
                 input = EventStream::new();
                 app.edited(status);
                 continue;
@@ -1924,6 +1996,9 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
     }
     .await;
     app.addresses.save();
+    if mouse {
+        let _ = crossterm::execute!(out, DisableMouseCapture);
+    }
     if kitty {
         let _ = muttrs_gfx::forget_all(&mut out);
     }

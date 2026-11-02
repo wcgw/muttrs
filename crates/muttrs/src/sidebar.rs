@@ -149,6 +149,14 @@ impl Sidebar {
         self.cursor = rows(accounts).len().saturating_sub(1);
     }
 
+    /// The row drawn `offset` rows down from the top of the sidebar, the cursor put on it.
+    pub(crate) fn click(&mut self, accounts: &[AccountState], offset: usize) -> Option<Row> {
+        let row = self.top + offset;
+        let found = rows(accounts).into_iter().nth(row)?;
+        self.cursor = row;
+        Some(found)
+    }
+
     /// Puts the cursor on `row`, if it's listed.
     pub(crate) fn select(&mut self, accounts: &[AccountState], row: &Row) {
         if let Some(at) = rows(accounts).iter().position(|listed| listed == row) {

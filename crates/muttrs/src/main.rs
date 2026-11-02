@@ -120,7 +120,7 @@ fn setup() -> anyhow::Result<ui::Setup> {
         Auto::Detect => terminal.has_nerd_font_symbols,
     };
     let icons = if nerd { Icons::NERD } else { Icons::PLAIN };
-    let theme = Theme::named(&config.theme, &icons).expect("a theme the configuration checked");
+    let theme = Theme::load(&config.theme, &icons, xdg::config_dir().as_deref())?;
     let protocol = match config.images {
         Images::Auto => Some(terminal.protocol),
         Images::Kitty => Some(Protocol::Kitty),

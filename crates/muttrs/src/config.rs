@@ -36,6 +36,8 @@ pub(crate) struct Config {
     pub(crate) editor: Option<String>,
     /// Whether the Index shows Messages in threads, at first; `T` switches.
     pub(crate) threads: bool,
+    /// Whether muttrs takes the mouse: its wheel scrolls, its clicks choose. Terminals then select text with Shift.
+    pub(crate) mouse: bool,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -55,6 +57,7 @@ impl Default for Config {
             download_dir: None,
             editor: None,
             threads: true,
+            mouse: true,
             accounts: Vec::new(),
         }
     }
@@ -129,14 +132,7 @@ impl Config {
     fn parse(text: &str, path: &Path) -> anyhow::Result<Self> {
         let config: Self =
             toml::from_str(text).with_context(|| format!("in {}", path.display()))?;
-        if !crate::theme::Theme::NAMES.contains(&config.theme.as_str()) {
-            bail!(
-                "in {}: there's no theme {:?}; the themes are {}",
-                path.display(),
-                config.theme,
-                crate::theme::Theme::NAMES.join(", ")
-            );
-        }
+        // The theme is checked when it's loaded: it may be a file of the user's.
         if config
             .pixel_ratio
             .is_some_and(|ratio| !(0.25..=8.0).contains(&ratio))
@@ -216,7 +212,6 @@ mod tests {
 
     #[test]
     fn mistakes_are_errors() {
-        assert!(parse("theme = \"nope\"").is_err());
         assert!(parse("icons = \"sometimes\"").is_err());
         assert!(parse("colour = 1").is_err(), "unknown keys aren't ignored");
     }

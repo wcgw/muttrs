@@ -128,7 +128,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       editor; the addresses are kept in a file the editor can complete from too
 - [x] Signatures (`signature`, `signature_file`), above the quote; `identities`, replies from the one written to, and
       left out of reply-all; a new Draft left as it was is dropped
-- [ ] Mouse wheel scrolling; themes from files
+- [x] The mouse: the wheel scrolls what it's over, a click chooses, a second opens; themes from files, over a
+      built-in theme (Catppuccin Mocha shipped as the example)
 
 ### Later
 
