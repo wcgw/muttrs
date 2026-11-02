@@ -697,6 +697,7 @@ mod tests {
             references: Vec::new(),
             size: 0,
             has_attachments: false,
+            gmail_thread: None,
         }
     }
 

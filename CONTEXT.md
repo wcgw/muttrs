@@ -47,8 +47,9 @@ The list of the Messages of the open Mailbox, newest first.
 _Avoid_: list, inbox (the Inbox is a Mailbox)
 
 **Thread**:
-Messages linked by what they reply to (their `References` and `In-Reply-To`), each under its parent. The Index shows
-them so, the thread whose latest Message is newest first; one can be folded into the Message heading it.
+Messages linked by what they reply to (their `References` and `In-Reply-To`), each under its parent; on Gmail, also
+those Gmail has in one thread (`X-GM-THRID`), under the earliest of them. The Index shows them so, the thread whose
+latest Message is newest first; one can be folded into the Message heading it.
 _Avoid_: conversation
 
 **Selection**:
