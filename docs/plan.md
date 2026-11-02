@@ -59,12 +59,16 @@ Two rules came from trying it on newsletters: centred text that wraps is a parag
 buttons and footers stay centred); and list items are never centred, which would part them from their markers.
 `cargo run -p muttrs-render --example render -- FILE.html [WIDTH]` prints a file's Rendering.
 
-### 3. Pictures and the Pager on a file
+### 3. Pictures and the Pager on a file ✅
 
-- [ ] muttrs-gfx: kitty Unicode placeholders and half blocks, chosen for the terminal
-- [ ] `muttrs view FILE.eml`: headers, body, inline (`cid:`) images, Remote Content on request, Links, Attachments,
+- [x] muttrs-gfx: kitty Unicode placeholders and half blocks, chosen for the terminal
+- [x] `muttrs view FILE.eml`: headers, body, inline (`cid:`) images, Remote Content on request, Links, Attachments,
       HTML/plain toggle, search
-- [ ] Theme, Nerd Font icons with plain fallbacks, configuration file
+- [x] Theme, Nerd Font icons with plain fallbacks, configuration file
+
+HTML sizes images in CSS pixels, and HiDPI terminals report cells in device pixels (about 20 × 40 on a 2× screen),
+which drew images at half their size. The pixel ratio is guessed from the cells' height, and can be configured.
+Tried in tmux (half blocks); kitty placeholders are tested by their escape sequences, not yet on screen.
 
 ### 4. Accounts over IMAP (muttrs-mail)
 

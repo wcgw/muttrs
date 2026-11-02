@@ -24,6 +24,7 @@ fn main() {
     let rendering = document.render(&Options {
         width,
         cell: CellSize::default(),
+        pixel_ratio: 1.0,
         max_picture_rows: 20,
         pictures: &[],
     });

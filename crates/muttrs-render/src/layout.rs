@@ -283,6 +283,7 @@ impl Cx<'_> {
             width,
             self.options.max_picture_rows,
             self.options.cell,
+            self.options.pixel_ratio,
         )
     }
 }

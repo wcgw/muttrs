@@ -144,6 +144,18 @@ pub struct CellSize {
     pub height: u32,
 }
 
+impl CellSize {
+    /// How many pixels a CSS pixel likely takes on cells of this size: the terminal's font is about 20 pixels high
+    /// on a screen of ordinary density, so cells twice as high are likely on a screen of twice the density.
+    #[must_use]
+    pub fn likely_pixel_ratio(self) -> f32 {
+        // A cell's height is far below where f32 loses precision.
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = (self.height as f32 / 20.0).round();
+        ratio.clamp(1.0, 3.0)
+    }
+}
+
 impl Default for CellSize {
     /// What's assumed where the terminal doesn't say.
     fn default() -> Self {
@@ -156,9 +168,9 @@ impl Default for CellSize {
 
 impl Image {
     /// The cells, columns then rows, its Picture takes when its pixels are `pixels`, at most `max_cols` wide and
-    /// `max_rows` high on cells of `cell` pixels: the size the HTML gives it, or else its own, in CSS pixels, shrunk
-    /// to fit and never enlarged. `None` for an image too small to be worth lines of its own: a Tracking Pixel, a
-    /// spacer, an icon.
+    /// `max_rows` high on cells of `cell` pixels, `ratio` of them to a CSS pixel: the size the HTML gives it, or else
+    /// its own, in CSS pixels, shrunk to fit and never enlarged. `None` for an image too small to be worth lines of
+    /// its own: a Tracking Pixel, a spacer, an icon.
     #[must_use]
     pub fn cells(
         &self,
@@ -166,12 +178,18 @@ impl Image {
         max_cols: u16,
         max_rows: u16,
         cell: CellSize,
+        ratio: f32,
     ) -> Option<(u16, u16)> {
         let (natural_width, natural_height) = (f64::from(pixels.0), f64::from(pixels.1));
         if natural_width <= 3.0 || natural_height <= 3.0 || max_cols == 0 || max_rows == 0 {
             return None;
         }
-        let (cell_width, cell_height) = (f64::from(cell.width), f64::from(cell.height));
+        // Cells measured in CSS pixels.
+        let ratio = f64::from(ratio).max(0.25);
+        let (cell_width, cell_height) = (
+            f64::from(cell.width) / ratio,
+            f64::from(cell.height) / ratio,
+        );
         let container = f64::from(max_cols) * cell_width;
         let length = |length: Option<Length>| match length {
             Some(Length::Pixels(pixels)) => Some(f64::from(pixels)),
@@ -270,6 +288,9 @@ pub struct Options<'a> {
     pub width: u16,
     /// The pixel size of the terminal's cells, to size Pictures.
     pub cell: CellSize,
+    /// How many of the terminal's pixels make a CSS pixel: 2 on most HiDPI screens. HTML sizes images in CSS
+    /// pixels, as browsers draw them.
+    pub pixel_ratio: f32,
     /// The most rows a Picture takes.
     pub max_picture_rows: u16,
     /// The pixel size of each of the document's images that can be drawn, by its index in [`Document::images`];

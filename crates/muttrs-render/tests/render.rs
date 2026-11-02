@@ -12,6 +12,7 @@ fn render(document: &Document, width: u16, pictures: &[Option<(u32, u32)>]) -> R
             width: 10,
             height: 20,
         },
+        pixel_ratio: 1.0,
         max_picture_rows: 20,
         pictures,
     })

@@ -22,11 +22,28 @@ module_name_repetitions = "allow"
 doc_markdown = "allow"
 
 [workspace.dependencies]
+anyhow = "1.0.104"
 base64 = "0.23.1"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 ego-tree = "0.11.1"
+jiff = "0.2.39"
+# Every charset mail is written in, through encoding_rs, not only the single-byte ones.
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+open = "5.4.5"
 ratatui = "0.30.2"
+# Remote Content and OAuth2's token endpoint. TLS by rustls with ring, installed as the process' provider, and the
+# platform's verifier (the Keychain on macOS); no aws-lc, which needs a C toolchain and CMake.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "form", "json", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
 ratatui-core = "0.1.2"
 # HTML parsing (html5ever) and CSS selectors, for the rules of `<style>` elements.
 scraper = "0.29.0"
