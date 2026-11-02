@@ -45,15 +45,19 @@ Each lands as one or more commits, with its docs.
 - [x] Workspace, lints, CI for Linux and macOS
 - [x] README, CONTEXT, this plan, ADRs for the three decisions above
 
-### 2. Rendering (muttrs-render)
+### 2. Rendering (muttrs-render) ✅
 
-- [ ] HTML: whitespace, blocks and inlines, headings, paragraphs, lists, block quotes, `pre`, `hr`, `br`
-- [ ] HTML: inline styles and `<style>` rules (color, weight, style, decoration, `display:none`, alignment), colours
+- [x] HTML: whitespace, blocks and inlines, headings, paragraphs, lists, block quotes, `pre`, `hr`, `br`
+- [x] HTML: inline styles and `<style>` rules (color, weight, style, decoration, `display:none`, alignment), colours
       adapted to the theme's background
-- [ ] HTML: what newsletters hide (preheaders, `mso-hide`, zero-size text, spacer characters)
-- [ ] HTML: tables, as grids when they hold data, linearised when they lay out a page
-- [ ] HTML: Links numbered, as w3m does; images as slots sized from attributes or their pixels; tracking pixels dropped
-- [ ] Plain text: quotes by depth, signatures, `format=flowed`, URLs as Links
+- [x] HTML: what newsletters hide (preheaders, `mso-hide`, zero-size text, spacer characters)
+- [x] HTML: tables, as grids when they hold data, linearised when they lay out a page
+- [x] HTML: Links numbered, as w3m does; images as slots sized from attributes or their pixels; tracking pixels dropped
+- [x] Plain text: quotes by depth, signatures, `format=flowed`, URLs as Links
+
+Two rules came from trying it on newsletters: centred text that wraps is a paragraph, and goes left (headings,
+buttons and footers stay centred); and list items are never centred, which would part them from their markers.
+`cargo run -p muttrs-render --example render -- FILE.html [WIDTH]` prints a file's Rendering.
 
 ### 3. Pictures and the Pager on a file
 
