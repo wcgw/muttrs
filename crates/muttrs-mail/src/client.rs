@@ -183,7 +183,7 @@ impl Client {
     ///
     /// If TLS can't be set up for it.
     pub fn spawn(account: Account, cache: Cache, notify: Notify) -> Result<Self, tls::Error> {
-        let tls = tls::client_config(account.ca_file.as_deref())?;
+        let tls = tls::client_config(&account.trust)?;
         let account = Arc::new(account);
         let credentials = Arc::new(CredentialSource::new(Arc::clone(&account)));
         let (requests, received) = mpsc::unbounded_channel();
@@ -306,6 +306,10 @@ async fn connect(
         Ok(session) => Ok(session),
         Err(error) if error.is_sign_in() => {
             credentials.forget_token().await;
+            Err(Failure::SignIn(error.to_string()))
+        }
+        // A certificate that isn't trusted won't be on the next try either: that waits for the user too.
+        Err(error @ imap::Error::Tls(tls::Error::Untrusted { .. })) => {
             Err(Failure::SignIn(error.to_string()))
         }
         Err(error) => Err(Failure::Network(error.to_string())),
@@ -526,14 +530,9 @@ impl Worker {
         tokio::spawn(async move {
             let sent = async {
                 let signing_in = credentials.credentials().await?;
-                smtp::send(
-                    &account.smtp,
-                    account.ca_file.as_deref(),
-                    &signing_in,
-                    &built,
-                )
-                .await
-                .map_err(|error| error.to_string())
+                smtp::send(&account.smtp, &account.trust, &signing_in, &built)
+                    .await
+                    .map_err(|error| error.to_string())
             }
             .await;
             if sent.is_ok() {

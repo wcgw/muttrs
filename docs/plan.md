@@ -107,6 +107,10 @@ Tried in tmux against the test servers: reading, stepping with `J`/`K`, flagging
 Tried in tmux with Neovim as the editor, sending through the test servers: replies arrive with `In-Reply-To`, both
 bodies and their Attachments, and land in Sent. Postponing needs a recipient, as building the Message does.
 
+Servers with certificates of their own (mail bridges): `server_certificate` trusts the certificates named, exactly,
+and `muttrs trust NAME` shows and keeps what the servers present. Tested in-process with a self-signed CA certificate
+(webpki's `CaUsedAsEndEntity`, as Proton Mail Bridge's gives), and against the test servers over STARTTLS and TLS.
+
 ### 7. Next
 
 - [ ] Resuming a Postponed Draft (open it from Drafts, `e`)

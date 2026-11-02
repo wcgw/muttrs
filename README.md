@@ -42,6 +42,28 @@ smtp = { host = "smtp.example.com", tls = "starttls" } # "ssl" (465) or "starttl
 then `muttrs login home` asks for the password and keeps it in the keyring (the Secret Service through
 `secret-tool` on Linux, the login Keychain on macOS), and checks it signs in.
 
+### Servers with a certificate of their own
+
+A server whose certificate no CA signed, as a mail bridge's (Proton Mail Bridge's, say) or one you run, is refused:
+its certificate isn't trusted. To trust it as it is,
+
+```sh
+muttrs trust home
+```
+
+shows the SHA-256 fingerprints of the certificates the Account's servers present, keeps them once you say so (in
+`~/.config/muttrs/certificates/home.pem`), and says the line to add to the Account:
+
+```toml
+server_certificate = "~/.config/muttrs/certificates/home.pem"
+```
+
+Compare the fingerprints with what the server says its certificate is first: for Proton Mail Bridge, export its
+certificate from its settings, and `openssl x509 -noout -fingerprint -sha256 -in cert.pem`; or point
+`server_certificate` at that file directly. The servers may then present those certificates and no other (the
+handshake still checks they hold their keys), whoever signed them, whatever names they're for and however old they
+are. For servers whose certificates a CA of your own signs, `ca_file = "ca.pem"` trusts that CA instead.
+
 ### Gmail
 
 ```toml

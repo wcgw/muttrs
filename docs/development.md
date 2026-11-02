@@ -41,6 +41,8 @@ scripts/test-servers.sh down
 The tests sign in as users of their own, so they can run again without starting the servers afresh. Dovecot lists
 Sent, Drafts, Junk and Trash with their SPECIAL-USE Roles; GreenMail lists only the Inbox.
 
+The tests also trust the servers' certificate as it is (`server.pem`, next to the CA), as `server_certificate` does.
+
 To use them from muttrs, give an Account the CA:
 
 ```toml

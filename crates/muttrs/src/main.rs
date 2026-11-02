@@ -11,6 +11,7 @@ mod pictures;
 mod remote;
 mod sidebar;
 mod theme;
+mod trust;
 mod ui;
 mod xdg;
 
@@ -30,6 +31,7 @@ muttrs, a terminal mail client
 Usage:
   muttrs               read and write mail, with the accounts in the configuration
   muttrs login NAME    sign in to account NAME, keeping its password or OAuth2 token in the keyring
+  muttrs trust NAME    trust the certificates account NAME's servers present, as they are (self-signed ones)
   muttrs view FILE     show a Message saved as a file (.eml), in the Pager
   muttrs --help        show this
   muttrs --version     show the version
@@ -54,6 +56,7 @@ fn main() -> ExitCode {
         }
         [] => run(mail()),
         ["login", name] => run(login::login(name)),
+        ["trust", name] => run(trust::trust(name)),
         ["view", path] => run(view(path)),
         _ => {
             eprintln!("{USAGE}");

@@ -37,5 +37,9 @@ Outlook and Dovecot all report, and can be set in the configuration.
 - Each Account has a worker task owning its IMAP session; a second session IDLEs on the Inbox. Gmail drops IDLE after
   about 30 minutes, so it's renewed every 25.
 - IMAP is async-imap over tokio-rustls; SMTP is lettre. Both use the platform's root certificates, plus a CA file
-  when one is configured (for a self-signed test server).
+  when one is configured. A server with a certificate of its own (a mail bridge's, self-signed and marked a CA's,
+  which webpki won't take as a server's) is trusted by naming that certificate instead (`server_certificate`, which
+  `muttrs trust` saves): it must be exactly one of those, and nothing else is checked of it but that the handshake
+  proves its key. lettre takes no verifier of muttrs' own, so SMTP connects without verifying, then compares the
+  certificate presented before signing in; lettre's lenient verifier still checks the handshake's signatures.
 - Outlook and Microsoft 365 work the same way, with Microsoft's endpoints and scopes, but are untested.

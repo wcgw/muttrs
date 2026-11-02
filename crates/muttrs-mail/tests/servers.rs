@@ -12,12 +12,25 @@ use muttrs_mail::account::{Endpoint, Tls};
 use muttrs_mail::cache::Cache;
 use muttrs_mail::client::{Client, Connection, Request, Update};
 use muttrs_mail::imap::{Credentials, Error, Session};
+use muttrs_mail::tls::Trust;
 use muttrs_mail::{AccountConfig, Message, Role, tls};
 
 fn ca() -> std::path::PathBuf {
     std::env::var_os("MUTTRS_TEST_CA")
         .expect("MUTTRS_TEST_CA names the test servers' CA: see scripts/test-servers.sh")
         .into()
+}
+
+/// Trusting the test servers' CA.
+fn roots() -> Trust {
+    Trust::Roots {
+        ca_file: Some(ca()),
+    }
+}
+
+/// Trusting the test servers' own certificate as it is, which `scripts/test-servers.sh` keeps next to the CA.
+fn pinned() -> Trust {
+    Trust::Pinned(ca().with_file_name("server.pem"))
 }
 
 /// A user no other test, nor an earlier run, has used.
@@ -110,7 +123,7 @@ async fn exercise(mut session: Session) {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn greenmail_over_tls() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let username = user("greenmail-tls");
     let session = Session::connect(
         &endpoint(3993, Tls::Ssl),
@@ -125,7 +138,7 @@ async fn greenmail_over_tls() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn greenmail_with_xoauth2() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let credentials = Credentials::Bearer {
         username: user("greenmail-xoauth2"),
         token: "ya29.any-token".into(),
@@ -139,7 +152,7 @@ async fn greenmail_with_xoauth2() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn dovecot_with_starttls() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let username = user("dovecot-starttls");
     let session = Session::connect(
         &endpoint(31143, Tls::Starttls),
@@ -154,7 +167,7 @@ async fn dovecot_with_starttls() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn dovecot_over_tls() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let username = user("dovecot-tls");
     let mut session = Session::connect(
         &endpoint(31993, Tls::Ssl),
@@ -170,7 +183,7 @@ async fn dovecot_over_tls() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn no_starttls_no_sign_in() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let error = Session::connect(
         &endpoint(3143, Tls::Starttls),
         config,
@@ -184,7 +197,7 @@ async fn no_starttls_no_sign_in() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn a_wrong_password_is_a_sign_in_failure() {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     let error = Session::connect(
         &endpoint(31993, Tls::Ssl),
         config,
@@ -198,7 +211,7 @@ async fn a_wrong_password_is_a_sign_in_failure() {
 #[tokio::test]
 #[ignore = "needs scripts/test-servers.sh"]
 async fn without_the_ca_the_certificate_is_refused() {
-    let config = tls::client_config(None).unwrap();
+    let config = tls::client_config(&Trust::default()).unwrap();
     let error = Session::connect(
         &endpoint(31993, Tls::Ssl),
         config,
@@ -238,7 +251,7 @@ async fn an_accounts_client_lists_opens_reads_and_sees_new_mail() {
     // Messages there before the client connects.
     let mut session = Session::connect(
         &endpoint(31143, Tls::Starttls),
-        tls::client_config(Some(&ca())).unwrap(),
+        tls::client_config(&roots()).unwrap(),
         &password(&username, "secret"),
     )
     .await
@@ -350,7 +363,7 @@ fn built(from: &str, to: &str, subject: &str) -> muttrs_mail::compose::Built {
 
 /// Waits until GreenMail has delivered a Message to `user`'s Inbox, and gives its subjects.
 async fn delivered(user: &str) -> Vec<String> {
-    let config = tls::client_config(Some(&ca())).unwrap();
+    let config = tls::client_config(&roots()).unwrap();
     for _ in 0..40 {
         let mut session = Session::connect(
             &endpoint(3993, Tls::Ssl),
@@ -382,7 +395,7 @@ async fn sending_over_tls_to_greenmail() {
     let sent = built(&from, &to, "over TLS");
     muttrs_mail::smtp::send(
         &endpoint(3465, Tls::Ssl),
-        Some(&ca()),
+        &roots(),
         &password(&from, "any"),
         &sent,
     )
@@ -401,7 +414,7 @@ async fn sending_with_xoauth2() {
     };
     muttrs_mail::smtp::send(
         &endpoint(3465, Tls::Ssl),
-        Some(&ca()),
+        &roots(),
         &credentials,
         &built(&from, &to, "with XOAUTH2"),
     )
@@ -417,7 +430,7 @@ async fn sending_with_starttls_through_dovecot() {
     let from = "alex@localhost";
     muttrs_mail::smtp::send(
         &endpoint(31587, Tls::Starttls),
-        Some(&ca()),
+        &roots(),
         &password("alex", "secret"),
         &built(from, &to, "with STARTTLS"),
     )
@@ -431,7 +444,7 @@ async fn sending_with_starttls_through_dovecot() {
 async fn a_refused_password_is_no_sending() {
     let error = muttrs_mail::smtp::send(
         &endpoint(31587, Tls::Starttls),
-        Some(&ca()),
+        &roots(),
         &password("alex", "wrong"),
         &built("alex@localhost", "nobody@localhost", "refused"),
     )
@@ -485,4 +498,80 @@ async fn an_accounts_client_sends_and_keeps_a_copy() {
     })
     .await;
     assert_eq!(counts.messages, 1);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn a_servers_own_certificate_trusted_as_it_is() {
+    let config = tls::client_config(&pinned()).unwrap();
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        config,
+        &password(&user("pinned"), "secret"),
+    )
+    .await
+    .unwrap();
+    assert_ne!(session.mailboxes().await.unwrap(), []);
+
+    let (from, to) = (user("pinned-from"), user("pinned-to"));
+    muttrs_mail::smtp::send(
+        &endpoint(3465, Tls::Ssl),
+        &pinned(),
+        &password(&from, "any"),
+        &built(&from, &to, "pinned"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delivered(&to).await, ["pinned"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn another_certificate_than_the_one_trusted_is_refused() {
+    // The CA's certificate, pinned, isn't the server's.
+    let wrong = Trust::Pinned(ca());
+    let error = Session::connect(
+        &endpoint(31993, Tls::Ssl),
+        tls::client_config(&wrong).unwrap(),
+        &password(&user("wrong-pin"), "secret"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("isn't one of server_certificate's"),
+        "{error}"
+    );
+
+    let error = muttrs_mail::smtp::send(
+        &endpoint(31587, Tls::Starttls),
+        &wrong,
+        &password("alex", "secret"),
+        &built("alex@localhost", "nobody@localhost", "refused"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, muttrs_mail::smtp::Error::NotPinned(..)),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn what_servers_present_is_seen_before_it_is_trusted() {
+    let server = tls::certificates(&ca().with_file_name("server.pem")).unwrap();
+    for imap in [endpoint(31143, Tls::Starttls), endpoint(3993, Tls::Ssl)] {
+        let presented = muttrs_mail::imap::presented_certificates(&imap)
+            .await
+            .unwrap();
+        assert_eq!(presented[0], server[0], "{imap}");
+    }
+    for smtp in [endpoint(31587, Tls::Starttls), endpoint(3465, Tls::Ssl)] {
+        let presented = muttrs_mail::smtp::presented_certificates(&smtp)
+            .await
+            .unwrap();
+        assert_eq!(presented[0], server[0].as_ref(), "{smtp}");
+    }
 }

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::tls::Trust;
+
 /// An Account as the configuration writes it, under `[[account]]`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,8 +31,13 @@ pub struct AccountConfig {
     pub password_command: Option<String>,
     /// OAuth2's client and endpoints; a provider fills in the endpoints.
     pub oauth2: Option<OAuth2Config>,
-    /// A PEM file of certificates to trust besides the platform's, as for a server with a certificate of its own.
+    /// A PEM file of CA certificates to trust besides the platform's, as for servers whose certificates a CA of
+    /// one's own signs.
     pub ca_file: Option<PathBuf>,
+    /// A PEM file of the certificates the servers present, to trust as they are and to trust alone: for a server
+    /// with a certificate of its own, self-signed, as mail bridges have (Proton Mail Bridge's, say).
+    /// `muttrs trust NAME` saves them.
+    pub server_certificate: Option<PathBuf>,
     /// Whether to put a copy of what's sent in the Sent Mailbox; not for Gmail, which does it itself.
     pub copy_to_sent: Option<bool>,
     /// Mailboxes by Role, where the server doesn't say (SPECIAL-USE), as `{ archive = "Archive" }`.
@@ -208,8 +215,8 @@ pub struct Account {
     pub smtp: Endpoint,
     /// How it signs in, to both.
     pub auth: Auth,
-    /// A PEM file of certificates to trust besides the platform's.
-    pub ca_file: Option<PathBuf>,
+    /// How its servers' certificates are trusted.
+    pub trust: Trust,
     /// Whether to put a copy of what's sent in the Sent Mailbox.
     pub copy_to_sent: bool,
     /// Mailboxes by Role, where the configuration names them.
@@ -335,6 +342,19 @@ impl AccountConfig {
                 })
             }
         };
+        let trust = match (self.ca_file, self.server_certificate) {
+            (Some(_), Some(_)) => {
+                return Err(invalid(
+                    "ca_file and server_certificate don't go together: one trusts the certificates a CA signs, \
+                     the other a server's own certificate"
+                        .into(),
+                ));
+            }
+            (ca_file, None) => Trust::Roots {
+                ca_file: ca_file.map(|path| home(&path)),
+            },
+            (None, Some(certificate)) => Trust::Pinned(home(&certificate)),
+        };
         let gmail = self.provider == Some(Provider::Gmail)
             || imap.host.eq_ignore_ascii_case("imap.gmail.com");
         Ok(Account {
@@ -345,12 +365,20 @@ impl AccountConfig {
             imap,
             smtp,
             auth,
-            ca_file: self.ca_file,
+            trust,
             // Gmail files what its SMTP server sends in Sent itself: a copy would be a duplicate.
             copy_to_sent: self.copy_to_sent.unwrap_or(!gmail),
             roles: self.mailboxes,
             gmail,
         })
+    }
+}
+
+/// `path`, with a leading `~/` meaning the home directory.
+fn home(path: &std::path::Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) if !home.is_empty() => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -457,6 +485,23 @@ mod tests {
         assert_eq!(own.smtp.port, 465);
         assert_eq!(own.auth, Auth::Password(PasswordSource::Keyring));
         assert!(own.copy_to_sent && !own.gmail);
+    }
+
+    #[test]
+    fn a_servers_own_certificate_is_trusted_alone() {
+        let bridge = account(
+            "name = \"bridge\"\nemail = \"a@proton.me\"\nserver_certificate = \"/b/cert.pem\"\n\
+             imap = { host = \"127.0.0.1\", port = 1143, tls = \"starttls\" }\n\
+             smtp = { host = \"127.0.0.1\", port = 1025, tls = \"starttls\" }",
+        )
+        .unwrap();
+        assert_eq!(bridge.trust, Trust::Pinned("/b/cert.pem".into()));
+        let both = account(
+            "name = \"b\"\nemail = \"a@x\"\nserver_certificate = \"c.pem\"\nca_file = \"ca.pem\"\n\
+             imap = { host = \"x\" }\nsmtp = { host = \"x\" }",
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("don't go together"), "{both}");
     }
 
     #[test]

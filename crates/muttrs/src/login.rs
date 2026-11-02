@@ -8,30 +8,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use muttrs_mail::account::{Auth, PasswordSource};
 use muttrs_mail::imap::{Credentials, Session};
 use muttrs_mail::secret::{self, Kind};
-use muttrs_mail::{client, oauth2, tls};
+use muttrs_mail::{Account, client, oauth2, tls};
 
 use crate::config::Config;
 
 pub(crate) async fn login(name: &str) -> anyhow::Result<()> {
     let config = Config::load()?;
-    let names: Vec<&str> = config
-        .accounts
-        .iter()
-        .map(|account| account.name.as_str())
-        .collect();
-    let account = config
-        .accounts
-        .iter()
-        .find(|account| account.name == name)
-        .ok_or_else(|| match names.as_slice() {
-            [] => anyhow!("there are no accounts in the configuration"),
-            names => anyhow!(
-                "there's no account {name:?}; there are: {}",
-                names.join(", ")
-            ),
-        })?
-        .clone()
-        .resolve()?;
+    let account = account(&config, name)?;
     let credentials = match &account.auth {
         Auth::OAuth2(settings) => {
             let client_secret = client::client_secret(settings.client_secret.as_ref()).await?;
@@ -75,13 +58,35 @@ pub(crate) async fn login(name: &str) -> anyhow::Result<()> {
     };
     print!("Signing in to {}… ", account.imap);
     io::stdout().flush()?;
-    let tls = tls::client_config(account.ca_file.as_deref())?;
+    let tls = tls::client_config(&account.trust)?;
     let session = Session::connect(&account.imap, tls, &credentials)
         .await
         .context("signing in failed")?;
     session.logout().await;
     println!("done.");
     Ok(())
+}
+
+/// The Account called `name` in `config`, resolved.
+pub(crate) fn account(config: &Config, name: &str) -> anyhow::Result<Account> {
+    let names: Vec<&str> = config
+        .accounts
+        .iter()
+        .map(|account| account.name.as_str())
+        .collect();
+    Ok(config
+        .accounts
+        .iter()
+        .find(|account| account.name == name)
+        .ok_or_else(|| match names.as_slice() {
+            [] => anyhow!("there are no accounts in the configuration"),
+            names => anyhow!(
+                "there's no account {name:?}; there are: {}",
+                names.join(", ")
+            ),
+        })?
+        .clone()
+        .resolve()?)
 }
 
 /// A line typed at the terminal without showing it, as a password.

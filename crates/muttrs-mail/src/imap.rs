@@ -10,6 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::TryStreamExt as _;
 use jiff::Timestamp;
 use rustls::ClientConfig;
+use rustls::pki_types::CertificateDer;
 use tokio::net::TcpStream;
 
 use crate::account::{Endpoint, Tls};
@@ -156,37 +157,7 @@ impl Session {
         credentials: &Credentials,
     ) -> Result<Self, Error> {
         let address = format!("{}:{}", server.host, server.port);
-        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&address))
-            .await
-            .map_err(|_| Error::Connect(address.clone(), "timed out".into()))?
-            .map_err(|error| Error::Connect(address.clone(), error.to_string()))?;
-        let client = match server.tls {
-            Tls::Ssl => {
-                let stream = tls::wrap(tcp, &server.host, tls_config).await?;
-                let mut client = async_imap::Client::new(Stream::Tls(Box::new(stream)));
-                greeting(&mut client).await?;
-                client
-            }
-            Tls::Starttls => {
-                let mut client = async_imap::Client::new(Stream::Plain(tcp));
-                greeting(&mut client).await?;
-                client
-                    .run_command_and_check_ok("STARTTLS", None)
-                    .await
-                    .map_err(|_| Error::NoStarttls(address.clone()))?;
-                let Stream::Plain(tcp) = client.into_inner() else {
-                    unreachable!("the stream is plain until STARTTLS")
-                };
-                let stream = tls::wrap(tcp, &server.host, tls_config).await?;
-                // No greeting after STARTTLS: the session goes on.
-                async_imap::Client::new(Stream::Tls(Box::new(stream)))
-            }
-            Tls::None => {
-                let mut client = async_imap::Client::new(Stream::Plain(tcp));
-                greeting(&mut client).await?;
-                client
-            }
-        };
+        let client = open(server, tls_config).await?;
         let session = match credentials {
             Credentials::Password { username, password } => client
                 .login(username, password)
@@ -502,6 +473,63 @@ impl Session {
     pub async fn logout(mut self) {
         let _ = self.session.logout().await;
     }
+}
+
+/// Connects to `server`, securing the connection as it says, up to signing in.
+async fn open(
+    server: &Endpoint,
+    tls_config: Arc<ClientConfig>,
+) -> Result<async_imap::Client<Stream>, Error> {
+    let address = format!("{}:{}", server.host, server.port);
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&address))
+        .await
+        .map_err(|_| Error::Connect(address.clone(), "timed out".into()))?
+        .map_err(|error| Error::Connect(address.clone(), error.to_string()))?;
+    Ok(match server.tls {
+        Tls::Ssl => {
+            let stream = tls::wrap(tcp, &server.host, tls_config).await?;
+            let mut client = async_imap::Client::new(Stream::Tls(Box::new(stream)));
+            greeting(&mut client).await?;
+            client
+        }
+        Tls::Starttls => {
+            let mut client = async_imap::Client::new(Stream::Plain(tcp));
+            greeting(&mut client).await?;
+            client
+                .run_command_and_check_ok("STARTTLS", None)
+                .await
+                .map_err(|_| Error::NoStarttls(address.clone()))?;
+            let Stream::Plain(tcp) = client.into_inner() else {
+                unreachable!("the stream is plain until STARTTLS")
+            };
+            let stream = tls::wrap(tcp, &server.host, tls_config).await?;
+            // No greeting after STARTTLS: the session goes on.
+            async_imap::Client::new(Stream::Tls(Box::new(stream)))
+        }
+        Tls::None => {
+            let mut client = async_imap::Client::new(Stream::Plain(tcp));
+            greeting(&mut client).await?;
+            client
+        }
+    })
+}
+
+/// The certificates `server` presents, end entity first, without trusting them and without signing in: what
+/// `muttrs trust` shows before keeping them. None over a connection without TLS.
+///
+/// # Errors
+///
+/// If the server can't be reached, or TLS fails for another reason than the certificate.
+pub async fn presented_certificates(
+    server: &Endpoint,
+) -> Result<Vec<CertificateDer<'static>>, Error> {
+    let (config, presented) = tls::recording_config();
+    drop(open(server, config).await?);
+    let presented = presented
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    Ok(presented)
 }
 
 /// Reads the server's greeting.
