@@ -110,20 +110,83 @@ pub struct Built {
     pub recipients: Vec<String>,
 }
 
-impl Draft {
-    /// A new Message from `from`.
+/// Who Drafts are from: an Account's addresses, its own first, and its signature.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sender {
+    /// The addresses it sends as: the Account's own, then its other identities.
+    pub addresses: Vec<Address>,
+    /// What goes under a Draft, after a `-- ` line.
+    pub signature: Option<String>,
+}
+
+impl Sender {
+    /// The Account's own address.
     #[must_use]
-    pub fn new(from: Address) -> Self {
+    pub fn primary(&self) -> Option<&Address> {
+        self.addresses.first()
+    }
+
+    /// Whether `address` is one of the Account's.
+    #[must_use]
+    pub fn is_me(&self, address: &Address) -> bool {
+        self.addresses
+            .iter()
+            .any(|mine| mine.email.eq_ignore_ascii_case(&address.email))
+    }
+
+    /// The address a reply to `original` is from: the one of the Account's it was sent to, or else its own.
+    #[must_use]
+    pub fn answering(&self, original: &Message) -> Option<&Address> {
+        let recipients: Vec<&Address> = original
+            .to
+            .iter()
+            .chain(&original.cc)
+            .chain(&original.bcc)
+            .collect();
+        self.addresses
+            .iter()
+            .find(|mine| {
+                recipients
+                    .iter()
+                    .any(|recipient| recipient.email.eq_ignore_ascii_case(&mine.email))
+            })
+            .or_else(|| self.primary())
+    }
+
+    /// The signature as it goes in a body, after its `-- ` line; nothing without one.
+    fn signed(&self) -> String {
+        match self
+            .signature
+            .as_deref()
+            .map(str::trim_end)
+            .filter(|signature| !signature.is_empty())
+        {
+            Some(signature) => format!("-- \n{signature}\n"),
+            None => String::new(),
+        }
+    }
+}
+
+impl Draft {
+    /// A new Message, from `sender`, signed.
+    #[must_use]
+    pub fn new(sender: &Sender) -> Self {
+        let signed = sender.signed();
         Self {
-            from: Some(from),
+            from: sender.primary().cloned(),
+            body: if signed.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{signed}")
+            },
             ..Self::default()
         }
     }
 
-    /// A reply to `original`, from `me`, to its sender or, `all`, to everyone it went to but `me`; `quoted` is its
-    /// text, to quote under an attribution.
+    /// A reply to `original`, from the address of `sender`'s it was sent to, to its sender or, `all`, to everyone it
+    /// went to but `sender`; `quoted` is its text, to quote under an attribution, the signature above it.
     #[must_use]
-    pub fn reply(original: &Message, me: Address, all: bool, quoted: &str) -> Self {
+    pub fn reply(original: &Message, sender: &Sender, all: bool, quoted: &str) -> Self {
         let senders = if original.reply_to.is_empty() {
             original.from.clone()
         } else {
@@ -135,7 +198,7 @@ impl Draft {
             to.extend(original.to.iter().cloned());
             cc.extend(original.cc.iter().cloned());
         }
-        let is_me = |address: &Address| address.email.eq_ignore_ascii_case(&me.email);
+        let is_me = |address: &Address| sender.is_me(address);
         let mut seen: Vec<String> = Vec::new();
         let mut keep = |address: &Address| {
             let email = address.email.to_ascii_lowercase();
@@ -152,14 +215,19 @@ impl Draft {
         let mut references = original.references.clone();
         references.extend(original.message_id.clone());
         Self {
-            from: Some(me),
+            from: sender.answering(original).cloned(),
             to,
             cc,
             bcc: Vec::new(),
             subject: prefixed("Re:", &original.subject),
             in_reply_to: original.message_id.clone(),
             references,
-            body: format!("\n\n{}\n{}", attribution(original), quote(quoted)),
+            body: format!(
+                "\n\n{}{}\n{}",
+                spaced(&sender.signed()),
+                attribution(original),
+                quote(quoted)
+            ),
             attachments: Vec::new(),
         }
     }
@@ -189,9 +257,9 @@ impl Draft {
         }
     }
 
-    /// `original` forwarded, from `me`: its text after its headers, and its Attachments.
+    /// `original` forwarded, from `sender`: its text after its headers, and its Attachments, the signature above.
     #[must_use]
-    pub fn forward(original: &Message, me: Address, text: &str) -> Self {
+    pub fn forward(original: &Message, sender: &Sender, text: &str) -> Self {
         let list = |addresses: &[Address]| {
             addresses
                 .iter()
@@ -221,9 +289,13 @@ impl Draft {
             })
             .collect();
         Self {
-            from: Some(me),
+            from: sender.primary().cloned(),
             subject: prefixed("Fwd:", &original.subject),
-            body: format!("\n\n{header}\n{}", text.trim_end()),
+            body: format!(
+                "\n\n{}{header}\n{}",
+                spaced(&sender.signed()),
+                text.trim_end()
+            ),
             attachments,
             ..Self::default()
         }
@@ -472,6 +544,24 @@ fn mailbox(address: &Address) -> Result<Mailbox, Error> {
     ))
 }
 
+/// `signed`, a blank line after it, unless it's nothing.
+fn spaced(signed: &str) -> String {
+    if signed.is_empty() {
+        String::new()
+    } else {
+        format!("{signed}\n")
+    }
+}
+
+/// The addresses of a header's value, as typed: `Ann <ann@example.com>, bob@example.com`.
+///
+/// # Errors
+///
+/// If something in it isn't an address.
+pub fn parse_addresses(value: &str) -> Result<Vec<Address>, Error> {
+    addresses(value)
+}
+
 /// The addresses of a header's value, as typed: `Ann <ann@example.com>, bob@example.com`.
 fn addresses(value: &str) -> Result<Vec<Address>, Error> {
     if value.is_empty() {
@@ -586,10 +676,21 @@ mod tests {
         .unwrap()
     }
 
+    fn me() -> Sender {
+        Sender {
+            addresses: vec![address("Me", "me@example.com")],
+            signature: None,
+        }
+    }
+
     #[test]
     fn replies_go_to_the_sender_or_everyone_but_me() {
-        let me = address("Me", "ME@example.com");
-        let reply = Draft::reply(&original(), me.clone(), false, "Thursday?");
+        // Written otherwise, the address is still the Account's.
+        let me = Sender {
+            addresses: vec![address("Me", "ME@example.com")],
+            signature: None,
+        };
+        let reply = Draft::reply(&original(), &me, false, "Thursday?");
         assert_eq!(reply.to, [address("Ann", "ann@example.com")]);
         assert_eq!(reply.cc, []);
         assert_eq!(reply.subject, "Re: Lunch");
@@ -601,7 +702,7 @@ mod tests {
             reply.body
         );
 
-        let all = Draft::reply(&original(), me, true, "");
+        let all = Draft::reply(&original(), &me, true, "");
         let to: Vec<&str> = all.to.iter().map(|a| a.email.as_str()).collect();
         assert_eq!(to, ["ann@example.com", "bob@example.com"]);
         assert_eq!(all.cc[0].email, "carol@example.com");
@@ -609,13 +710,35 @@ mod tests {
     }
 
     #[test]
-    fn drafts_round_trip_through_text() {
-        let mut draft = Draft::reply(
-            &original(),
-            address("Me", "me@example.com"),
-            true,
-            "Thursday?",
+    fn replies_are_from_the_identity_written_to_and_signed() {
+        let sender = Sender {
+            addresses: vec![
+                address("Me", "me@home.example"),
+                address("Me at work", "me@example.com"),
+            ],
+            signature: Some("Me\nexample.com\n".into()),
+        };
+        let reply = Draft::reply(&original(), &sender, true, "Thursday?");
+        assert_eq!(
+            reply.from,
+            Some(address("Me at work", "me@example.com")),
+            "To said me@example.com"
         );
+        assert!(!reply.to.iter().any(|to| sender.is_me(to)));
+        assert!(
+            reply.body.starts_with("\n\n-- \nMe\nexample.com\n\nOn "),
+            "signed above the quote: {:?}",
+            reply.body
+        );
+        let new = Draft::new(&sender);
+        assert_eq!(new.from, Some(address("Me", "me@home.example")));
+        assert_eq!(new.body, "\n\n-- \nMe\nexample.com\n");
+        assert_eq!(Draft::new(&me()).body, "", "no signature, nothing");
+    }
+
+    #[test]
+    fn drafts_round_trip_through_text() {
+        let mut draft = Draft::reply(&original(), &me(), true, "Thursday?");
         draft
             .attachments
             .push(Attachment::file(PathBuf::from("/tmp/plan.pdf")));
@@ -644,12 +767,7 @@ mod tests {
 
     #[test]
     fn built_messages_have_both_bodies_and_their_threads() {
-        let mut draft = Draft::reply(
-            &original(),
-            address("Me", "me@example.com"),
-            false,
-            "Thursday?",
-        );
+        let mut draft = Draft::reply(&original(), &me(), false, "Thursday?");
         draft.body = "**Yes**, see [the menu](https://example.com).\n\n> Thursday?\n".into();
         draft.bcc = vec![address("Boss", "boss@example.com")];
         draft.attachments.push(Attachment {
@@ -694,12 +812,7 @@ mod tests {
 
     #[test]
     fn postponed_drafts_resume_as_they_were() {
-        let mut draft = Draft::reply(
-            &original(),
-            address("Me", "me@example.com"),
-            false,
-            "Thursday?",
-        );
+        let mut draft = Draft::reply(&original(), &me(), false, "Thursday?");
         draft.body = "Yes.\n\n> Thursday?\n".into();
         draft.bcc = vec![address("Boss", "boss@example.com")];
         draft.attachments.push(Attachment {

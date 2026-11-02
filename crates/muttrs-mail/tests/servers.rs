@@ -346,9 +346,12 @@ async fn an_accounts_client_lists_opens_reads_and_sees_new_mail() {
 /// A Draft from `from` to `to`, built.
 fn built(from: &str, to: &str, subject: &str) -> muttrs_mail::compose::Built {
     use muttrs_mail::compose::Draft;
-    let mut draft = Draft::new(muttrs_mail::Address {
-        name: Some("Tester".into()),
-        email: from.into(),
+    let mut draft = Draft::new(&muttrs_mail::compose::Sender {
+        addresses: vec![muttrs_mail::Address {
+            name: Some("Tester".into()),
+            email: from.into(),
+        }],
+        signature: None,
     });
     draft.to = vec![muttrs_mail::Address {
         name: None,

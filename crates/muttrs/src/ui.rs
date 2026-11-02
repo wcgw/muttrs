@@ -381,7 +381,7 @@ impl App {
             let Some(state) = self.accounts.get(account) else {
                 return;
             };
-            let draft = muttrs_mail::compose::Draft::new(state.from.clone());
+            let draft = muttrs_mail::compose::Draft::new(&state.sender);
             self.start(account, draft, None);
             return;
         }
@@ -399,7 +399,7 @@ impl App {
         let Some(state) = self.accounts.get(account) else {
             return;
         };
-        let me = state.from.clone();
+        let me = state.sender.clone();
         let text = compose::quotable(message);
         let mailbox = self
             .index
@@ -410,14 +410,14 @@ impl App {
             Writing::Reply | Writing::ReplyAll => (
                 muttrs_mail::compose::Draft::reply(
                     message,
-                    me,
+                    &me,
                     writing == Writing::ReplyAll,
                     &text,
                 ),
                 Some((mailbox, uid)),
             ),
             Writing::Forward | Writing::New => (
-                muttrs_mail::compose::Draft::forward(message, me, &text),
+                muttrs_mail::compose::Draft::forward(message, &me, &text),
                 None,
             ),
             Writing::Resume => {
@@ -475,9 +475,19 @@ impl App {
             }
             Ok(_) => {}
         }
-        if let Err(error) = compose.reread() {
-            self.say(&format!("{error:#}; e edits it again"), true);
-            return;
+        match compose.reread() {
+            Err(error) => {
+                self.say(&format!("{error:#}; e edits it again"), true);
+                return;
+            }
+            Ok(false) => {
+                if let Some(compose) = self.compose.take() {
+                    compose.finish();
+                }
+                self.say("Not sent: the Draft is as it was", false);
+                return;
+            }
+            Ok(true) => {}
         }
         if compose.draft.is_empty() {
             if let Some(compose) = self.compose.take() {
@@ -530,7 +540,14 @@ impl App {
         let Some(state) = self.accounts.get(compose.account) else {
             return;
         };
-        let id = muttrs_mail::compose::message_id(&state.from.email);
+        // At the domain of the address it's from.
+        let from = compose
+            .draft
+            .from
+            .as_ref()
+            .or_else(|| state.sender.primary())
+            .map_or("", |from| from.email.as_str());
+        let id = muttrs_mail::compose::message_id(from);
         match compose.draft.build(&id) {
             Ok(built) => {
                 compose.sending = true;
@@ -577,7 +594,14 @@ impl App {
         let Some(state) = self.accounts.get(compose.account) else {
             return;
         };
-        let id = muttrs_mail::compose::message_id(&state.from.email);
+        // At the domain of the address it's from.
+        let from = compose
+            .draft
+            .from
+            .as_ref()
+            .or_else(|| state.sender.primary())
+            .map_or("", |from| from.email.as_str());
+        let id = muttrs_mail::compose::message_id(from);
         match compose.draft.build(&id) {
             Ok(built) => {
                 state.client.send(client::Request::Append {
@@ -1723,10 +1747,7 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     let mut states = Vec::new();
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
-        let from = muttrs_mail::Address {
-            name: account.display_name.clone(),
-            email: account.email.clone(),
-        };
+        let sender_of_drafts = account.sender();
         let cache = xdg::cache_dir().map(|cache| cache.join("accounts").join(&name).join("bodies"));
         let sender = events.clone();
         let client = Client::spawn(
@@ -1743,7 +1764,7 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             connection: Connection::Connecting,
             mailboxes: Vec::new(),
             counts: std::collections::HashMap::new(),
-            from,
+            sender: sender_of_drafts,
         });
     }
     let app = App::new(setup, events, states, false);

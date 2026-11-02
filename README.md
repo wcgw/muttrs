@@ -37,6 +37,8 @@ smtp = { host = "smtp.example.com", tls = "starttls" } # "ssl" (465) or "starttl
 # username = "alex"                                   # the address, by default
 # password_command = "pass show mail/home"            # without it, the password is in the keyring
 # mailboxes = { archive = "Archive" }                 # Roles the server doesn't say (SPECIAL-USE)
+# identities = ["Alex <alex@work.example>"]           # other addresses it sends as: replies are from the one written to
+# signature = "Alex\nexample.com"                      # or signature_file = "~/.signature"
 ```
 
 then `muttrs login home` asks for the password and keeps it in the keyring (the Secret Service through
@@ -131,7 +133,9 @@ On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
 > Lunch on Thursday?
 ```
 
-Its name ends in `.eml`, so that vim and Neovim edit it as mail. The body is Markdown, sent as it is (the plain text)
+The Account's signature goes in after a `-- ` line, above the quote in a reply. A reply is from the address of the
+Account's (its own, or one of its `identities`) the Message was sent to. Quitting the editor on a new Draft without
+changing it drops the Draft, as mutt does. Its name ends in `.eml`, so that vim and Neovim edit it as mail. The body is Markdown, sent as it is (the plain text)
 and as the HTML it makes, in which each new line breaks the line, as in plain text mail. `Attach:` lines attach
 files. Saving and quitting shows the Draft as it will be sent, until `y` sends it through the Account's SMTP server;
 a copy goes to Sent (but on Gmail, which keeps its own), and what it replies to is flagged answered. `P` postpones it

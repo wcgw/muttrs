@@ -22,7 +22,7 @@ pub(crate) struct AccountState {
     pub(crate) mailboxes: Vec<Mailbox>,
     pub(crate) counts: HashMap<String, Counts>,
     /// Who it sends as.
-    pub(crate) from: muttrs_mail::Address,
+    pub(crate) sender: muttrs_mail::compose::Sender,
 }
 
 impl AccountState {

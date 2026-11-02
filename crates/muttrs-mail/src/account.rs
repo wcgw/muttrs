@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::compose::Sender;
+use crate::message::Address;
 use crate::tls::Trust;
 
 /// An Account as the configuration writes it, under `[[account]]`.
@@ -43,6 +45,13 @@ pub struct AccountConfig {
     /// Mailboxes by Role, where the server doesn't say (SPECIAL-USE), as `{ archive = "Archive" }`.
     #[serde(default)]
     pub mailboxes: RoleNames,
+    /// Other addresses it sends as, as `"Alex <alex@work.example>"`: a reply is from the one it was sent to.
+    #[serde(default)]
+    pub identities: Vec<String>,
+    /// What goes under a Draft, after a `-- ` line.
+    pub signature: Option<String>,
+    /// A file holding the signature, rather than writing it here.
+    pub signature_file: Option<PathBuf>,
 }
 
 /// A server as the configuration writes it.
@@ -223,6 +232,27 @@ pub struct Account {
     pub roles: RoleNames,
     /// Whether it's on Gmail, whose labels are Mailboxes and which archives out of the Inbox.
     pub gmail: bool,
+    /// Its other addresses, which it sends as too.
+    pub identities: Vec<Address>,
+    /// What goes under its Drafts.
+    pub signature: Option<String>,
+}
+
+impl Account {
+    /// Who its Drafts are from.
+    #[must_use]
+    pub fn sender(&self) -> Sender {
+        let own = Address {
+            name: self.display_name.clone(),
+            email: self.email.clone(),
+        };
+        Sender {
+            addresses: std::iter::once(own)
+                .chain(self.identities.iter().cloned())
+                .collect(),
+            signature: self.signature.clone(),
+        }
+    }
 }
 
 /// What's wrong with an Account's configuration.
@@ -355,6 +385,8 @@ impl AccountConfig {
             },
             (None, Some(certificate)) => Trust::Pinned(home(&certificate)),
         };
+        let (identities, signature) =
+            sending_as(&self.identities, self.signature, self.signature_file).map_err(invalid)?;
         let gmail = self.provider == Some(Provider::Gmail)
             || imap.host.eq_ignore_ascii_case("imap.gmail.com");
         Ok(Account {
@@ -370,8 +402,39 @@ impl AccountConfig {
             copy_to_sent: self.copy_to_sent.unwrap_or(!gmail),
             roles: self.mailboxes,
             gmail,
+            identities,
+            signature,
         })
     }
+}
+
+/// The addresses `identities` say, and the signature, written or in a file; or what's wrong with them.
+fn sending_as(
+    identities: &[String],
+    signature: Option<String>,
+    signature_file: Option<PathBuf>,
+) -> Result<(Vec<Address>, Option<String>), String> {
+    let mut addresses = Vec::new();
+    for identity in identities {
+        addresses.extend(
+            crate::compose::parse_addresses(identity)
+                .map_err(|_| format!("identities: {identity:?} isn't an address"))?,
+        );
+    }
+    let signature = match (signature, signature_file) {
+        (Some(_), Some(_)) => return Err("signature and signature_file don't go together".into()),
+        (Some(signature), None) => Some(signature),
+        (None, Some(path)) => {
+            let path = home(&path);
+            Some(
+                std::fs::read_to_string(&path).map_err(|error| {
+                    format!("reading signature_file {}: {error}", path.display())
+                })?,
+            )
+        }
+        (None, None) => None,
+    };
+    Ok((addresses, signature))
 }
 
 /// `path`, with a leading `~/` meaning the home directory.
@@ -502,6 +565,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(both.to_string().contains("don't go together"), "{both}");
+    }
+
+    #[test]
+    fn identities_and_signatures() {
+        let account = account(
+            "name = \"o\"\nemail = \"a@example.com\"\ndisplay_name = \"Ann\"\nsignature = \"Ann\"\n\
+             identities = [\"Ann at work <ann@work.example>\"]\n\
+             imap = { host = \"x\" }\nsmtp = { host = \"x\" }",
+        )
+        .unwrap();
+        let sender = account.sender();
+        let emails: Vec<&str> = sender.addresses.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(emails, ["a@example.com", "ann@work.example"]);
+        assert_eq!(sender.addresses[1].name.as_deref(), Some("Ann at work"));
+        assert_eq!(sender.signature.as_deref(), Some("Ann"));
+        let wrong = account_error(
+            "name = \"o\"\nemail = \"a@x\"\nidentities = [\"nobody\"]\nimap = { host = \"x\" }\nsmtp = { host = \"x\" }",
+        );
+        assert!(wrong.contains("isn't an address"), "{wrong}");
+    }
+
+    fn account_error(toml_text: &str) -> String {
+        account(toml_text).unwrap_err().to_string()
     }
 
     #[test]

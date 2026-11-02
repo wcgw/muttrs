@@ -30,6 +30,8 @@ pub(crate) struct Compose {
     pub(crate) sending: bool,
     /// Whether discarding it was asked for once, and needs asking again.
     pub(crate) discarding: bool,
+    /// What its file said before it was first edited, while it's not been edited yet.
+    unedited: Option<String>,
     scroll: usize,
     height: usize,
 }
@@ -47,8 +49,10 @@ impl Compose {
             .join("drafts");
         create_private(&directory)?;
         let path = directory.join(format!("muttrs-{}-{serial}.eml", std::process::id()));
-        write_private(&path, draft.to_text().as_bytes())?;
+        let text = draft.to_text();
+        write_private(&path, text.as_bytes())?;
         Ok(Self {
+            unedited: Some(text),
             account,
             draft,
             path,
@@ -61,11 +65,19 @@ impl Compose {
         })
     }
 
-    /// Reads the file back, as `$EDITOR` left it.
-    pub(crate) fn reread(&mut self) -> anyhow::Result<()> {
+    /// Reads the file back, as `$EDITOR` left it: `false` if it's as it was before it was first edited, as when
+    /// the editor quit without saving, which drops a new Draft.
+    pub(crate) fn reread(&mut self) -> anyhow::Result<bool> {
         let text = std::fs::read_to_string(&self.path)?;
+        if self
+            .unedited
+            .take()
+            .is_some_and(|unedited| unedited == text)
+        {
+            return Ok(false);
+        }
         self.draft = self.draft.edited(&text, xdg::home().as_deref())?;
-        Ok(())
+        Ok(true)
     }
 
     /// Writes the Draft to its file again, as after attaching.

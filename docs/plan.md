@@ -125,7 +125,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] Moving to a Mailbox by name (`s`, narrowed as it's typed), and Selections (`Space`) to act on several
       Messages; a folded thread is acted on whole
 - [ ] Address completion from the Envelopes seen, in the Draft's headers
-- [ ] Signatures; per-Account `From` identities
+- [x] Signatures (`signature`, `signature_file`), above the quote; `identities`, replies from the one written to, and
+      left out of reply-all; a new Draft left as it was is dropped
 - [ ] Mouse wheel scrolling; themes from files
 
 ### Later
