@@ -24,6 +24,8 @@ pub(crate) struct Compose {
     pub(crate) path: PathBuf,
     /// The Message it answers, by its Mailbox and UID, to flag answered once it's sent.
     pub(crate) answers: Option<(String, u32)>,
+    /// The Postponed Draft it was resumed from, by its Mailbox and UID, expunged once it's sent or kept again.
+    pub(crate) replaces: Option<(String, u32)>,
     /// Whether it's on its way to the server.
     pub(crate) sending: bool,
     /// Whether discarding it was asked for once, and needs asking again.
@@ -51,6 +53,7 @@ impl Compose {
             draft,
             path,
             answers,
+            replaces: None,
             sending: false,
             discarding: false,
             scroll: 0,

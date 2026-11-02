@@ -119,6 +119,8 @@ pub struct Message {
     pub to: Vec<Address>,
     /// Who it's copied to.
     pub cc: Vec<Address>,
+    /// Who it's copied to unseen: only a Draft kept, or a copy of what was sent, says.
+    pub bcc: Vec<Address>,
     /// Where replies go, when not to the sender.
     pub reply_to: Vec<Address>,
     /// Its subject, empty if it has none.
@@ -176,6 +178,7 @@ impl Message {
             from: addresses(root.from()),
             to: addresses(root.to()),
             cc: addresses(root.cc()),
+            bcc: addresses(root.bcc()),
             reply_to: addresses(root.reply_to()),
             subject: root.subject().unwrap_or_default().trim().to_owned(),
             date: timestamp(root.date()),

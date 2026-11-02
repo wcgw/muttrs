@@ -164,6 +164,31 @@ impl Draft {
         }
     }
 
+    /// A Postponed Draft, as it was kept: its headers, its body (`text`, its Markdown) and its Attachments.
+    #[must_use]
+    pub fn resumed(kept: &Message, text: &str) -> Self {
+        Self {
+            from: kept.from.first().cloned(),
+            to: kept.to.clone(),
+            cc: kept.cc.clone(),
+            bcc: kept.bcc.clone(),
+            subject: kept.subject.clone(),
+            in_reply_to: kept.in_reply_to.first().cloned(),
+            references: kept.references.clone(),
+            body: text.replace("\r\n", "\n"),
+            attachments: kept
+                .parts()
+                .iter()
+                .filter(|part| !part.inline || part.content_id.is_none())
+                .map(|part| Attachment {
+                    name: part.file_name(),
+                    mime_type: part.mime_type.clone(),
+                    source: Source::Bytes(Arc::new(kept.bytes(part))),
+                })
+                .collect(),
+        }
+    }
+
     /// `original` forwarded, from `me`: its text after its headers, and its Attachments.
     #[must_use]
     pub fn forward(original: &Message, me: Address, text: &str) -> Self {
@@ -665,6 +690,33 @@ mod tests {
             "{}",
             html("-- \nAnn\n")
         );
+    }
+
+    #[test]
+    fn postponed_drafts_resume_as_they_were() {
+        let mut draft = Draft::reply(
+            &original(),
+            address("Me", "me@example.com"),
+            false,
+            "Thursday?",
+        );
+        draft.body = "Yes.\n\n> Thursday?\n".into();
+        draft.bcc = vec![address("Boss", "boss@example.com")];
+        draft.attachments.push(Attachment {
+            name: "notes.txt".into(),
+            mime_type: "text/plain".into(),
+            source: Source::Bytes(Arc::new(b"notes".to_vec())),
+        });
+        let kept = Message::parse(draft.build("<kept@example.com>").unwrap().kept).unwrap();
+        let (text, _) = kept.plain().unwrap();
+        let resumed = Draft::resumed(&kept, &text);
+        assert_eq!(resumed.to, draft.to);
+        assert_eq!(resumed.bcc, draft.bcc);
+        assert_eq!(resumed.subject, draft.subject);
+        assert_eq!(resumed.in_reply_to, draft.in_reply_to);
+        assert_eq!(resumed.references, draft.references);
+        assert_eq!(resumed.body, draft.body);
+        assert_eq!(resumed.attachments, draft.attachments);
     }
 
     #[test]

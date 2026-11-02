@@ -78,6 +78,13 @@ pub enum Request {
         /// The Mailbox to move them to, by its name on the server.
         to: String,
     },
+    /// Expunge Messages for good, without moving them to Trash: a Postponed Draft sent, or kept again.
+    Expunge {
+        /// The Mailbox they're in, by its name on the server.
+        mailbox: String,
+        /// Their UIDs there.
+        uids: Vec<u32>,
+    },
     /// Move Messages to Trash, or expunge them from Trash.
     Delete {
         /// The Mailbox they're in, by its name on the server.
@@ -514,6 +521,14 @@ impl Worker {
             }
             Request::Move { mailbox, uids, to } => {
                 self.move_named(session, &mailbox, &uids, &to).await?;
+            }
+            Request::Expunge { mailbox, uids } => {
+                self.select(session, &mailbox).await?;
+                if let Err(error) = session.expunge(&uids).await {
+                    (self.notify)(Update::Failed(format!("Expunging: {error}")));
+                }
+                self.refresh_window(session, &mailbox).await?;
+                self.count(session, &mailbox).await?;
             }
             Request::Delete { mailbox, uids } => {
                 self.delete(session, &mailbox, &uids).await?;

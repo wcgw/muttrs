@@ -101,6 +101,7 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` `s` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
+| In Drafts | `e` resume a Postponed Draft |
 
 `F`, `U`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on a
 folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
@@ -134,7 +135,8 @@ Its name ends in `.eml`, so that vim and Neovim edit it as mail. The body is Mar
 and as the HTML it makes, in which each new line breaks the line, as in plain text mail. `Attach:` lines attach
 files. Saving and quitting shows the Draft as it will be sent, until `y` sends it through the Account's SMTP server;
 a copy goes to Sent (but on Gmail, which keeps its own), and what it replies to is flagged answered. `P` postpones it
-to the Drafts Mailbox.
+to the Drafts Mailbox, where `e` resumes it, from the Index or the Pager; once it's sent, or postponed again, the
+copy kept in Drafts goes.
 
 ## Reading a Message from a file
 

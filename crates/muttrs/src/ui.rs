@@ -77,6 +77,8 @@ enum Writing {
     Reply,
     ReplyAll,
     Forward,
+    /// A Postponed Draft, resumed.
+    Resume,
 }
 
 /// Which pane keys go to, when the Pager isn't open.
@@ -354,6 +356,7 @@ impl App {
                     .compose
                     .take_if(|compose| compose.account == account && compose.sending)
                 {
+                    self.expunge_replaced(&compose);
                     compose.finish();
                 }
                 self.say("Sent", false);
@@ -417,6 +420,16 @@ impl App {
                 muttrs_mail::compose::Draft::forward(message, me, &text),
                 None,
             ),
+            Writing::Resume => {
+                // A Draft kept is its Markdown as plain text, and the HTML it made.
+                let markdown = message.plain().map_or(text, |(markdown, _)| markdown);
+                let draft = muttrs_mail::compose::Draft::resumed(message, &markdown);
+                self.start(account, draft, None);
+                if let Some(compose) = &mut self.compose {
+                    compose.replaces = Some((mailbox, uid));
+                }
+                return;
+            }
         };
         self.start(account, draft, answers);
     }
@@ -531,6 +544,33 @@ impl App {
         }
     }
 
+    /// Expunges the Postponed Draft `compose` was resumed from: it's sent, or kept again.
+    fn expunge_replaced(&self, compose: &Compose) {
+        if let (Some((mailbox, uid)), Some(state)) =
+            (&compose.replaces, self.accounts.get(compose.account))
+        {
+            state.client.send(client::Request::Expunge {
+                mailbox: mailbox.clone(),
+                uids: vec![*uid],
+            });
+        }
+    }
+
+    /// Resumes the Postponed Draft the Pager shows, or the Index's cursor is on, in the Drafts Mailbox.
+    fn resume(&mut self) {
+        let in_drafts = self.index.as_ref().is_some_and(|index| {
+            self.accounts
+                .get(index.account)
+                .and_then(|state| state.mailbox(&index.mailbox))
+                .is_some_and(|mailbox| mailbox.role == Some(Role::Drafts))
+        });
+        if in_drafts {
+            self.write(Writing::Resume);
+        } else {
+            self.say("e resumes a Postponed Draft, in the Drafts Mailbox", false);
+        }
+    }
+
     /// Saves the Draft to the Drafts Mailbox, to finish later.
     fn postpone(&mut self) {
         let Some(compose) = &self.compose else { return };
@@ -546,6 +586,7 @@ impl App {
                     draft: true,
                 });
                 if let Some(compose) = self.compose.take() {
+                    self.expunge_replaced(&compose);
                     compose.finish();
                 }
                 self.say("Postponed to Drafts", false);
@@ -971,6 +1012,7 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
@@ -1055,6 +1097,7 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
@@ -1312,6 +1355,7 @@ impl App {
                         ("y e", "with a Draft: send, edit again"),
                         ("a D", "attach a file, detach the last"),
                         ("P q q", "postpone to Drafts, discard"),
+                        ("e", "in Drafts: resume a Postponed Draft"),
                     ],
                 ),
                 (
