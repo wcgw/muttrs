@@ -511,7 +511,10 @@ mod tests {
         let (config, presented) = recording_config();
         let tcp = TcpStream::connect(&address).await.unwrap();
         drop(wrap(tcp, "127.0.0.1", config).await.unwrap());
-        assert_eq!(*presented.lock().unwrap(), std::slice::from_ref(&certificate));
+        assert_eq!(
+            *presented.lock().unwrap(),
+            std::slice::from_ref(&certificate)
+        );
 
         for path in [own, elsewhere] {
             std::fs::remove_file(path).unwrap();
@@ -522,7 +525,10 @@ mod tests {
     fn pem_round_trips() {
         let (certificate, _) = bridge_certificate();
         let path = pem_file("round-trip", &certificate);
-        assert_eq!(certificates(&path).unwrap(), std::slice::from_ref(&certificate));
+        assert_eq!(
+            certificates(&path).unwrap(),
+            std::slice::from_ref(&certificate)
+        );
         std::fs::remove_file(path).unwrap();
         assert_eq!(fingerprint(&certificate).len(), 32 * 3 - 1);
     }

@@ -309,6 +309,42 @@ impl Session {
         Ok(fetches.iter().filter_map(read_envelope).collect())
     }
 
+    /// The Envelopes of the Messages of the open Mailbox from sequence number `first` to `last`, both included.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn between(&mut self, first: u32, last: u32) -> Result<Vec<Envelope>, Error> {
+        if first == 0 || last < first {
+            return Ok(Vec::new());
+        }
+        let fetches: Vec<Fetch> = self
+            .session
+            .fetch(format!("{first}:{last}"), envelope_query())
+            .await?
+            .try_collect()
+            .await?;
+        Ok(fetches.iter().filter_map(read_envelope).collect())
+    }
+
+    /// The sequence number of the open Mailbox's Message `uid`, if it has it.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn sequence_of(&mut self, uid: u32) -> Result<Option<u32>, Error> {
+        let fetches: Vec<Fetch> = self
+            .session
+            .uid_fetch(uid.to_string(), "(UID)")
+            .await?
+            .try_collect()
+            .await?;
+        Ok(fetches
+            .iter()
+            .find(|fetch| fetch.uid == Some(uid))
+            .map(|fetch| fetch.message))
+    }
+
     /// The Envelopes of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set (`5:*`).
     ///
     /// # Errors

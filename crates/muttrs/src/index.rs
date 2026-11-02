@@ -12,6 +12,19 @@ use crate::icons::Icons;
 use crate::theme::Theme;
 use crate::ui::truncate;
 
+/// How near the end of the Envelopes listed the cursor comes before older ones are asked for.
+const MORE_WITHIN: usize = 30;
+
+/// Where asking for older Envelopes stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum More {
+    Idle,
+    /// Asked, with this many listed.
+    Asked(usize),
+    /// Asked, and none came.
+    Exhausted,
+}
+
 pub(crate) struct Index {
     /// The Account the Mailbox is of, by its place in the sidebar.
     pub(crate) account: usize,
@@ -26,6 +39,8 @@ pub(crate) struct Index {
     pub(crate) exists: u32,
     /// Whether the Envelopes have come.
     pub(crate) loaded: bool,
+    /// Where asking for older Envelopes stands.
+    more: More,
     cursor: usize,
     top: usize,
     height: usize,
@@ -48,6 +63,7 @@ impl Index {
             envelopes: Vec::new(),
             exists: 0,
             loaded: false,
+            more: More::Idle,
             cursor: 0,
             top: 0,
             height: 0,
@@ -59,6 +75,12 @@ impl Index {
     pub(crate) fn set(&mut self, mut envelopes: Vec<Envelope>, exists: u32) {
         let at = self.current().map(|envelope| envelope.uid);
         envelopes.sort_by(|a, b| b.date.cmp(&a.date).then(b.uid.cmp(&a.uid)));
+        self.more = match self.more {
+            // Asked, and none came: there are none to list, whatever the count says.
+            More::Asked(before) if envelopes.len() <= before => More::Exhausted,
+            More::Asked(_) => More::Idle,
+            other => other,
+        };
         self.envelopes = envelopes;
         self.exists = exists;
         self.loaded = true;
@@ -73,6 +95,19 @@ impl Index {
         self.cursor = self.cursor.min(self.envelopes.len().saturating_sub(1));
         if let Some(search) = self.search.take() {
             self.search_for(search.query);
+        }
+    }
+
+    /// Whether to ask for older Envelopes: the cursor is near the end of those listed, and the Mailbox has more.
+    /// Asking is noted, so that it's asked once.
+    pub(crate) fn wants_more(&mut self) -> bool {
+        let near_end = self.cursor + MORE_WITHIN >= self.envelopes.len();
+        let has_more = u32::try_from(self.envelopes.len()).unwrap_or(u32::MAX) < self.exists;
+        if self.loaded && near_end && has_more && self.more == More::Idle {
+            self.more = More::Asked(self.envelopes.len());
+            true
+        } else {
+            false
         }
     }
 
@@ -411,6 +446,25 @@ mod tests {
         assert_eq!(index.search_status(), Some(("LUNCH".into(), Some(2), 2)));
         index.search_for("bob@".into());
         assert_eq!(index.current().unwrap().uid, 2);
+    }
+
+    #[test]
+    fn older_envelopes_are_asked_for_once_near_the_end() {
+        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None);
+        let page = |count: u32| {
+            (1..=count)
+                .map(|uid| envelope(uid, 1, "s", "Ann"))
+                .collect::<Vec<_>>()
+        };
+        index.set(page(40), 100);
+        assert!(!index.wants_more(), "the cursor is far from the end");
+        index.bottom();
+        assert!(index.wants_more());
+        assert!(!index.wants_more(), "asked already");
+        index.set(page(80), 100);
+        assert!(index.wants_more(), "more came: ask again");
+        index.set(page(80), 100);
+        assert!(!index.wants_more(), "none came: there are none");
     }
 
     #[test]

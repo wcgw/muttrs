@@ -575,3 +575,62 @@ async fn what_servers_present_is_seen_before_it_is_trusted() {
         assert_eq!(presented[0], server[0].as_ref(), "{smtp}");
     }
 }
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn older_envelopes_come_page_by_page() {
+    let username = user("pages");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for number in 1..=350 {
+        session
+            .append("INBOX", "(\\Seen)", &message(&format!("m{number}")))
+            .await
+            .unwrap();
+    }
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let (listed, exists) = until(&mut updates, |update| match update {
+        Update::Envelopes {
+            envelopes, exists, ..
+        } => Some((envelopes.clone(), *exists)),
+        _ => None,
+    })
+    .await;
+    assert_eq!((listed.len(), exists), (300, 350));
+    assert_eq!(listed[0].subject, "m51", "the newest 300");
+
+    client.send(Request::More("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() > 300 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(listed.len(), 350);
+    assert_eq!(listed[0].subject, "m1");
+}

@@ -116,7 +116,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [ ] Resuming a Postponed Draft (open it from Drafts, `e`)
 - [ ] Threads in the Index (client-side, after JWZ), and `X-GM-THRID` on Gmail
 - [ ] Search on the server: `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`
-- [ ] More of a Mailbox than its newest 300 Envelopes, as the Index scrolls; an Envelope cache with CONDSTORE
+- [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
+- [ ] An Envelope cache, kept up to date with CONDSTORE, so that a Mailbox opens at once
 - [ ] Moving to a Mailbox by name (`s`), and Selections to act on several Messages
 - [ ] Address completion from the Envelopes seen, in the Draft's headers
 - [ ] Signatures; per-Account `From` identities

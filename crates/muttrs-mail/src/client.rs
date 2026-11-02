@@ -33,6 +33,8 @@ pub enum Request {
     Refresh,
     /// Open a Mailbox, and list its newest Messages' Envelopes.
     Open(String),
+    /// List older Envelopes of a Mailbox than those listed: as many again as were listed first.
+    More(String),
     /// The whole of a Message.
     Body {
         /// The Mailbox it's in, by its name on the server.
@@ -461,6 +463,7 @@ impl Worker {
                 self.open = Some(mailbox.clone());
                 self.open(session, &mailbox).await?;
             }
+            Request::More(mailbox) => self.more(session, &mailbox).await?,
             Request::Body { mailbox, uid } => self.body(session, &mailbox, uid).await?,
             Request::Flag {
                 mailbox,
@@ -661,6 +664,35 @@ impl Worker {
                 },
             });
         }
+        Ok(())
+    }
+
+    /// Lists older Envelopes of `mailbox` than those it lists, and tells them all.
+    async fn more(&mut self, session: &mut Session, mailbox: &str) -> Result<(), imap::Error> {
+        let Some(first) = self
+            .windows
+            .get(mailbox)
+            .and_then(|window| window.envelopes.keys().next().copied())
+        else {
+            return Ok(());
+        };
+        if self.selected.as_deref() != Some(mailbox) {
+            self.select(session, mailbox).await?;
+        }
+        // The oldest listed Message's sequence number says where the older ones end.
+        if let Some(sequence) = session.sequence_of(first).await?
+            && sequence > 1
+        {
+            let older = session
+                .between(sequence.saturating_sub(WINDOW).max(1), sequence - 1)
+                .await?;
+            if let Some(window) = self.windows.get_mut(mailbox) {
+                window
+                    .envelopes
+                    .extend(older.into_iter().map(|envelope| (envelope.uid, envelope)));
+            }
+        }
+        self.tell_window(mailbox);
         Ok(())
     }
 

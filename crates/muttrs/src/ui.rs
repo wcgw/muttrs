@@ -758,6 +758,19 @@ impl App {
             Focus::Sidebar => self.sidebar_key(key),
             Focus::Index => self.index_key(key),
         }
+        self.more_if_wanted();
+    }
+
+    /// Asks for older Envelopes, if the Index's cursor nears the end of those it lists.
+    fn more_if_wanted(&mut self) {
+        let Some(index) = &mut self.index else { return };
+        if index.wants_more()
+            && let Some(state) = self.accounts.get(index.account)
+        {
+            state
+                .client
+                .send(client::Request::More(index.mailbox.clone()));
+        }
     }
 
     fn sidebar_key(&mut self, key: KeyEvent) {
@@ -904,6 +917,7 @@ impl App {
     fn step(&mut self, older: bool) {
         let Some(index) = &mut self.index else { return };
         if index.step(older) {
+            self.more_if_wanted();
             self.open_current();
         } else {
             self.say(
