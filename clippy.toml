@@ -1,0 +1,3 @@
+# The longest functions are a `select!` loop, key dispatch and render functions: each one long match whose arms
+# belong together, which splitting would scatter rather than simplify.
+too-many-lines-threshold = 140

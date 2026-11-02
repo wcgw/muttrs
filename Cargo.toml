@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Types are named after the domain (`MailboxName` in `mailbox`), which reads better than avoiding the repetition.
+module_name_repetitions = "allow"
+
+[workspace.dependencies]
+muttrs-gfx = { path = "crates/muttrs-gfx" }
+muttrs-mail = { path = "crates/muttrs-mail" }
+muttrs-render = { path = "crates/muttrs-render" }
+
+# Decoding and resizing images is unusably slow unoptimized: dependencies are built optimized even in debug builds,
+# which keep muttrs' own code easy to debug.
+[profile.dev.package."*"]
+opt-level = 3

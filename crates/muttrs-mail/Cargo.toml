@@ -1,0 +1,12 @@
+[package]
+name = "muttrs-mail"
+description = "muttrs' Accounts: IMAP, SMTP, TLS, OAuth2, secrets and MIME"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

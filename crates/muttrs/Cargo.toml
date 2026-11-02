@@ -1,0 +1,15 @@
+[package]
+name = "muttrs"
+description = "A terminal mail client after mutt and vim, that renders HTML mail, images included"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+muttrs-gfx.workspace = true
+muttrs-mail.workspace = true
+muttrs-render.workspace = true
+
+[lints]
+workspace = true
