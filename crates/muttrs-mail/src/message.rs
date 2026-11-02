@@ -156,27 +156,6 @@ impl Message {
     pub fn parse(bytes: Vec<u8>) -> Result<Self, Unreadable> {
         let parsed = MessageParser::new().parse_owned(bytes).ok_or(Unreadable)?;
         let root = parsed.root();
-        let addresses = |list: Option<mail_parser::AddressList<'_>>| -> Vec<Address> {
-            list.map(|list| {
-                list.mailboxes()
-                    .filter_map(|mailbox| {
-                        Some(Address {
-                            name: mailbox.name().map(str::to_owned),
-                            email: mailbox.address()?.to_owned(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-        };
-        let ids = |list: Option<mail_parser::TextList<'_>>| -> Vec<String> {
-            list.map(|list| {
-                list.iter()
-                    .map(|id| strip_brackets(id).to_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
-        };
         let html = root
             .html_body()
             .find(|part| matches!(part.kind(), PartKind::Html));
@@ -199,10 +178,7 @@ impl Message {
             cc: addresses(root.cc()),
             reply_to: addresses(root.reply_to()),
             subject: root.subject().unwrap_or_default().trim().to_owned(),
-            date: root
-                .date()
-                .filter(mail_parser::DateTime::is_valid)
-                .and_then(|date| Timestamp::from_second(date.to_timestamp()).ok()),
+            date: timestamp(root.date()),
             message_id: root.message_id().map(|id| strip_brackets(id).to_owned()),
             in_reply_to: ids(root.in_reply_to()),
             references: ids(root.references()),
@@ -310,7 +286,38 @@ fn text_format(part: &MessagePart<'_>) -> TextFormat {
     }
 }
 
-fn strip_brackets(id: &str) -> &str {
+/// The addresses of a header.
+pub(crate) fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Vec<Address> {
+    list.map(|list| {
+        list.mailboxes()
+            .filter_map(|mailbox| {
+                Some(Address {
+                    name: mailbox.name().map(str::to_owned),
+                    email: mailbox.address()?.to_owned(),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The `Message-ID`s of a header, without angle brackets.
+pub(crate) fn ids(list: Option<mail_parser::TextList<'_>>) -> Vec<String> {
+    list.map(|list| {
+        list.iter()
+            .map(|id| strip_brackets(id).to_owned())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A `Date` header as a timestamp, if it's a valid date.
+pub(crate) fn timestamp(date: Option<mail_parser::DateTime>) -> Option<Timestamp> {
+    date.filter(mail_parser::DateTime::is_valid)
+        .and_then(|date| Timestamp::from_second(date.to_timestamp()).ok())
+}
+
+pub(crate) fn strip_brackets(id: &str) -> &str {
     id.trim().trim_start_matches('<').trim_end_matches('>')
 }
 

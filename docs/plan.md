@@ -70,16 +70,20 @@ HTML sizes images in CSS pixels, and HiDPI terminals report cells in device pixe
 which drew images at half their size. The pixel ratio is guessed from the cells' height, and can be configured.
 Tried in tmux (half blocks); kitty placeholders are tested by their escape sequences, not yet on screen.
 
-### 4. Accounts over IMAP (muttrs-mail)
+### 4. Accounts over IMAP (muttrs-mail) ✅
 
-- [ ] Configuration of Accounts, with presets for Gmail and Outlook
-- [ ] TLS: implicit (`ssl`) and `starttls`, platform roots plus an optional CA file
-- [ ] Authentication: password from the keyring or a command; OAuth2 (XOAUTH2), with `muttrs login` doing the browser
-      flow (PKCE, loopback redirect) and keeping the refresh token in the keyring
-- [ ] Mailboxes: LIST with SPECIAL-USE Roles, modified UTF-7 names, STATUS counts
-- [ ] Envelopes of the newest Messages; bodies fetched on open, cached on disk
-- [ ] Flags (read, flagged), move, delete to Trash, archive; MOVE or COPY + EXPUNGE
-- [ ] New mail by IDLE, reconnecting with backoff
+- [x] Configuration of Accounts, with presets for Gmail and Outlook
+- [x] TLS: implicit (`ssl`) and `starttls`, platform roots plus an optional CA file; plain text to the loopback only
+- [x] Authentication: password from the keyring or a command; OAuth2 (XOAUTH2, sent as SASL-IR first), with
+      `muttrs login` doing the browser flow (PKCE, loopback redirect) and keeping the refresh token in the keyring
+- [x] Mailboxes: LIST with SPECIAL-USE Roles, modified UTF-7 names, STATUS counts
+- [x] Envelopes of the newest Messages (300), from `HEADER.FIELDS`; bodies fetched on open, cached on disk
+- [x] Flags (read, flagged), move, delete to Trash, archive; MOVE or COPY + EXPUNGE
+- [x] New mail by IDLE (renewed every 25 minutes), reconnecting with backoff; a refused command fails alone
+
+Tested against GreenMail and Dovecot in containers ([development.md](development.md#mail-servers-to-test-against)):
+TLS, STARTTLS, XOAUTH2, refusals, and an Account's client end to end, IDLE included. Not tested against Gmail or
+Outlook themselves.
 
 ### 5. The TUI over Accounts
 
