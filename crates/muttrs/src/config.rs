@@ -27,6 +27,12 @@ pub(crate) struct Config {
     pub(crate) prefer: Prefer,
     /// The widest the Pager lays bodies out, in cells, however wide the terminal.
     pub(crate) pager_width: u16,
+    /// How many rows the Index keeps above the Pager, its status line among them, as mutt's `pager_index_lines`;
+    /// 0 for none. At most half the screen.
+    pub(crate) pager_index_lines: u16,
+    /// How many seconds the Pager shows a Message before it's marked read, as NeoMutt's `pager_read_delay`: stepping
+    /// to another, or closing the Pager, before then leaves it Unread. 0 marks it read as it opens.
+    pub(crate) pager_read_delay: u64,
     /// The most rows a Picture takes.
     pub(crate) max_picture_rows: u16,
     /// How many of the terminal's pixels make a CSS pixel, which HTML sizes images in; guessed from the size of the
@@ -57,6 +63,8 @@ impl Default for Config {
             load_remote_content: false,
             prefer: Prefer::Html,
             pager_width: 100,
+            pager_index_lines: 0,
+            pager_read_delay: 1,
             max_picture_rows: 24,
             pixel_ratio: None,
             download_dir: None,
@@ -184,14 +192,17 @@ mod tests {
         assert_eq!(config.theme, "tokyonight-moon");
         assert_eq!(config.icons, Auto::Detect);
         assert!(!config.load_remote_content);
+        assert_eq!((config.pager_index_lines, config.pager_read_delay), (0, 1));
     }
 
     #[test]
     fn what_it_takes() {
         let config = parse(
-            "theme = \"terminal\"\nicons = false\nimages = \"blocks\"\nprefer = \"plain\"\npager_width = 80\n",
+            "theme = \"terminal\"\nicons = false\nimages = \"blocks\"\nprefer = \"plain\"\npager_width = 80\n\
+             pager_index_lines = 8\npager_read_delay = 0\n",
         )
         .unwrap();
+        assert_eq!((config.pager_index_lines, config.pager_read_delay), (8, 0));
         assert_eq!(config.icons, Auto::Off);
         assert_eq!(config.images, Images::Blocks);
         assert_eq!(config.prefer, Prefer::Plain);

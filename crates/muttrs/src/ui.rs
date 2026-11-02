@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -46,6 +47,8 @@ pub(crate) enum Event {
     },
     /// What an Account says, by its place in the sidebar.
     Account(usize, Update),
+    /// The Pager, by its ID, has shown its Message for `pager_read_delay`.
+    Read(u64),
 }
 
 /// What the UI is set up with.
@@ -123,6 +126,13 @@ struct Opened {
     uid: u32,
 }
 
+impl Opened {
+    /// Whether `index` lists its Mailbox.
+    fn is_in(&self, index: &Index) -> bool {
+        index.account == self.account && index.mailbox == self.mailbox
+    }
+}
+
 /// A word for the user at the foot of the screen, until the next key.
 struct Notice {
     text: String,
@@ -148,6 +158,8 @@ pub(crate) struct App {
     pager: Option<Pager>,
     /// The Message the Pager shows, or is waiting for.
     opened: Option<Opened>,
+    /// The Pager, by its ID, whose Message is marked read once it's shown for `pager_read_delay`.
+    reading: Option<u64>,
     overlay: Option<Overlay>,
     prompt: Option<Prompt>,
     notice: Option<Notice>,
@@ -202,6 +214,7 @@ impl App {
             searched: None,
             pager: None,
             opened: None,
+            reading: None,
             overlay: None,
             prompt: None,
             notice: None,
@@ -246,7 +259,65 @@ impl App {
         );
         let request = pager.remote_to_fetch();
         self.pager = Some(pager);
+        self.read_later(id);
         self.fulfil(request);
+    }
+
+    /// Marks the opened Message read once the Pager `pager` has shown it for `pager_read_delay`, if it's Unread.
+    fn read_later(&mut self, pager: u64) {
+        self.reading = None;
+        let delay = self.config.pager_read_delay;
+        if delay == 0
+            || !self
+                .opened
+                .as_ref()
+                .is_some_and(|opened| self.is_unread(opened))
+        {
+            return;
+        }
+        self.reading = Some(pager);
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            let _ = events.send(Event::Read(pager));
+        });
+    }
+
+    /// Whether the Index lists `opened`, Unread.
+    fn is_unread(&self, opened: &Opened) -> bool {
+        self.index
+            .as_ref()
+            .filter(|index| opened.is_in(index))
+            .and_then(|index| index.find(opened.uid))
+            .is_some_and(|envelope| !envelope.flags.seen)
+    }
+
+    /// Marks `opened` read, in the Index, its Mailbox's counts and on the server, if it's Unread.
+    fn mark_seen(&mut self, opened: &Opened) {
+        let Some(envelope) = self
+            .index
+            .as_mut()
+            .filter(|index| opened.is_in(index))
+            .and_then(|index| index.find_mut(opened.uid))
+        else {
+            return;
+        };
+        if envelope.flags.seen {
+            return;
+        }
+        envelope.flags.seen = true;
+        let Some(state) = self.accounts.get_mut(opened.account) else {
+            return;
+        };
+        state.client.send(client::Request::Flag {
+            mailbox: opened.mailbox.clone(),
+            uids: vec![opened.uid],
+            flag: Flag::Seen,
+            on: true,
+        });
+        if let Some(counts) = state.counts.get_mut(&opened.mailbox) {
+            counts.unread = counts.unread.saturating_sub(1);
+        }
     }
 
     fn fulfil(&mut self, request: Request) {
@@ -289,6 +360,14 @@ impl App {
                 }
             }
             Event::Account(account, update) => self.on_account(account, update),
+            Event::Read(pager) => {
+                if self.reading == Some(pager) {
+                    self.reading = None;
+                    if let Some(opened) = self.opened.clone() {
+                        self.mark_seen(&opened);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -703,39 +782,31 @@ impl App {
         self.focus = Focus::Index;
     }
 
-    /// Fetches the Message at the Index's cursor, to show in the Pager, marking it Seen.
+    /// Fetches the Message at the Index's cursor, to show in the Pager. It's marked read at once when
+    /// `pager_read_delay` is 0, or when it's fetched to write about; otherwise once it's shown for that long.
     fn open_current(&mut self) {
-        let Some(index) = &mut self.index else { return };
-        let (account, mailbox) = (index.account, index.mailbox.clone());
-        let Some(envelope) = index.current_mut() else {
+        let Some(index) = &self.index else { return };
+        let Some(envelope) = index.current() else {
             return;
         };
-        let uid = envelope.uid;
-        let unread = !envelope.flags.seen;
-        envelope.flags.seen = true;
-        let Some(state) = self.accounts.get(account) else {
+        let opened = Opened {
+            account: index.account,
+            mailbox: index.mailbox.clone(),
+            uid: envelope.uid,
+        };
+        let Some(state) = self.accounts.get(opened.account) else {
             return;
         };
         state.client.send(client::Request::Body {
-            mailbox: mailbox.clone(),
-            uid,
+            mailbox: opened.mailbox.clone(),
+            uid: opened.uid,
         });
-        if unread {
-            state.client.send(client::Request::Flag {
-                mailbox: mailbox.clone(),
-                uids: vec![uid],
-                flag: Flag::Seen,
-                on: true,
-            });
-            if let Some(counts) = self.accounts[account].counts.get_mut(&mailbox) {
-                counts.unread = counts.unread.saturating_sub(1);
-            }
+        // The Message shown before, if it waited to be marked read, stays Unread.
+        self.reading = None;
+        if self.config.pager_read_delay == 0 || self.write_when_fetched.is_some() {
+            self.mark_seen(&opened);
         }
-        self.opened = Some(Opened {
-            account,
-            mailbox,
-            uid,
-        });
+        self.opened = Some(opened);
         if self.pager.is_none() {
             self.say("Fetching the Message…", false);
         }
@@ -758,6 +829,10 @@ impl App {
         let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
+        if flag == Flag::Seen {
+            // Marked as the user says, rather than once it's been shown a while.
+            self.reading = None;
+        }
         let Some(index) = self.index.as_mut() else {
             return;
         };
@@ -931,10 +1006,6 @@ impl App {
             compose.scroll_by(lines);
             return;
         }
-        if let Some(pager) = &mut self.pager {
-            pager.scroll_by(lines);
-            return;
-        }
         let (sidebar, index_area) = self.drawn;
         let inside = |area: Rect| {
             mouse.column >= area.x
@@ -943,6 +1014,20 @@ impl App {
                 && mouse.row < area.y + area.height
         };
         let offset = |area: Rect| usize::from(mouse.row.saturating_sub(area.y));
+        if self.pager.is_some() {
+            // A click on the mini-index opens the Message clicked; the wheel scrolls the Pager wherever it is.
+            if lines == 0 && inside(index_area) {
+                if let Some(index) = &mut self.index
+                    && index.click_around_cursor(offset(index_area))
+                {
+                    self.more_if_wanted();
+                    self.open_current();
+                }
+            } else if let Some(pager) = &mut self.pager {
+                pager.scroll_by(lines);
+            }
+            return;
+        }
         if inside(sidebar) {
             if lines != 0 {
                 self.sidebar.move_by(&self.accounts, lines);
@@ -1247,6 +1332,7 @@ impl App {
     fn close_pager(&mut self) {
         self.pager = None;
         self.opened = None;
+        self.reading = None;
         self.pictures.keep(None, |_| false);
         // Standing alone, as `muttrs view` opens it, the Pager is all there is.
         if self.standalone {
@@ -1626,7 +1712,9 @@ impl App {
                 &self.icons,
                 self.config.pager_width,
             );
-        } else if let Some(pager) = &mut self.pager {
+        } else if self.pager.is_some() {
+            let area = self.draw_mini_index(body, buffer);
+            let Some(pager) = &mut self.pager else { return };
             let mut cx = pager::Cx {
                 theme: &self.theme,
                 icons: &self.icons,
@@ -1635,7 +1723,7 @@ impl App {
                 max_picture_rows: self.config.max_picture_rows,
                 pixel_ratio: self.config.pixel_ratio,
             };
-            pager.draw(body, buffer, &mut cx);
+            pager.draw(area, buffer, &mut cx);
         } else if !self.standalone {
             self.draw_main(body, buffer);
         }
@@ -1643,6 +1731,43 @@ impl App {
             overlay.draw(body, buffer, &self.theme);
         }
         self.draw_status(status, frame);
+    }
+
+    /// The Index's rows around the Message the Pager shows, above it, then the Index's status line, as mutt's
+    /// mini-index (`pager_index_lines`): what's left of `body` is the Pager's.
+    fn draw_mini_index(&mut self, body: Rect, buffer: &mut ratatui::buffer::Buffer) -> Rect {
+        // The mouse finds nothing but the Pager, unless the mini-index is drawn.
+        self.drawn = (Rect::default(), Rect::default());
+        let rows = match &self.index {
+            Some(index) if !self.standalone => index.len(),
+            _ => 0,
+        };
+        let Some((rows_area, status_area, pager_area)) =
+            mini_index(body, self.config.pager_index_lines, rows)
+        else {
+            return body;
+        };
+        let status = self.index_status();
+        if let Some(index) = &mut self.index {
+            index.draw_around_cursor(
+                rows_area,
+                buffer,
+                &index::Draw {
+                    theme: &self.theme,
+                    icons: &self.icons,
+                    focused: false,
+                },
+            );
+        }
+        buffer.set_style(status_area, self.theme.status);
+        buffer.set_line(
+            status_area.x,
+            status_area.y,
+            &Line::raw(status),
+            status_area.width,
+        );
+        self.drawn.1 = rows_area;
+        pager_area
     }
 
     /// The sidebar, then the Index.
@@ -1715,6 +1840,12 @@ impl App {
         if let Some(pager) = &self.pager {
             return format!(" {}", pager.message().subject);
         }
+        self.index_status()
+    }
+
+    /// What the status line says of the Index: its Account and Mailbox, how many Messages, and what's selected or
+    /// found.
+    fn index_status(&self) -> String {
         let Some(index) = &self.index else {
             return " muttrs".into();
         };
@@ -2024,4 +2155,64 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
     }
     ratatui::restore();
     outcome
+}
+
+/// Where the mini-index's rows, its status line and the Pager go in `body`: `lines` rows above the Pager, the status
+/// line among them, at most half of `body`, and no more than the Index has `rows` for. None without room for a row
+/// and the status line.
+fn mini_index(body: Rect, lines: u16, rows: usize) -> Option<(Rect, Rect, Rect)> {
+    let shown = (lines.min(body.height / 2))
+        .saturating_sub(1)
+        .min(u16::try_from(rows).unwrap_or(u16::MAX));
+    if shown == 0 {
+        return None;
+    }
+    Some((
+        Rect {
+            height: shown,
+            ..body
+        },
+        Rect {
+            y: body.y + shown,
+            height: 1,
+            ..body
+        },
+        Rect {
+            y: body.y + shown + 1,
+            height: body.height - shown - 1,
+            ..body
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mini_index_above_the_pager() {
+        let body = Rect::new(0, 0, 80, 40);
+        assert_eq!(
+            mini_index(body, 8, 300),
+            Some((
+                Rect::new(0, 0, 80, 7),
+                Rect::new(0, 7, 80, 1),
+                Rect::new(0, 8, 80, 32)
+            )),
+            "7 rows, then the status line"
+        );
+        assert_eq!(
+            mini_index(body, 8, 3).map(|(rows, _, pager)| (rows.height, pager.y)),
+            Some((3, 4)),
+            "only as many rows as the Index has"
+        );
+        assert_eq!(
+            mini_index(body, 30, 300).map(|(rows, _, _)| rows.height),
+            Some(19),
+            "at most half"
+        );
+        assert_eq!(mini_index(body, 0, 300), None);
+        assert_eq!(mini_index(body, 1, 300), None, "no room for a row");
+        assert_eq!(mini_index(body, 8, 0), None);
+    }
 }
