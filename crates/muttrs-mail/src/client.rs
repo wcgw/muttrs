@@ -849,6 +849,10 @@ impl Worker {
                 envelope.flags = *flags;
             }
         }
+        // Those listed before Gmail's Threads were asked for, as the cache may keep them.
+        session
+            .add_gmail_threads(window.envelopes.values_mut())
+            .await?;
         Ok(())
     }
 

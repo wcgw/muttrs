@@ -72,6 +72,9 @@ pub struct Envelope {
     pub size: u32,
     /// Whether it likely has Attachments: its body is `multipart/mixed`.
     pub has_attachments: bool,
+    /// Gmail's ID of its Thread (`X-GM-THRID`), on Gmail: what threads it with Messages its References don't name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gmail_thread: Option<u64>,
 }
 
 impl Envelope {
@@ -99,6 +102,7 @@ impl Envelope {
                 references: Vec::new(),
                 size,
                 has_attachments: false,
+                gmail_thread: None,
             };
         };
         let root = parsed.root();
@@ -123,6 +127,7 @@ impl Envelope {
             references: message::ids(root.references()),
             size,
             has_attachments,
+            gmail_thread: None,
         }
     }
 }

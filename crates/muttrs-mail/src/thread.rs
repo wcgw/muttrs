@@ -3,6 +3,9 @@
 //!
 //! A Message whose parent isn't listed (it's in another Mailbox, or older than what's listed) goes under the
 //! nearest ancestor that is; when none is, the earliest of its siblings heads their thread.
+//!
+//! On Gmail, threads Gmail has as one (`X-GM-THRID`) are joined under the earliest of them, as when a reply drops
+//! its References.
 
 use std::collections::HashMap;
 
@@ -128,6 +131,7 @@ pub fn threads(envelopes: &[Envelope]) -> Vec<Threaded> {
             threads.extend(nodes);
         }
     }
+    let mut threads = join_gmail_threads(threads, envelopes, &date);
     for thread in &mut threads {
         sort(thread, &date);
     }
@@ -154,6 +158,64 @@ fn link(containers: &mut [Container], parent: usize, child: usize) {
     }
     containers[child].parent = Some(parent);
     containers[parent].children.push(child);
+}
+
+/// `threads`, those in the same Gmail Thread, by any of their Messages, joined under the earliest of them.
+fn join_gmail_threads(
+    threads: Vec<Node>,
+    envelopes: &[Envelope],
+    date: &impl Fn(&Node) -> Option<Timestamp>,
+) -> Vec<Node> {
+    if envelopes
+        .iter()
+        .all(|envelope| envelope.gmail_thread.is_none())
+    {
+        return threads;
+    }
+    // Each thread's group, as the first thread of it (union-find): the threads sharing a Gmail Thread are one
+    // group, and so are those sharing one with any of them.
+    let mut group: Vec<usize> = (0..threads.len()).collect();
+    let mut first_in: HashMap<u64, usize> = HashMap::new();
+    for (at, thread) in threads.iter().enumerate() {
+        let mut ids = Vec::new();
+        gmail_threads(thread, envelopes, &mut ids);
+        for id in ids {
+            let other = *first_in.entry(id).or_insert(at);
+            let (one, another) = (find(&mut group, at), find(&mut group, other));
+            group[one.max(another)] = one.min(another);
+        }
+    }
+    let mut joined: Vec<Vec<Node>> = (0..threads.len()).map(|_| Vec::new()).collect();
+    for (at, thread) in threads.into_iter().enumerate() {
+        joined[find(&mut group, at)].push(thread);
+    }
+    joined
+        .into_iter()
+        .filter(|nodes| !nodes.is_empty())
+        .map(|mut nodes| {
+            nodes.sort_by_key(|node| (date(node), node.envelope));
+            let mut head = nodes.remove(0);
+            head.children.extend(nodes);
+            head
+        })
+        .collect()
+}
+
+/// The Gmail Threads of `node` and its replies.
+fn gmail_threads(node: &Node, envelopes: &[Envelope], ids: &mut Vec<u64>) {
+    ids.extend(envelopes[node.envelope].gmail_thread);
+    for child in &node.children {
+        gmail_threads(child, envelopes, ids);
+    }
+}
+
+/// The group `at` is in: the first of it.
+fn find(group: &mut [usize], mut at: usize) -> usize {
+    while group[at] != at {
+        group[at] = group[group[at]];
+        at = group[at];
+    }
+    at
 }
 
 /// The Messages `container` stands for: itself with its replies, or, when it isn't listed, its replies in its place.
@@ -232,6 +294,7 @@ mod tests {
             references: references.iter().map(|r| (*r).to_owned()).collect(),
             size: 0,
             has_attachments: false,
+            gmail_thread: None,
         }
     }
 
@@ -287,6 +350,43 @@ mod tests {
             ["2", "├─3", "└─4"],
             "by date under the earliest"
         );
+    }
+
+    fn on_gmail(thread: u64, envelope: Envelope) -> Envelope {
+        Envelope {
+            gmail_thread: Some(thread),
+            ..envelope
+        }
+    }
+
+    #[test]
+    fn gmail_joins_threads_references_dont() {
+        let envelopes = [
+            on_gmail(7, envelope(1, 0, "a", &[])),
+            // A reply that dropped its References, say.
+            on_gmail(7, envelope(2, 5, "b", &[])),
+            on_gmail(7, envelope(3, 2, "c", &["a"])),
+            on_gmail(8, envelope(4, 3, "d", &[])),
+            envelope(5, 4, "e", &[]),
+        ];
+        assert_eq!(
+            drawn(&envelopes),
+            ["1", "├─3", "└─2", "5", "4"],
+            "b under a, by date; d and e alone"
+        );
+        assert_eq!(threads(&envelopes)[0].replies, 2);
+    }
+
+    #[test]
+    fn a_thread_in_two_gmail_threads_joins_both() {
+        let envelopes = [
+            on_gmail(2, envelope(1, 0, "z", &[])),
+            on_gmail(1, envelope(2, 1, "x", &[])),
+            // y replies to x, but Gmail has it with z.
+            on_gmail(2, envelope(3, 2, "y", &["x"])),
+            on_gmail(1, envelope(4, 3, "w", &[])),
+        ];
+        assert_eq!(drawn(&envelopes), ["1", "├─2", "│ └─3", "└─4"]);
     }
 
     #[test]

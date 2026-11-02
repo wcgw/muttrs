@@ -118,7 +118,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] Threads in the Index (client-side, after JWZ, without grouping by subject): replies under what they reply
       to, threads by their latest Message, folding (`za`, `zM`, `zR`); `T` switches; `hide_thread_subjects` draws
       a reply's subject as mutt's arrow where it's what it replies to's
-- [ ] Gmail's own threads (`X-GM-THRID`), for Messages whose References don't say
+- [x] Gmail's own threads (`X-GM-THRID`), for Messages whose References don't say: threads Gmail has as one
+      are joined under the earliest
 - [x] Search on the server (`S`): `SEARCH TEXT`, and Gmail's own syntax through `X-GM-RAW`; the newest 300 found
       listed as an Index of their own until `Esc`
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end

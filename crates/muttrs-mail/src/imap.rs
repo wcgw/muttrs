@@ -1,9 +1,11 @@
 //! An IMAP session with an Account's server: connecting over TLS or STARTTLS, signing in with a password or
 //! XOAUTH2, and the commands muttrs needs.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_imap::imap_proto::{AttributeValue, Response, Status};
 use async_imap::types::{Fetch, NameAttribute};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -125,6 +127,8 @@ pub struct Selected {
 }
 
 /// A session with an Account's IMAP server, signed in, and what the server can do.
+// One bool a capability: the server has each or not, whatever the others.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Session {
     // async_imap's Session, which this one wraps: no other name says so as plainly.
     #[allow(clippy::struct_field_names)]
@@ -134,6 +138,8 @@ pub struct Session {
     /// Whether the server has UIDPLUS (RFC 4315), for UID EXPUNGE.
     can_uid_expunge: bool,
     can_idle: bool,
+    /// Whether the server has Gmail's extensions (X-GM-EXT-1), so says which Thread each Message is in.
+    gmail: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -141,6 +147,7 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("can_move", &self.can_move)
             .field("can_idle", &self.can_idle)
+            .field("gmail", &self.gmail)
             .finish_non_exhaustive()
     }
 }
@@ -194,11 +201,13 @@ impl Session {
             can_move: false,
             can_uid_expunge: false,
             can_idle: false,
+            gmail: false,
         };
         let capabilities = session.session.capabilities().await?;
         session.can_move = capabilities.has_str("MOVE");
         session.can_uid_expunge = capabilities.has_str("UIDPLUS");
         session.can_idle = capabilities.has_str("IDLE");
+        session.gmail = capabilities.has_str("X-GM-EXT-1");
         Ok(session)
     }
 
@@ -331,7 +340,8 @@ impl Session {
             .await?
             .try_collect()
             .await?;
-        Ok(fetches.iter().filter_map(read_envelope).collect())
+        self.with_gmail_threads(fetches.iter().filter_map(read_envelope).collect())
+            .await
     }
 
     /// The Envelopes of the Messages of the open Mailbox from sequence number `first` to `last`, both included.
@@ -349,7 +359,8 @@ impl Session {
             .await?
             .try_collect()
             .await?;
-        Ok(fetches.iter().filter_map(read_envelope).collect())
+        self.with_gmail_threads(fetches.iter().filter_map(read_envelope).collect())
+            .await
     }
 
     /// The sequence number of the open Mailbox's Message `uid`, if it has it.
@@ -382,7 +393,83 @@ impl Session {
             .await?
             .try_collect()
             .await?;
-        Ok(fetches.iter().filter_map(read_envelope).collect())
+        self.with_gmail_threads(fetches.iter().filter_map(read_envelope).collect())
+            .await
+    }
+
+    /// Gives those of `envelopes`, of the open Mailbox, that lack it their Gmail Thread's ID, when the server is
+    /// Gmail's; on others, does nothing. A server that says it's Gmail's but won't tell isn't asked again.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub async fn add_gmail_threads<'a>(
+        &mut self,
+        envelopes: impl IntoIterator<Item = &'a mut Envelope>,
+    ) -> Result<(), Error> {
+        if !self.gmail {
+            return Ok(());
+        }
+        let mut lacking: Vec<&mut Envelope> = envelopes
+            .into_iter()
+            .filter(|envelope| envelope.gmail_thread.is_none())
+            .collect();
+        if lacking.is_empty() {
+            return Ok(());
+        }
+        let uids: Vec<u32> = lacking.iter().map(|envelope| envelope.uid).collect();
+        let Some(threads) = self.gmail_threads(&uid_set(&uids)).await? else {
+            tracing::debug!(
+                "the server has X-GM-EXT-1, but doesn't fetch X-GM-THRID: not asked again"
+            );
+            self.gmail = false;
+            return Ok(());
+        };
+        for envelope in &mut lacking {
+            envelope.gmail_thread = threads.get(&envelope.uid).copied();
+        }
+        Ok(())
+    }
+
+    async fn with_gmail_threads(
+        &mut self,
+        mut envelopes: Vec<Envelope>,
+    ) -> Result<Vec<Envelope>, Error> {
+        self.add_gmail_threads(&mut envelopes).await?;
+        Ok(envelopes)
+    }
+
+    /// The Gmail Thread IDs of the Messages of the open Mailbox whose UIDs are in `uids`, by UID; None if the server
+    /// refuses the command.
+    async fn gmail_threads(&mut self, uids: &str) -> Result<Option<HashMap<u32, u64>>, Error> {
+        // async-imap reads X-GM-THRID but has nothing that tells it: the command's responses are read as they come.
+        let tag = self
+            .session
+            .run_command(format!("UID FETCH {uids} (UID X-GM-THRID)"))
+            .await?;
+        let mut threads = HashMap::new();
+        loop {
+            let response = self
+                .session
+                .read_response()
+                .await
+                .map_err(async_imap::error::Error::Io)?
+                .ok_or(async_imap::error::Error::ConnectionLost)?;
+            match response.parsed() {
+                Response::Done {
+                    tag: done, status, ..
+                } if *done == tag => {
+                    return Ok(matches!(status, Status::Ok).then_some(threads));
+                }
+                // What else comes meanwhile (EXISTS, Flags changed) is let go, as after async-imap's own commands:
+                // refreshing finds it.
+                parsed => {
+                    if let Some((uid, thread)) = gmail_thread(parsed) {
+                        threads.insert(uid, thread);
+                    }
+                }
+            }
+        }
     }
 
     /// The Flags of the Messages of the open Mailbox whose UIDs are in `uids`, by UID.
@@ -510,6 +597,7 @@ impl Session {
             can_move,
             can_uid_expunge,
             can_idle,
+            gmail,
         } = self;
         let mut handle = session.idle();
         handle.init().await?;
@@ -525,6 +613,7 @@ impl Session {
                 can_move,
                 can_uid_expunge,
                 can_idle,
+                gmail,
             },
             changed,
         ))
@@ -643,6 +732,22 @@ fn read_envelope(fetch: &Fetch) -> Option<Envelope> {
     ))
 }
 
+/// The UID and Gmail Thread ID a FETCH response tells, if it tells both.
+fn gmail_thread(response: &Response<'_>) -> Option<(u32, u64)> {
+    let Response::Fetch(_, attributes) = response else {
+        return None;
+    };
+    let uid = attributes.iter().find_map(|attribute| match attribute {
+        AttributeValue::Uid(uid) => Some(*uid),
+        _ => None,
+    })?;
+    let thread = attributes.iter().find_map(|attribute| match attribute {
+        AttributeValue::GmailThrId(thread) => Some(*thread),
+        _ => None,
+    })?;
+    Some((uid, thread))
+}
+
 /// UIDs as a UID set, runs of consecutive UIDs as ranges: `1:3,7`.
 #[must_use]
 pub fn uid_set(uids: &[u32]) -> String {
@@ -676,6 +781,23 @@ mod tests {
     fn uid_sets_make_ranges() {
         assert_eq!(uid_set(&[7, 1, 2, 3, 9, 10, 3]), "1:3,7,9:10");
         assert_eq!(uid_set(&[5]), "5");
+    }
+
+    #[test]
+    fn gmail_threads_from_fetch_responses() {
+        let parsed = |line: &'static [u8]| Response::parse(line).unwrap().1;
+        assert_eq!(
+            gmail_thread(&parsed(
+                b"* 2 FETCH (X-GM-THRID 1266894439832287888 UID 7)\r\n"
+            )),
+            Some((7, 1_266_894_439_832_287_888))
+        );
+        assert_eq!(
+            gmail_thread(&parsed(b"* 2 FETCH (UID 7 FLAGS (\\Seen))\r\n")),
+            None,
+            "a Flags change, meanwhile"
+        );
+        assert_eq!(gmail_thread(&parsed(b"* 3 EXISTS\r\n")), None);
     }
 
     #[test]
