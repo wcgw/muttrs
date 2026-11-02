@@ -44,8 +44,12 @@ struct Row {
     folded_uids: Vec<u32>,
     /// Whether any of them is Unread.
     folded_unread: bool,
+    /// Whether its subject is what it replies to's, and isn't shown again: an arrow shows instead.
+    repeated: bool,
 }
 
+// Each bool says something of its own of the Index: what it lists, how, and whether it has come.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Index {
     /// The Account the Mailbox is of, by its place in the sidebar.
     pub(crate) account: usize,
@@ -60,6 +64,8 @@ pub(crate) struct Index {
     rows: Vec<Row>,
     /// Whether rows are in threads.
     threaded: bool,
+    /// Whether a reply's subject is left out where it's what it replies to's, as mutt's `hide_thread_subject`.
+    hide_subjects: bool,
     /// The threads folded, by the UID of the Message heading them.
     folded: HashSet<u32>,
     /// The Messages selected, to act on together, by UID.
@@ -100,6 +106,7 @@ impl Index {
             envelopes: Vec::new(),
             rows: Vec::new(),
             threaded,
+            hide_subjects: false,
             folded: HashSet::new(),
             selected: HashSet::new(),
             exists: 0,
@@ -111,6 +118,12 @@ impl Index {
             height: 0,
             search: None,
         }
+    }
+
+    /// The Index, leaving a reply's subject out where it's what it replies to's, if `hide`.
+    pub(crate) fn hiding_repeated_subjects(mut self, hide: bool) -> Self {
+        self.hide_subjects = hide;
+        self
     }
 
     /// Takes the Envelopes the server listed, keeping the cursor on the Message it was on.
@@ -139,6 +152,7 @@ impl Index {
             self.threaded,
         );
         found.sent = self.sent;
+        found.hide_subjects = self.hide_subjects;
         found.set(envelopes, u32::try_from(count).unwrap_or(u32::MAX));
         found.more = More::Exhausted;
         found.found = Some((query, count));
@@ -159,6 +173,7 @@ impl Index {
                     folded: 0,
                     folded_uids: Vec::new(),
                     folded_unread: false,
+                    repeated: false,
                 })
                 .collect()
         };
@@ -175,8 +190,18 @@ impl Index {
         let threaded = thread::threads(&self.envelopes);
         let mut rows: Vec<Row> = Vec::with_capacity(threaded.len());
         let mut head = 0;
+        // The subjects of the row's ancestors, by depth: its parent's last.
+        let mut ancestors: Vec<&str> = Vec::new();
         for (at, message) in threaded.iter().enumerate() {
             let envelope = &self.envelopes[message.envelope];
+            ancestors.truncate(message.depth);
+            let subject = base_subject(&envelope.subject);
+            let repeated = self.hide_subjects
+                && message.depth > 0
+                && ancestors
+                    .last()
+                    .is_some_and(|parent| parent.eq_ignore_ascii_case(subject));
+            ancestors.push(subject);
             if message.depth == 0 {
                 head = envelope.uid;
                 let folded = self.folded.contains(&head) && message.replies > 0;
@@ -199,6 +224,7 @@ impl Index {
                         Vec::new()
                     },
                     folded_unread,
+                    repeated: false,
                 });
             } else if !self.folded.contains(&head) {
                 let tree = message
@@ -218,6 +244,7 @@ impl Index {
                     folded: 0,
                     folded_uids: Vec::new(),
                     folded_unread: false,
+                    repeated,
                 });
             }
         }
@@ -577,6 +604,14 @@ impl Index {
         spans.push(Span::styled(who, text));
         spans.push(Span::raw(" ".repeat(who_padding + 2)));
         let mut room = width.saturating_sub(flags_width + 7 + who_width + 2);
+        if row.repeated {
+            // mutt's arrow, for the subject left out.
+            spans.push(Span::styled(
+                truncate(&format!("{}>", row.tree), room),
+                theme.dim,
+            ));
+            return Line::from(spans);
+        }
         if !row.tree.is_empty() {
             let tree = truncate(&row.tree, room);
             room = room.saturating_sub(tree.width() + 1);
@@ -595,6 +630,22 @@ impl Index {
         };
         spans.push(Span::styled(truncate(subject, room), text));
         Line::from(spans)
+    }
+}
+
+/// `subject` without its `Re:`s and `Fwd:`s, as a reply's is compared with what it replies to's.
+fn base_subject(subject: &str) -> &str {
+    let mut rest = subject.trim();
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let stripped = ["re:", "fwd:", "fw:", "aw:", "sv:"]
+            .iter()
+            .find(|prefix| lower.starts_with(*prefix))
+            .map(|prefix| rest[prefix.len()..].trim_start());
+        match stripped {
+            Some(after) => rest = after,
+            None => return rest,
+        }
     }
 }
 
@@ -746,6 +797,54 @@ mod tests {
             "{:?}",
             row(2)
         );
+
+        // Hidden as mutt hides them, a reply's subject that's what it replies to's shows as an arrow.
+        let mut hiding = Index::new(0, "INBOX".into(), "Inbox".into(), None, true)
+            .hiding_repeated_subjects(true);
+        hiding.set(
+            vec![
+                envelope(1, 1, "[PATCH 0/2] fix", "Ann"),
+                Envelope {
+                    subject: "[PATCH 1/2] first".into(),
+                    ..reply(2, 2, &[1])
+                },
+                Envelope {
+                    subject: "Re: [PATCH 1/2] first".into(),
+                    ..reply(3, 3, &[1, 2])
+                },
+                Envelope {
+                    subject: "RE: [patch 1/2] FIRST".into(),
+                    ..reply(4, 4, &[1, 2, 3])
+                },
+            ],
+            4,
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 4));
+        hiding.draw(
+            buffer.area,
+            &mut buffer,
+            &Draw {
+                theme: &theme,
+                icons: &Icons::PLAIN,
+                focused: true,
+            },
+        );
+        let row = |y: u16| -> String { (0..100).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(
+            row(1).trim_end().ends_with("└─ [PATCH 1/2] first"),
+            "not its parent's: {:?}",
+            row(1)
+        );
+        assert!(
+            row(2).trim_end().ends_with("  └─>"),
+            "its parent's: {:?}",
+            row(2)
+        );
+        assert!(
+            row(3).trim_end().ends_with("    └─>"),
+            "its parent's, case aside: {:?}",
+            row(3)
+        );
         index.move_by(2);
         index.toggle_fold();
         assert_eq!(shown(&index).len(), 2);
@@ -828,6 +927,12 @@ mod tests {
         assert!(index.wants_more(), "more came: ask again");
         index.set(page(80), 100);
         assert!(!index.wants_more(), "none came: there are none");
+    }
+
+    #[test]
+    fn base_subjects() {
+        assert_eq!(base_subject("Re: RE: Fwd: Lunch"), "Lunch");
+        assert_eq!(base_subject("Rebate"), "Rebate");
     }
 
     #[test]

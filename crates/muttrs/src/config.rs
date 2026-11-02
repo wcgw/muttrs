@@ -12,8 +12,10 @@ use crate::xdg;
 /// What the configuration file says.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+// Each bool is a setting of its own, not a state machine folded into bools.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Config {
-    /// The theme: `tokyonight-moon` or `terminal`.
+    /// The theme: `tokyonight-moon`, `terminal`, or a theme of the user's in `themes/NAME.toml`.
     pub(crate) theme: String,
     /// Whether to draw Nerd Font icons: `true`, `false`, or `"auto"` for terminals that have the symbols built in.
     pub(crate) icons: Auto,
@@ -36,6 +38,9 @@ pub(crate) struct Config {
     pub(crate) editor: Option<String>,
     /// Whether the Index shows Messages in threads, at first; `T` switches.
     pub(crate) threads: bool,
+    /// Whether a reply in a thread leaves its subject out, as an arrow, where it's what it replies to's (`Re:`
+    /// aside), as mutt's `hide_thread_subject` does.
+    pub(crate) hide_thread_subjects: bool,
     /// Whether muttrs takes the mouse: its wheel scrolls, its clicks choose. Terminals then select text with Shift.
     pub(crate) mouse: bool,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
@@ -57,6 +62,7 @@ impl Default for Config {
             download_dir: None,
             editor: None,
             threads: true,
+            hide_thread_subjects: false,
             mouse: true,
             accounts: Vec::new(),
         }

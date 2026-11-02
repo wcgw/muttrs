@@ -174,6 +174,7 @@ max_picture_rows = 24         # the most rows a Picture takes
 # download_dir = "~/Downloads"
 # editor = "nvim"             # what Drafts are written in; $VISUAL, $EDITOR or vi by default
 threads = true                # the Index in threads (T switches), or newest first
+hide_thread_subjects = false  # a reply's subject as an arrow, ├─>, where it's what it replies to's, as mutt does
 mouse = true                  # the wheel scrolls, clicks choose (and open, clicked again); select text with Shift
 ```
 

@@ -689,7 +689,8 @@ impl App {
             mailbox.label().to_owned(),
             mailbox.role,
             self.config.threads,
-        );
+        )
+        .hiding_repeated_subjects(self.config.hide_thread_subjects);
         // As last listed, until the server says what's changed.
         if let Some(listed) = state.cache.envelopes(name) {
             index.set(listed.envelopes, listed.exists);
