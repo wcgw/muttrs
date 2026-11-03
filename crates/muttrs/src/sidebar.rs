@@ -1,8 +1,9 @@
 //! The sidebar: each Account, then its Mailboxes, those with a Role first, and their Unread counts.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
-use muttrs_mail::client::{Client, Connection};
+use muttrs_mail::client::{Client, Connection, Request, Task};
 use muttrs_mail::{Counts, Mailbox, Role};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,6 +12,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::icons::Icons;
+use crate::tasks::Tasks;
 use crate::theme::Theme;
 use crate::ui::truncate;
 
@@ -27,9 +29,27 @@ pub(crate) struct AccountState {
     pub(crate) sender: muttrs_mail::compose::Sender,
     /// What's kept of it on disk: what shows before the server says.
     pub(crate) cache: muttrs_mail::cache::Cache,
+    /// What's asked of it and not finished.
+    pub(crate) tasks: Tasks,
 }
 
 impl AccountState {
+    /// Asks the Account for `request`, keeping it among its Tasks until it's finished.
+    pub(crate) fn ask(&mut self, request: Request) -> Task {
+        self.ask_as(request, None)
+    }
+
+    /// Asks the Account for `request`, said on the status line as `what`, else as the request says.
+    pub(crate) fn ask_as(&mut self, request: Request, what: Option<String>) -> Task {
+        self.tasks.ask(
+            &self.client,
+            request,
+            what,
+            (&self.mailboxes, &self.labels),
+            Instant::now(),
+        )
+    }
+
     /// The Mailbox with `role`, by its name on the server.
     pub(crate) fn with_role(&self, role: Role) -> Option<&Mailbox> {
         self.mailboxes

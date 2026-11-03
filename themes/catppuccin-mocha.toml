@@ -28,6 +28,8 @@ status = { fg = "#a6adc8", bg = "#313244" }
 error = { fg = "#f38ba8" }                         # red
 keys = { fg = "#89b4fa", bold = true }
 voight = { fg = "#cba6f7" }                        # mauve: voight's Assessment
+working = { fg = "#89b4fa" }                       # blue: the Task being done, on the status line
+queued = { fg = "#89b4fa", bg = "#45475a" }        # blue on surface1: how many more Tasks are asked
 heatmap_human = { fg = "#1e1e2e", bg = "#a6e3a1" } # green: prose voight scored 0%, blended through
 heatmap_even = { fg = "#1e1e2e", bg = "#f9e2af" }  # yellow (50%)
 heatmap_llm = { fg = "#1e1e2e", bg = "#f38ba8" }   # to red (100%)

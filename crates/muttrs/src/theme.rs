@@ -69,6 +69,10 @@ pub(crate) struct Theme {
     pub(crate) keys: Style,
     /// voight's Assessment, on the status line.
     pub(crate) voight: Style,
+    /// The Task being done, and its spinner, on the status line.
+    pub(crate) working: Style,
+    /// How many more Tasks are asked, after it: padded a cell each side.
+    pub(crate) queued: Style,
     /// In the Heatmap, prose voight scored 0%; see [`Theme::heat`].
     pub(crate) heatmap_human: Style,
     /// In the Heatmap, prose voight scored 50%.
@@ -181,6 +185,8 @@ impl Theme {
             error: Style::new().fg(moon::RED),
             keys: Style::new().fg(moon::BLUE).add_modifier(Modifier::BOLD),
             voight: Style::new().fg(moon::MAGENTA),
+            working: Style::new().fg(moon::BLUE),
+            queued: Style::new().fg(moon::BLUE).bg(moon::BG_VISUAL),
             // Green through yellow to red, blended; the background's colour over them.
             heatmap_human: Style::new().fg(Color::Rgb(r, g, b)).bg(moon::GREEN),
             heatmap_even: Style::new().fg(Color::Rgb(r, g, b)).bg(moon::YELLOW),
@@ -238,6 +244,8 @@ impl Theme {
             error: Style::new().fg(Color::Red),
             keys: bold,
             voight: Style::new().fg(Color::Magenta),
+            working: Style::new().fg(Color::Blue),
+            queued: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             // The terminal's green, yellow and red, stepped between rather than blended.
             heatmap_human: Style::new().fg(Color::Black).bg(Color::Green),
             heatmap_even: Style::new().fg(Color::Black).bg(Color::Yellow),
@@ -296,6 +304,8 @@ mod file {
         error: Option<Spec>,
         keys: Option<Spec>,
         voight: Option<Spec>,
+        working: Option<Spec>,
+        queued: Option<Spec>,
         heatmap_human: Option<Spec>,
         heatmap_even: Option<Spec>,
         heatmap_llm: Option<Spec>,
@@ -415,6 +425,8 @@ mod file {
                 (&mut theme.error, &ui.error, "ui.error"),
                 (&mut theme.keys, &ui.keys, "ui.keys"),
                 (&mut theme.voight, &ui.voight, "ui.voight"),
+                (&mut theme.working, &ui.working, "ui.working"),
+                (&mut theme.queued, &ui.queued, "ui.queued"),
                 (
                     &mut theme.heatmap_human,
                     &ui.heatmap_human,

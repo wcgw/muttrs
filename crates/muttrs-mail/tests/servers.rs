@@ -487,7 +487,7 @@ async fn an_accounts_client_sends_and_keeps_a_copy() {
         answers: None,
     });
     let sent = until(&mut updates, |update| match update {
-        Update::Sent(sent) => Some(sent.clone()),
+        Update::Sent { sent, .. } => Some(sent.clone()),
         _ => None,
     })
     .await;
@@ -821,7 +821,7 @@ async fn offline_what_was_listed_and_read_is_still_there() {
                 assert!(String::from_utf8_lossy(&body.unwrap()).contains("Hello from kept."));
                 seen.1 = true;
             }
-            Update::Sent(sent) => {
+            Update::Sent { sent, .. } => {
                 assert!(sent.unwrap_err().contains("offline"));
                 seen.2 = true;
             }
@@ -829,6 +829,134 @@ async fn offline_what_was_listed_and_read_is_still_there() {
         }
     }
     let _ = std::fs::remove_dir_all(cache_root);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn tasks_are_told_started_and_finished_and_what_they_changed_after() {
+    let username = user("tasks");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["a", "b", "c"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    session.create("Trash").await.unwrap();
+    // No Archive Mailbox: archiving is refused.
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\ntrash = \"Trash\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let uids = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 3 => Some(
+            envelopes
+                .iter()
+                .map(|envelope| envelope.uid)
+                .collect::<Vec<_>>(),
+        ),
+        _ => None,
+    })
+    .await;
+
+    // Asked one after the other, as keys pressed quickly ask them.
+    let mailbox = || "INBOX".to_owned();
+    let delete = client.send(Request::Delete {
+        mailbox: mailbox(),
+        uids: vec![uids[0]],
+    });
+    let archive = client.send(Request::Archive {
+        mailbox: mailbox(),
+        uids: vec![uids[1]],
+    });
+    let read = client.send(Request::Body {
+        mailbox: mailbox(),
+        uid: uids[2],
+    });
+    let name = |task| {
+        [(delete, "delete"), (archive, "archive"), (read, "read")]
+            .into_iter()
+            .find_map(|(asked, name)| (asked == task).then_some(name))
+    };
+    // What's told of them, in order, and the Inbox's subjects each time they're told.
+    let mut told: Vec<String> = Vec::new();
+    while !(told.contains(&"finished archive".to_owned())
+        && told.last().is_some_and(|last| last.starts_with("listed")))
+    {
+        let update = tokio::time::timeout(Duration::from_secs(20), updates.recv())
+            .await
+            .expect("an update in time")
+            .expect("updates");
+        match update {
+            Update::Started(task) => {
+                told.extend(name(task).map(|name| format!("started {name}")));
+            }
+            Update::Finished(task) => {
+                told.extend(name(task).map(|name| format!("finished {name}")));
+            }
+            Update::Envelopes {
+                mailbox, envelopes, ..
+            } if mailbox == "INBOX" => {
+                let subjects: Vec<&str> = envelopes.iter().map(|e| e.subject.as_str()).collect();
+                told.push(format!("listed {}", subjects.join(" ")));
+            }
+            _ => {}
+        }
+    }
+    let tasks: Vec<&str> = told
+        .iter()
+        .map(String::as_str)
+        .filter(|told| !told.starts_with("listed"))
+        .collect();
+    let one_at_a_time = |first: &str, second: &str| {
+        vec![
+            format!("started {first}"),
+            format!("finished {first}"),
+            format!("started {second}"),
+            format!("finished {second}"),
+            "started archive".to_owned(),
+            "finished archive".to_owned(),
+        ]
+    };
+    // The worker may have taken up the deletion before the rest was asked; else reading goes first.
+    assert!(
+        tasks == one_at_a_time("delete", "read") || tasks == one_at_a_time("read", "delete"),
+        "{told:?}"
+    );
+    let after = |what: &str| {
+        let at = told.iter().position(|told| told == what).unwrap();
+        told[at + 1].clone()
+    };
+    assert_eq!(
+        after("finished delete"),
+        "listed b c",
+        "deleted, as listed since"
+    );
+    assert_eq!(after("finished archive"), "listed b c", "refused: b stays");
 }
 
 /// Waits for what the client says it did, failing if it says it couldn't.

@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -13,7 +13,7 @@ use crossterm::event::{
 };
 use futures_util::StreamExt as _;
 use muttrs_gfx::{CellSize, Prepared, Protocol};
-use muttrs_mail::client::{self, Client, Connection, Flag, Update};
+use muttrs_mail::client::{self, Client, Connection, Flag, Task, Update};
 use muttrs_mail::{Account, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -37,6 +37,7 @@ use crate::pictures::{self, Pictures};
 use crate::remote::Fetcher;
 use crate::sidebar::{self, AccountState, Row, Sidebar};
 use crate::sign_in::{self, SignIn};
+use crate::tasks;
 use crate::theme::Theme;
 use crate::xdg;
 
@@ -195,6 +196,10 @@ pub(crate) struct App {
     standalone: bool,
     /// The Draft being written.
     compose: Option<Compose>,
+    /// The Drafts being sent, by their Tasks: put away meanwhile, and shown again if they can't be sent.
+    sending: Vec<(Task, Compose)>,
+    /// The Drafts that couldn't be sent, shown again once no other is.
+    unsent: Vec<Compose>,
     /// How many Drafts this run has started, to name their files.
     drafts: u64,
     /// Whether the Draft is to be edited in `$EDITOR`, which the loop does between draws.
@@ -216,6 +221,10 @@ pub(crate) struct App {
     assessments: Option<Assessments>,
     /// Whether the Pager shows its prose as the Heatmap of its Assessment.
     heatmap: bool,
+    /// When the UI started: the status line's spinner turns by it.
+    started: Instant,
+    /// Whether to quit once the Accounts' Tasks are done, as quitting asked; until a key's pressed.
+    quitting: bool,
     quit: bool,
 }
 
@@ -268,6 +277,8 @@ impl App {
             next_pager: 1,
             standalone,
             compose: None,
+            sending: Vec::new(),
+            unsent: Vec::new(),
             drafts: 0,
             edit: false,
             write_when_fetched: None,
@@ -283,6 +294,8 @@ impl App {
             assessor,
             assessments,
             heatmap: false,
+            started: Instant::now(),
+            quitting: false,
             quit: false,
         }
     }
@@ -452,7 +465,7 @@ impl App {
         let Some(state) = self.accounts.get_mut(opened.account) else {
             return;
         };
-        state.client.send(client::Request::Flag {
+        state.ask(client::Request::Flag {
             mailbox: opened.mailbox.clone(),
             uids: vec![opened.uid],
             flag: Flag::Seen,
@@ -576,15 +589,19 @@ impl App {
                 if let Some(index) =
                     index.filter(|index| index.account == account && index.mailbox == mailbox)
                 {
+                    // As they'll be once what's asked is done: what the server tells may be from before.
+                    let mut envelopes = envelopes;
+                    state.tasks.apply(&mailbox, &mut envelopes);
                     index.set(envelopes, exists);
                 }
             }
             Update::Found {
                 mailbox,
                 query,
-                envelopes,
+                mut envelopes,
                 count,
             } => {
+                state.tasks.apply(&mailbox, &mut envelopes);
                 let Some(index) = self
                     .index
                     .take_if(|index| index.account == account && index.mailbox == mailbox)
@@ -637,22 +654,12 @@ impl App {
             }
             Update::Done(done) => self.say(&done, false),
             Update::Failed(failed) => self.say(&failed, true),
-            Update::Sent(Ok(())) => {
-                if let Some(compose) = self
-                    .compose
-                    .take_if(|compose| compose.account == account && compose.sending)
-                {
-                    self.expunge_replaced(&compose);
-                    compose.finish();
-                }
-                self.say("Sent", false);
+            Update::Started(task) => state.tasks.started(task, Instant::now()),
+            Update::Finished(task) => {
+                state.tasks.finished(task);
+                self.quit_if_done();
             }
-            Update::Sent(Err(why)) => {
-                if let Some(compose) = &mut self.compose {
-                    compose.sending = false;
-                }
-                self.say(&format!("Not sent: {why}"), true);
-            }
+            Update::Sent { task, sent } => self.sent(account, task, sent),
         }
     }
 
@@ -784,9 +791,6 @@ impl App {
         let Some(compose) = &mut self.compose else {
             return;
         };
-        if compose.sending {
-            return;
-        }
         let discarding = std::mem::take(&mut compose.discarding);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => compose.scroll_by(1),
@@ -815,11 +819,12 @@ impl App {
         }
     }
 
+    /// Sends the Draft, in the background: it's put away meanwhile, and comes back if it can't be sent.
     fn send(&mut self) {
-        let Some(compose) = &mut self.compose else {
+        let Some(compose) = &self.compose else {
             return;
         };
-        let Some(state) = self.accounts.get(compose.account) else {
+        let Some(state) = self.accounts.get_mut(compose.account) else {
             return;
         };
         // At the domain of the address it's from.
@@ -832,23 +837,68 @@ impl App {
         let id = muttrs_mail::compose::message_id(from);
         match compose.draft.build(&id) {
             Ok(built) => {
-                compose.sending = true;
-                state.client.send(client::Request::Send {
-                    built: Box::new(built),
-                    answers: compose.answers.clone(),
-                });
-                self.say("Sending…", false);
+                let task = state.ask_as(
+                    client::Request::Send {
+                        built: Box::new(built),
+                        answers: compose.answers.clone(),
+                    },
+                    Some(sending(&compose.draft)),
+                );
+                if let Some(compose) = self.compose.take() {
+                    self.sending.push((task, compose));
+                }
             }
             Err(error) => self.say(&format!("Not sent: {error}"), true),
         }
     }
 
-    /// Expunges the Postponed Draft `compose` was resumed from: it's sent, or kept again.
-    fn expunge_replaced(&self, compose: &Compose) {
-        if let (Some((mailbox, uid)), Some(state)) =
-            (&compose.replaces, self.accounts.get(compose.account))
+    /// Takes what came of sending the Draft of `account`'s Task `task`: done with it, or it's shown again.
+    fn sent(&mut self, account: usize, task: Task, sent: Result<(), String>) {
+        let Some(at) = self
+            .sending
+            .iter()
+            .position(|(sending, compose)| *sending == task && compose.account == account)
+        else {
+            return;
+        };
+        let (_, compose) = self.sending.remove(at);
+        match sent {
+            Ok(()) => {
+                let subject = compose.draft.subject.trim();
+                let text = if subject.is_empty() {
+                    "Sent".to_owned()
+                } else {
+                    format!("Sent {subject}")
+                };
+                self.expunge_replaced(&compose);
+                compose.finish();
+                self.say(&text, false);
+            }
+            Err(why) => {
+                self.say(&format!("Not sent, the Draft's back: {why}"), true);
+                self.unsent.push(compose);
+            }
+        }
+    }
+
+    /// Shows again a Draft that couldn't be sent, once no other is shown, nor anything typed or chosen.
+    fn bring_back_unsent(&mut self) {
+        if self.compose.is_none()
+            && self.prompt.is_none()
+            && self.overlay.is_none()
+            && self.sign_in.is_none()
+            && !self.unsent.is_empty()
         {
-            state.client.send(client::Request::Expunge {
+            self.compose = Some(self.unsent.remove(0));
+        }
+    }
+
+    /// Expunges the Postponed Draft `compose` was resumed from: it's sent, or kept again.
+    fn expunge_replaced(&mut self, compose: &Compose) {
+        if let (Some((mailbox, uid)), Some(state)) =
+            (&compose.replaces, self.accounts.get_mut(compose.account))
+        {
+            state.ask(client::Request::Expunge {
                 mailbox: mailbox.clone(),
                 uids: vec![*uid],
             });
@@ -873,7 +923,7 @@ impl App {
     /// Saves the Draft to the Drafts Mailbox, to finish later.
     fn postpone(&mut self) {
         let Some(compose) = &self.compose else { return };
-        let Some(state) = self.accounts.get(compose.account) else {
+        let Some(state) = self.accounts.get_mut(compose.account) else {
             return;
         };
         // At the domain of the address it's from.
@@ -886,7 +936,7 @@ impl App {
         let id = muttrs_mail::compose::message_id(from);
         match compose.draft.build(&id) {
             Ok(built) => {
-                state.client.send(client::Request::Append {
+                state.ask(client::Request::Append {
                     role: Role::Drafts,
                     message: built.kept,
                     draft: true,
@@ -924,11 +974,12 @@ impl App {
             self.config.threads,
         )
         .hiding_repeated_subjects(self.config.hide_thread_subjects);
-        // As last listed, until the server says what's changed.
-        if let Some(listed) = state.cache.envelopes(name) {
+        // As last listed, until the server says what's changed: as it'll be once what's asked is done.
+        if let Some(mut listed) = state.cache.envelopes(name) {
+            state.tasks.apply(name, &mut listed.envelopes);
             index.set(listed.envelopes, listed.exists);
         }
-        state.client.send(client::Request::Open(name.to_owned()));
+        self.accounts[account].ask(client::Request::Open(name.to_owned()));
         self.sidebar
             .select(&self.accounts, &Row::Mailbox(account, name.to_owned()));
         self.searched = None;
@@ -948,10 +999,10 @@ impl App {
             mailbox: index.mailbox.clone(),
             uid: envelope.uid,
         };
-        let Some(state) = self.accounts.get(opened.account) else {
+        let Some(state) = self.accounts.get_mut(opened.account) else {
             return;
         };
-        state.client.send(client::Request::Body {
+        state.ask(client::Request::Body {
             mailbox: opened.mailbox.clone(),
             uid: opened.uid,
         });
@@ -1007,11 +1058,7 @@ impl App {
             if has(&envelope.flags) != on {
                 changed += 1;
             }
-            match flag {
-                Flag::Seen => envelope.flags.seen = on,
-                Flag::Flagged => envelope.flags.flagged = on,
-                Flag::Answered => envelope.flags.answered = on,
-            }
+            tasks::set_flag(&mut envelope.flags, flag, on);
         }
         if let Some(state) = self.accounts.get_mut(account) {
             if flag == Flag::Seen
@@ -1023,7 +1070,7 @@ impl App {
                     counts.unread + changed
                 };
             }
-            state.client.send(client::Request::Flag {
+            state.ask(client::Request::Flag {
                 mailbox,
                 uids,
                 flag,
@@ -1037,12 +1084,12 @@ impl App {
         let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
-        let Some(state) = self.accounts.get(account) else {
+        let Some(state) = self.accounts.get_mut(account) else {
             return;
         };
         // The worker knows where to: the Mailbox with the Role, by the server or the configuration. Without one it
         // says so, and lists the Mailbox again, which brings the Messages back.
-        state.client.send(if archive {
+        state.ask(if archive {
             client::Request::Archive {
                 mailbox,
                 uids: uids.clone(),
@@ -1173,13 +1220,7 @@ impl App {
         if let Some(index) = self.index.as_mut() {
             for &uid in &uids {
                 if let Some(envelope) = index.find_mut(uid) {
-                    envelope.labels.retain(|name| *name != label.name);
-                    if on {
-                        envelope.labels.push(label.name.clone());
-                        envelope
-                            .labels
-                            .sort_by(|a, b| muttrs_mail::label::order(a, b));
-                    }
+                    tasks::set_label(&mut envelope.labels, &label.name, on);
                 }
             }
         }
@@ -1187,7 +1228,7 @@ impl App {
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.set_row(chosen, row);
         }
-        self.accounts[account].client.send(client::Request::Label {
+        self.accounts[account].ask(client::Request::Label {
             mailbox,
             uids,
             label: label.mailbox,
@@ -1217,8 +1258,8 @@ impl App {
         let Some(target) = self.moving_to(account, &mailbox).into_iter().nth(chosen) else {
             return;
         };
-        if let Some(state) = self.accounts.get(account) {
-            state.client.send(client::Request::Move {
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::Move {
                 mailbox,
                 uids: uids.clone(),
                 to: target.name,
@@ -1306,6 +1347,8 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         self.notice = None;
+        // A key stays: quitting once the Tasks are done is asked again, if it's to be.
+        self.quitting = false;
         if self.sign_in.is_some() {
             self.sign_in_key(key);
             return;
@@ -1314,7 +1357,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && self.prompt.is_none()
         {
-            self.quit = true;
+            self.ask_to_quit();
             return;
         }
         if self.prompt.is_some() {
@@ -1346,7 +1389,7 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') => {
-                self.quit = true;
+                self.ask_to_quit();
                 return;
             }
             KeyCode::Char(':') => {
@@ -1394,11 +1437,9 @@ impl App {
     fn more_if_wanted(&mut self) {
         let Some(index) = &mut self.index else { return };
         if index.wants_more()
-            && let Some(state) = self.accounts.get(index.account)
+            && let Some(state) = self.accounts.get_mut(index.account)
         {
-            state
-                .client
-                .send(client::Request::More(index.mailbox.clone()));
+            state.ask(client::Request::More(index.mailbox.clone()));
         }
     }
 
@@ -1412,8 +1453,8 @@ impl App {
             KeyCode::Enter => match self.sidebar.current(&self.accounts) {
                 Some(Row::Mailbox(account, name)) => self.open_mailbox(account, &name),
                 Some(Row::Account(account)) => {
-                    if let Some(state) = self.accounts.get(account) {
-                        state.client.send(client::Request::Refresh);
+                    if let Some(state) = self.accounts.get_mut(account) {
+                        state.ask(client::Request::Refresh);
                     }
                 }
                 None => {}
@@ -1493,17 +1534,41 @@ impl App {
         }
     }
 
+    /// Quits once the Accounts' Tasks are done: at once if none's left, else once the last is finished, unless a key
+    /// is pressed first.
+    fn ask_to_quit(&mut self) {
+        self.quitting = true;
+        if self.quit_if_done() {
+            return;
+        }
+        let left: usize = self.accounts.iter().map(|state| state.tasks.len()).sum();
+        let tasks = if left == 1 {
+            "the Task left is".to_owned()
+        } else {
+            format!("the {left} Tasks left are")
+        };
+        self.say(
+            &format!("Quitting once {tasks} done: a key stays, :q! quits now"),
+            false,
+        );
+    }
+
+    /// Quits if quitting was asked and the Accounts' Tasks are done; whether it quits.
+    fn quit_if_done(&mut self) -> bool {
+        if self.quitting && self.accounts.iter().all(|state| state.tasks.is_empty()) {
+            self.quit = true;
+        }
+        self.quit
+    }
+
     fn prompt(&mut self, kind: PromptKind) {
         self.prompt = Some(Prompt::new(kind, String::new()));
     }
 
     /// Asks every Account what's new, connecting again any that's offline.
     fn refresh(&mut self) {
-        for account in &self.accounts {
-            account.client.send(client::Request::Refresh);
-        }
-        if !self.accounts.is_empty() {
-            self.say("Asking for what's new…", false);
+        for account in &mut self.accounts {
+            account.ask(client::Request::Refresh);
         }
     }
 
@@ -1760,7 +1825,8 @@ impl App {
             .map_or((command, ""), |(name, argument)| (name, argument.trim()));
         match name {
             "" => {}
-            "q" | "quit" | "q!" | "qa" => self.quit = true,
+            "q" | "quit" | "qa" => self.ask_to_quit(),
+            "q!" | "qa!" => self.quit = true,
             "help" | "h" => self.help(),
             "refresh" | "sync" => self.refresh(),
             "login" => self.login(argument),
@@ -1823,12 +1889,12 @@ impl App {
         if query.is_empty() {
             return;
         }
-        if let Some(state) = self.accounts.get(index.account) {
-            state.client.send(client::Request::Search {
+        // The status line says it's searching.
+        if let Some(state) = self.accounts.get_mut(index.account) {
+            state.ask(client::Request::Search {
                 mailbox: index.mailbox.clone(),
                 query: query.to_owned(),
             });
-            self.say(&format!("Searching {} for {query}…", index.label), false);
         }
     }
 
@@ -1913,12 +1979,12 @@ impl App {
         };
         let account = sign_in.account;
         self.sign_in = None;
-        let Some(state) = self.accounts.get(account) else {
+        let Some(state) = self.accounts.get_mut(account) else {
             return;
         };
         let text = match &signed_in {
             Ok(()) => {
-                state.client.send(client::Request::Refresh);
+                state.ask(client::Request::Refresh);
                 format!("{}: signed in", state.name)
             }
             Err(why) => format!("{}: signing in failed: {why}", state.name),
@@ -2051,7 +2117,8 @@ impl App {
                     "Anywhere",
                     &[
                         ("?", "these keys"),
-                        (":q q", "quit, or close the Pager"),
+                        (":q q", "quit once what's asked is done, or close the Pager"),
+                        (":q!", "quit now"),
                         (":login NAME", "sign in to an Account again, in the browser"),
                         (
                             "↑ ↓",
@@ -2262,14 +2329,61 @@ impl App {
         }
     }
 
+    /// What the status line says of the Accounts' Tasks, once one's worth saying: a spinner, the Task being done (or
+    /// waiting), how long it's taken once that's a while, and how many more are asked.
+    fn tasks_said(&self) -> Option<Vec<Span<'static>>> {
+        let now = Instant::now();
+        let (account, said) = self
+            .accounts
+            .iter()
+            .enumerate()
+            .find_map(|(account, state)| Some((account, state.tasks.said(now)?)))?;
+        let turned = now.duration_since(self.started).as_millis() / SPIN.as_millis();
+        let frame = SPINNER[usize::try_from(turned).unwrap_or(0) % SPINNER.len()];
+        let shown = self.index.as_ref().map_or(0, |index| index.account);
+        let what = if account == shown {
+            said.what.to_owned()
+        } else {
+            format!("{}: {}", self.accounts[account].name, said.what)
+        };
+        let mut spans = vec![Span::styled(
+            format!("{frame} {}", truncate(&what, 48)),
+            self.theme.working,
+        )];
+        if let Some(since) = said.since
+            && now.saturating_duration_since(since) >= TAKING_A_WHILE
+        {
+            let seconds = now.saturating_duration_since(since).as_secs();
+            spans.push(Span::styled(format!(" {seconds}s"), self.theme.dim));
+        }
+        let more = self
+            .accounts
+            .iter()
+            .map(|state| state.tasks.len())
+            .sum::<usize>()
+            .saturating_sub(1);
+        if more > 0 {
+            spans.extend([
+                Span::raw(" "),
+                Span::styled(format!(" {more} more "), self.theme.queued),
+            ]);
+        }
+        Some(spans)
+    }
+
+    /// How often the UI is drawn again while the Accounts have Tasks: the spinner's turn. None while they've none.
+    fn ticking(&self) -> Option<Duration> {
+        self.accounts
+            .iter()
+            .any(|state| !state.tasks.is_empty())
+            .then_some(SPIN)
+    }
+
     /// What the status line says on its left when there's no notice.
     fn status_left(&self) -> String {
-        if let Some(compose) = &self.compose {
-            return if compose.sending {
-                " Sending…".into()
-            } else {
-                " Draft · y send · e edit · a attach · D detach · P postpone · q discard".into()
-            };
+        if self.compose.is_some() {
+            return " Draft · y send · e edit · a attach · D detach · P postpone · q discard"
+                .into();
         }
         if let Some(pager) = &self.pager {
             return format!(" {}", pager.message().subject);
@@ -2368,6 +2482,10 @@ impl App {
         }
         right.push("? keys".to_owned());
         let mut spans = vec![Span::raw(" ")];
+        if let Some(tasks) = self.tasks_said() {
+            spans.extend(tasks);
+            spans.push(Span::raw(" · "));
+        }
         if let Some(label) = self.assessment_label().filter(|_| self.compose.is_none()) {
             spans.extend([label, Span::raw(" · ")]);
         }
@@ -2396,6 +2514,37 @@ impl App {
             &right,
             right_width,
         );
+    }
+}
+
+/// The status line's spinner, while the Accounts have Tasks, and how long each of its frames shows.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPIN: Duration = Duration::from_millis(80);
+/// How long a Task's taken before the status line says how long.
+const TAKING_A_WHILE: Duration = Duration::from_secs(3);
+
+/// Waits `every`, or for ever when it's None.
+async fn tick(every: Option<Duration>) {
+    match every {
+        Some(every) => tokio::time::sleep(every).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// What sending `draft` is said as, on the status line: its subject, and whom it's to.
+fn sending(draft: &muttrs_mail::compose::Draft) -> String {
+    let to = draft.to.first().map(|address| {
+        address
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| address.email.clone())
+    });
+    match (draft.subject.trim(), to) {
+        ("", Some(to)) => format!("Sending to {to}"),
+        ("", None) => "Sending".to_owned(),
+        (subject, Some(to)) => format!("Sending {subject} to {to}"),
+        (subject, None) => format!("Sending {subject}"),
     }
 }
 
@@ -2515,6 +2664,7 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             counts: std::collections::HashMap::new(),
             sender: sender_of_drafts,
             cache,
+            tasks: crate::tasks::Tasks::default(),
         });
     }
     let mut app = App::new(setup, events, states, false);
@@ -2548,6 +2698,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
             app.pictures.forget_unwanted(&mut out)?;
             out.flush()?;
             app.start_assessment();
+            app.bring_back_unsent();
             terminal.draw(|frame| app.draw(frame))?;
             if app.quit {
                 return Ok::<_, anyhow::Error>(());
@@ -2583,6 +2734,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
                     None => return Ok(()),
                 },
                 Some(event) = received.recv() => app.on_event(event, &mut out)?,
+                () = tick(app.ticking()) => {}
             }
         }
     }

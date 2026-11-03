@@ -68,6 +68,12 @@ A line of `qualifier:value` terms, as Gmail's search writes them (`from:ann is:u
 Index; `:select` and `:unselect` act on what it picks.
 _Avoid_: pattern, query (that's what `S` sends the server)
 
+**Task**:
+Something asked of an Account's server (flagging, moving, labelling, opening a Mailbox, sending), done in the
+background one at a time, in the order asked, a Message to read first. Until it's finished, what it changes shows
+done; the status line says the one being done, and how many more wait.
+_Avoid_: job, operation, request (`Request` is what a Task asks, in the code)
+
 **History**:
 What was typed at the prompt before, kept between runs: commands (`:`), and searches (`/` and `S`, which share
 theirs). `Up` and `Down` go back through it.
