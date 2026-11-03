@@ -28,11 +28,13 @@ use crate::config::Config;
 use crate::filter::{self, Filter};
 use crate::icons::Icons;
 use crate::index::{self, Index};
+use crate::login;
 use crate::overlay::{self, Outcome, Overlay, Verb};
 use crate::pager::{self, Pager, Request};
 use crate::pictures::{self, Pictures};
 use crate::remote::Fetcher;
 use crate::sidebar::{self, AccountState, Row, Sidebar};
+use crate::sign_in::{self, SignIn};
 use crate::theme::Theme;
 use crate::xdg;
 
@@ -50,6 +52,8 @@ pub(crate) enum Event {
     Account(usize, Update),
     /// The Pager, by its ID, has shown its Message for `pager_read_delay`.
     Read(u64),
+    /// How signing in to an Account again goes, by the sign-in's ID.
+    SignIn(u64, sign_in::Progress),
 }
 
 /// What the UI is set up with.
@@ -163,6 +167,8 @@ pub(crate) struct App {
     reading: Option<u64>,
     overlay: Option<Overlay>,
     prompt: Option<Prompt>,
+    /// Signing in to an Account again, in the browser, over everything else.
+    sign_in: Option<SignIn>,
     notice: Option<Notice>,
     next_pager: u64,
     /// Whether the Pager is all there is, as `muttrs view` opens it.
@@ -218,6 +224,7 @@ impl App {
             reading: None,
             overlay: None,
             prompt: None,
+            sign_in: None,
             notice: None,
             next_pager: 1,
             standalone,
@@ -361,6 +368,7 @@ impl App {
                 }
             }
             Event::Account(account, update) => self.on_account(account, update),
+            Event::SignIn(id, progress) => self.signing_in(id, progress),
             Event::Read(pager) => {
                 if self.reading == Some(pager) {
                     self.reading = None;
@@ -381,7 +389,15 @@ impl App {
             Update::Connection(connection) => {
                 match &connection {
                     Connection::SignInFailed(why) => {
-                        let text = format!("{}: signing in failed: {why}", state.name);
+                        let name = state.name.clone();
+                        // The hint goes before the reason, which the status line may cut short.
+                        let text = if self.signs_in_with_oauth2(&name) {
+                            format!(
+                                "{name}: signing in failed (`:login {name}` signs in again): {why}"
+                            )
+                        } else {
+                            format!("{name}: signing in failed: {why}")
+                        };
                         self.say(&text, true);
                     }
                     Connection::Offline(why) if state.connection == Connection::Online => {
@@ -994,7 +1010,7 @@ impl App {
 
     /// The wheel scrolls what it's over; a click chooses a row, and a second click on it opens it.
     fn on_mouse(&mut self, mouse: MouseEvent) {
-        if self.overlay.is_some() || self.prompt.is_some() {
+        if self.overlay.is_some() || self.prompt.is_some() || self.sign_in.is_some() {
             return;
         }
         let lines = match mouse.kind {
@@ -1054,6 +1070,10 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         self.notice = None;
+        if self.sign_in.is_some() {
+            self.sign_in_key(key);
+            return;
+        }
         if key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && self.prompt.is_none()
@@ -1470,6 +1490,7 @@ impl App {
             "q" | "quit" | "q!" | "qa" => self.quit = true,
             "help" | "h" => self.help(),
             "refresh" | "sync" => self.refresh(),
+            "login" => self.login(argument),
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
             "unselect" => self.select_by(false, argument),
@@ -1556,6 +1577,80 @@ impl App {
             .attachments
             .push(muttrs_mail::compose::Attachment::file(path));
         let _ = compose.rewrite();
+    }
+
+    /// Signs in again to the Account called `name`, or else the Index's, in the browser.
+    fn login(&mut self, name: &str) {
+        let index = if name.is_empty() {
+            self.index.as_ref().map_or(0, |index| index.account)
+        } else if let Some(index) = self.accounts.iter().position(|state| state.name == name) {
+            index
+        } else {
+            self.say(&format!("No account called {name}"), true);
+            return;
+        };
+        let Some(state) = self.accounts.get(index) else {
+            self.say("There are no accounts", true);
+            return;
+        };
+        let started = login::account(&self.config, &state.name)
+            .and_then(|account| SignIn::start(index, account, self.events.clone()));
+        match started {
+            Ok(sign_in) => self.sign_in = Some(sign_in),
+            Err(error) => self.say(&format!("{error:#}"), true),
+        }
+    }
+
+    /// Whether the Account called `name` signs in with OAuth2, and so can sign in again with `:login`.
+    fn signs_in_with_oauth2(&self, name: &str) -> bool {
+        login::account(&self.config, name)
+            .is_ok_and(|account| matches!(account.auth, muttrs_mail::account::Auth::OAuth2(_)))
+    }
+
+    fn sign_in_key(&mut self, key: KeyEvent) {
+        let Some(sign_in) = &mut self.sign_in else {
+            return;
+        };
+        match sign_in.key(key) {
+            sign_in::Outcome::Stay => {}
+            sign_in::Outcome::Cancel => self.sign_in = None,
+            sign_in::Outcome::Copy => {
+                copy(sign_in.url());
+                self.say("Copied the address of the page to sign in at", false);
+            }
+            sign_in::Outcome::Open => {
+                if let Err(error) = open::that_detached(sign_in.url()) {
+                    self.say(&format!("Couldn't open the browser: {error}"), true);
+                }
+            }
+        }
+    }
+
+    /// Takes in how the sign-in `id` goes, if it's the one under way.
+    fn signing_in(&mut self, id: u64, progress: sign_in::Progress) {
+        let Some(sign_in) = self.sign_in.as_mut().filter(|sign_in| sign_in.is(id)) else {
+            return;
+        };
+        let signed_in = match progress {
+            sign_in::Progress::Rejected(why) => {
+                sign_in.reject(why);
+                return;
+            }
+            sign_in::Progress::Done(signed_in) => signed_in,
+        };
+        let account = sign_in.account;
+        self.sign_in = None;
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let text = match &signed_in {
+            Ok(()) => {
+                state.client.send(client::Request::Refresh);
+                format!("{}: signed in", state.name)
+            }
+            Err(why) => format!("{}: signing in failed: {why}", state.name),
+        };
+        self.say(&text, signed_in.is_err());
     }
 
     fn say(&mut self, text: &str, error: bool) {
@@ -1679,7 +1774,11 @@ impl App {
                 ),
                 (
                     "Anywhere",
-                    &[("?", "these keys"), (":q q", "quit, or close the Pager")],
+                    &[
+                        ("?", "these keys"),
+                        (":q q", "quit, or close the Pager"),
+                        (":login NAME", "sign in to an Account again, in the browser"),
+                    ],
                 ),
             ],
         ));
@@ -1772,6 +1871,9 @@ impl App {
         }
         if let Some(overlay) = &mut self.overlay {
             overlay.draw(body, buffer, &self.theme);
+        }
+        if let Some(sign_in) = &self.sign_in {
+            sign_in.draw(body, frame, &self.theme);
         }
         self.draw_status(status, frame);
     }

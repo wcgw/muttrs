@@ -83,9 +83,14 @@ Gmail signs in with OAuth2, and muttrs ships no OAuth client of its own: each us
 [Google Cloud console](https://console.cloud.google.com/apis/credentials), create a project, configure its OAuth
 consent screen (an external app, with yourself as a test user), and create an OAuth client ID of type "Desktop app".
 Its id and secret go above. Then `muttrs login gmail` opens the browser to sign in, and keeps the refresh token in
-the keyring. Google lets the refresh tokens of apps still "in testing" last 7 days, after which `muttrs login gmail`
-again, or publish the app. With an [app password](https://myaccount.google.com/apppasswords) instead, set
-`auth = "password"`.
+the keyring. Google lets the refresh tokens of apps still "in testing" last 7 days, unless you publish the app; when
+one runs out, `:login gmail` signs in again without leaving muttrs. With an
+[app password](https://myaccount.google.com/apppasswords) instead, set `auth = "password"`.
+
+Once you've signed in, the browser comes back to muttrs, at an address on `127.0.0.1`. A browser on another machine
+(muttrs over SSH, say) can't: it shows an error page instead. Copy that page's address, from the address bar, and
+paste it into muttrs, which takes the code from it. `muttrs login` prints the address to sign in at, and `:login`
+copies it with `Ctrl-Y`.
 
 Gmail's labels are Mailboxes; deleting moves to its Trash, archiving (`a`) takes a Message out of the Inbox, and
 what's sent isn't copied to Sent, as Gmail does that itself. `provider = "outlook"` does the same for Outlook and
@@ -97,7 +102,7 @@ They work as in mutt and vim. `?` shows the ones that apply.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox |
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
 | Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` `s` as in the Index · `q` back |

@@ -1,5 +1,6 @@
 //! `muttrs login NAME`: signs in to an Account once, keeping what it takes to sign in again in the keyring, then
-//! checks it works by signing in to its IMAP server.
+//! checks it works by signing in to its IMAP server. An Account that signs in with OAuth2 can sign in again from
+//! the UI too, with `:login` (see [`crate::sign_in`]).
 
 use std::io::{self, Write as _};
 
@@ -9,6 +10,7 @@ use muttrs_mail::account::{Auth, PasswordSource};
 use muttrs_mail::imap::{Credentials, Session};
 use muttrs_mail::secret::{self, Kind};
 use muttrs_mail::{Account, client, oauth2, tls};
+use tokio::sync::mpsc;
 
 use crate::config::Config;
 
@@ -18,13 +20,25 @@ pub(crate) async fn login(name: &str) -> anyhow::Result<()> {
     let credentials = match &account.auth {
         Auth::OAuth2(settings) => {
             let client_secret = client::client_secret(settings.client_secret.as_ref()).await?;
-            println!("Signing in to {name} as {}, in the browser…", account.email);
-            let tokens =
-                oauth2::authorize(settings, client_secret.as_deref(), &account.email, |url| {
-                    println!("If no browser opens, open this:\n\n  {url}\n");
-                    let _ = open::that_detached(url);
-                })
-                .await?;
+            let authorization = oauth2::Authorization::start(settings, &account.email)?;
+            println!(
+                "Signing in to {name} as {}, in the browser… If none opens, open this:\n\n  {}\n\n\
+                 A browser on another machine can't come back here once you've signed in: paste the address it \
+                 ends at instead.",
+                account.email,
+                authorization.url()
+            );
+            let _ = open::that_detached(authorization.url());
+            let mut pasted = lines_typed();
+            let tokens = loop {
+                match authorization
+                    .tokens(client_secret.as_deref(), &mut pasted)
+                    .await
+                {
+                    Err(error @ oauth2::Error::NotTheRedirect) => println!("{error}"),
+                    tokens => break tokens?,
+                }
+            };
             let refresh_token = tokens
                 .refresh_token
                 .as_deref()
@@ -87,6 +101,22 @@ pub(crate) fn account(config: &Config, name: &str) -> anyhow::Result<Account> {
         })?
         .clone()
         .resolve()?)
+}
+
+/// The lines typed at the terminal, as they're typed, until its input closes.
+fn lines_typed() -> mpsc::UnboundedReceiver<String> {
+    let (typed, lines) = mpsc::unbounded_channel();
+    // A thread of its own rather than tokio's stdin, whose blocked read can't be cancelled: the runtime would wait for
+    // a line to end. This one ends with the process.
+    std::thread::spawn(move || {
+        for line in io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if typed.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    lines
 }
 
 /// A line typed at the terminal without showing it, as a password.

@@ -76,6 +76,8 @@ Tried in tmux (half blocks); kitty placeholders are tested by their escape seque
 - [x] TLS: implicit (`ssl`) and `starttls`, platform roots plus an optional CA file; plain text to the loopback only
 - [x] Authentication: password from the keyring or a command; OAuth2 (XOAUTH2, sent as SASL-IR first), with
       `muttrs login` doing the browser flow (PKCE, loopback redirect) and keeping the refresh token in the keyring
+- [x] Signing in again from the UI (`:login`), and from a browser on another machine, by pasting the address it ends
+      at
 - [x] Mailboxes: LIST with SPECIAL-USE Roles, modified UTF-7 names, STATUS counts
 - [x] Envelopes of the newest Messages (300), from `HEADER.FIELDS`; bodies fetched on open, cached on disk
 - [x] Flags (read, flagged), move, delete to Trash, archive; MOVE or COPY + EXPUNGE

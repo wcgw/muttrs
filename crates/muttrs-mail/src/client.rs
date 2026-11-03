@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use rustls::ClientConfig;
 use tokio::sync::{Mutex, mpsc};
@@ -250,7 +250,7 @@ impl Client {
 /// Where the credentials come from, and the access token while it's good.
 struct CredentialSource {
     account: Arc<Account>,
-    token: Mutex<Option<(String, Instant)>>,
+    token: Mutex<Option<(String, SystemTime)>>,
 }
 
 impl CredentialSource {
@@ -261,9 +261,10 @@ impl CredentialSource {
         }
     }
 
-    async fn credentials(&self) -> Result<Credentials, String> {
+    async fn credentials(&self) -> Result<Credentials, Failure> {
         let account = &self.account;
         let username = account.username.clone();
+        let unavailable = |error: secret::Error| Failure::SignIn(error.to_string());
         match &account.auth {
             Auth::Password(source) => {
                 let password = match source {
@@ -272,13 +273,13 @@ impl CredentialSource {
                     }
                     PasswordSource::Command(command) => secret::from_command(command).await,
                 }
-                .map_err(|error| error.to_string())?;
+                .map_err(unavailable)?;
                 Ok(Credentials::Password { username, password })
             }
             Auth::OAuth2(config) => {
                 let mut token = self.token.lock().await;
                 if let Some((access, expires)) = token.as_ref()
-                    && *expires > Instant::now() + Duration::from_secs(60)
+                    && *expires > SystemTime::now() + Duration::from_secs(60)
                 {
                     return Ok(Credentials::Bearer {
                         username,
@@ -287,13 +288,13 @@ impl CredentialSource {
                 }
                 let refresh_token = secret::read(&account.name, secret::Kind::RefreshToken)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(unavailable)?;
                 let client_secret = client_secret(config.client_secret.as_ref())
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(unavailable)?;
                 let tokens = oauth2::refresh(config, client_secret.as_deref(), &refresh_token)
                     .await
-                    .map_err(|error| format!("refreshing the OAuth2 token: {error}"))?;
+                    .map_err(|error| Failure::refreshing(&error))?;
                 // Microsoft rotates refresh tokens: the new one replaces the old.
                 if let Some(rotated) = tokens
                     .refresh_token
@@ -337,7 +338,7 @@ async fn connect(
     tls: &Arc<ClientConfig>,
     credentials: &CredentialSource,
 ) -> Result<Session, Failure> {
-    let signing_in = credentials.credentials().await.map_err(Failure::SignIn)?;
+    let signing_in = credentials.credentials().await?;
     match Session::connect(&account.imap, Arc::clone(tls), &signing_in).await {
         Ok(session) => Ok(session),
         Err(error) if error.is_sign_in() => {
@@ -356,7 +357,31 @@ async fn connect(
 enum Failure {
     /// Signing in failed, or the credentials couldn't be had: trying again won't help until the user acts.
     SignIn(String),
+    /// The server, or the OAuth2 provider, couldn't be reached: trying again, later, may.
     Network(String),
+}
+
+impl Failure {
+    /// Why refreshing the OAuth2 access token failed. Not reaching the provider (on waking, before the network is
+    /// back, say), or getting a page that isn't its answer (a captive portal's), is tried again; the provider
+    /// refusing waits for the user.
+    fn refreshing(error: &oauth2::Error) -> Self {
+        let why = format!("refreshing the OAuth2 token: {error}");
+        match error {
+            oauth2::Error::Http(_) => Self::Network(why),
+            oauth2::Error::Refused(_)
+            | oauth2::Error::NoRefreshToken
+            | oauth2::Error::Redirect(_)
+            | oauth2::Error::TimedOut
+            | oauth2::Error::NotTheRedirect => Self::SignIn(why),
+        }
+    }
+
+    fn why(self) -> String {
+        match self {
+            Self::SignIn(why) | Self::Network(why) => why,
+        }
+    }
 }
 
 /// A Mailbox's Messages that muttrs lists.
@@ -627,7 +652,7 @@ impl Worker {
         );
         tokio::spawn(async move {
             let sent = async {
-                let signing_in = credentials.credentials().await?;
+                let signing_in = credentials.credentials().await.map_err(Failure::why)?;
                 smtp::send(&account.smtp, &account.trust, &signing_in, &built)
                     .await
                     .map_err(|error| error.to_string())
@@ -1084,5 +1109,54 @@ async fn watch(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::OAuth2;
+
+    /// A client of the token endpoint at `token_url`.
+    fn client_of(token_url: String) -> OAuth2 {
+        OAuth2 {
+            client_id: "client".into(),
+            client_secret: None,
+            auth_url: "https://accounts.example/auth".into(),
+            token_url,
+            scopes: vec!["https://mail.google.com/".into()],
+        }
+    }
+
+    #[tokio::test]
+    async fn not_reaching_the_provider_is_tried_again_but_its_refusal_waits() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // A port nothing listens on, as before the network is back on waking.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let unreachable = client_of(format!("http://127.0.0.1:{port}/token"));
+        let error = oauth2::refresh(&unreachable, None, "refresh")
+            .await
+            .unwrap_err();
+        assert!(matches!(Failure::refreshing(&error), Failure::Network(_)));
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant", "error_description": "Token has been expired or revoked."
+            })))
+            .mount(&server)
+            .await;
+        let refusing = client_of(format!("{}/token", server.uri()));
+        let error = oauth2::refresh(&refusing, None, "refresh")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            Failure::refreshing(&error),
+            Failure::SignIn(why) if why.contains("invalid_grant")
+        ));
     }
 }

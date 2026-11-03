@@ -1,14 +1,21 @@
 //! OAuth2 for XOAUTH2: the authorization code flow with PKCE, in the browser, redirected to a loopback port
 //! (RFC 8252), and access tokens refreshed with the refresh token it gives.
+//!
+//! A browser on another machine than muttrs (over SSH) can't reach that port: the address it ends at, which has the
+//! code, is pasted instead. Google has done away with codes shown to copy ("out of band"), and its device flow,
+//! for devices without a browser, doesn't allow Gmail's scope.
 
-use std::time::{Duration, Instant};
+use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use reqwest::Url;
 use ring::rand::SecureRandom as _;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 use crate::account::OAuth2;
 
@@ -36,6 +43,9 @@ pub enum Error {
     /// When the user doesn't sign in, in the browser, in time.
     #[error("signing in took too long")]
     TimedOut,
+    /// When what's pasted isn't the address the browser ended at: another can be pasted.
+    #[error("that isn't the address the browser ended at: copy all of it, from its address bar")]
+    NotTheRedirect,
 }
 
 /// What the token endpoint gives.
@@ -43,8 +53,9 @@ pub enum Error {
 pub struct Tokens {
     /// The access token, for XOAUTH2.
     pub access_token: String,
-    /// When the access token stops working.
-    pub expires: Instant,
+    /// When the access token stops working, by the wall clock: an [`Instant`](std::time::Instant) doesn't count the
+    /// time the computer sleeps, after which a token would seem good for longer than it is.
+    pub expires: SystemTime,
     /// A new refresh token, if the provider gave one (it always does when signing in; some rotate it).
     pub refresh_token: Option<String>,
 }
@@ -75,66 +86,232 @@ fn challenge(verifier: &str) -> String {
     ))
 }
 
-/// Signs in as `login_hint` in the browser, which `open` is asked to open at the provider's page; the tokens the
-/// provider then gives.
-///
-/// # Errors
-///
-/// If the user doesn't sign in, the redirect never comes, or the provider refuses.
-pub async fn authorize(
-    oauth2: &OAuth2,
-    client_secret: Option<&str>,
-    login_hint: &str,
-    open: impl FnOnce(&str),
-) -> Result<Tokens, Error> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|error| Error::Redirect(error.to_string()))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| Error::Redirect(error.to_string()))?
-        .port();
-    let redirect = format!("http://127.0.0.1:{port}");
-    let verifier = random(48);
-    let state = random(16);
-    let scopes = oauth2.scopes.join(" ");
-    let url = reqwest::Url::parse_with_params(
-        &oauth2.auth_url,
-        [
-            ("response_type", "code"),
-            ("client_id", oauth2.client_id.as_str()),
-            ("redirect_uri", redirect.as_str()),
-            ("scope", scopes.as_str()),
-            ("state", state.as_str()),
-            ("code_challenge", challenge(&verifier).as_str()),
-            ("code_challenge_method", "S256"),
-            // Google: a refresh token, every time.
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-            ("login_hint", login_hint),
-        ],
-    )
-    .map_err(|error| Error::Redirect(format!("the authorization URL: {error}")))?;
-    open(url.as_str());
+/// Signing in, in the browser: the provider's page to send the browser to, and a loopback port it comes back to with
+/// the code that's exchanged for the tokens.
+pub struct Authorization {
+    /// The provider's page, where the user signs in.
+    url: String,
+    /// The loopback address the browser comes back to.
+    redirect: String,
+    /// What the browser comes back with, to tell this sign-in's answer from any other request.
+    state: String,
+    /// PKCE's verifier, which the code is exchanged with.
+    verifier: String,
+    listener: TcpListener,
+    token_url: String,
+    client_id: String,
+}
 
-    let code = tokio::time::timeout(SIGN_IN_TIMEOUT, redirected(&listener, &state))
+impl fmt::Debug for Authorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authorization")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Authorization {
+    /// Starts signing in as `login_hint` with `oauth2`'s client: listens on a loopback port for the browser to come
+    /// back to, for as long as this lives.
+    ///
+    /// # Errors
+    ///
+    /// If no loopback port can be listened on, or the provider's authorization endpoint isn't a URL.
+    ///
+    /// # Panics
+    ///
+    /// Outside a Tokio runtime, whose reactor the port is listened on with.
+    pub fn start(oauth2: &OAuth2, login_hint: &str) -> Result<Self, Error> {
+        // Bound at once, without waiting: binding a loopback port doesn't block.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| {
+                listener.set_nonblocking(true)?;
+                TcpListener::from_std(listener)
+            })
+            .map_err(|error| Error::Redirect(error.to_string()))?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| Error::Redirect(error.to_string()))?
+            .port();
+        let redirect = format!("http://127.0.0.1:{port}");
+        let verifier = random(48);
+        let state = random(16);
+        let scopes = oauth2.scopes.join(" ");
+        let url = Url::parse_with_params(
+            &oauth2.auth_url,
+            [
+                ("response_type", "code"),
+                ("client_id", oauth2.client_id.as_str()),
+                ("redirect_uri", redirect.as_str()),
+                ("scope", scopes.as_str()),
+                ("state", state.as_str()),
+                ("code_challenge", challenge(&verifier).as_str()),
+                ("code_challenge_method", "S256"),
+                // Google: a refresh token, every time.
+                ("access_type", "offline"),
+                ("prompt", "consent"),
+                ("login_hint", login_hint),
+            ],
+        )
+        .map_err(|error| Error::Redirect(format!("the authorization URL: {error}")))?;
+        Ok(Self {
+            url: url.into(),
+            redirect,
+            state,
+            verifier,
+            listener,
+            token_url: oauth2.token_url.clone(),
+            client_id: oauth2.client_id.clone(),
+        })
+    }
+
+    /// The provider's page, to open in the browser and sign in at.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The tokens signing in gives, exchanged (with `client_secret`, if the client has one) for the code the browser
+    /// comes back to the loopback port with, or for the code in an address `pasted` gives: the one the browser ended
+    /// at, if it couldn't come back. Blank lines pasted are passed over; once `pasted` closes, only the browser is
+    /// waited for.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotTheRedirect`] if what's pasted isn't the address the browser ended at: called again, this waits
+    /// on. Otherwise, if the user doesn't sign in in time, or the provider refuses, can't be reached, or gives no
+    /// refresh token.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancelling it gives up on the code, if it came.
+    pub async fn tokens(
+        &self,
+        client_secret: Option<&str>,
+        pasted: &mut mpsc::UnboundedReceiver<String>,
+    ) -> Result<Tokens, Error> {
+        let code = tokio::time::timeout(SIGN_IN_TIMEOUT, async {
+            tokio::select! {
+                code = self.redirected() => code,
+                code = self.pasted(pasted) => code,
+            }
+        })
         .await
         .map_err(|_| Error::TimedOut)??;
-    let mut form = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code.as_str()),
-        ("redirect_uri", redirect.as_str()),
-        ("client_id", oauth2.client_id.as_str()),
-        ("code_verifier", verifier.as_str()),
-    ];
-    if let Some(secret) = client_secret {
-        form.push(("client_secret", secret));
+        let mut form = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("redirect_uri", self.redirect.as_str()),
+            ("client_id", self.client_id.as_str()),
+            ("code_verifier", self.verifier.as_str()),
+        ];
+        if let Some(secret) = client_secret {
+            form.push(("client_secret", secret));
+        }
+        let tokens = token_request(&self.token_url, &form).await?;
+        if tokens.refresh_token.is_none() {
+            return Err(Error::NoRefreshToken);
+        }
+        Ok(tokens)
     }
-    let tokens = token_request(&oauth2.token_url, &form).await?;
-    if tokens.refresh_token.is_none() {
-        return Err(Error::NoRefreshToken);
+
+    /// The code the browser comes back to the loopback port with; requests for anything else (a favicon) are
+    /// turned away.
+    async fn redirected(&self) -> Result<String, Error> {
+        loop {
+            let (mut stream, _) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|error| Error::Redirect(error.to_string()))?;
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n")
+                && request.len() < 64 * 1024
+            {
+                let read = stream
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| Error::Redirect(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            let target = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let Some(answer) = Url::parse(&format!("http://127.0.0.1{target}"))
+                .ok()
+                .and_then(|url| self.answer(&url))
+            else {
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                continue;
+            };
+            let (status, said) = match answer {
+                Ok(_) => ("200 OK", "muttrs is signed in. You can close this tab."),
+                Err(_) => ("400 Bad Request", "Signing in didn't work: see muttrs."),
+            };
+            let page = format!(
+                "<!doctype html><meta charset=utf-8><title>muttrs</title><p style=\"font: 16px sans-serif\">{said}</p>"
+            );
+            let _ = stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n{page}",
+                        page.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            return answer;
+        }
     }
-    Ok(tokens)
+
+    /// The code in the next address `pasted` gives that isn't blank; never, once `pasted` closes.
+    async fn pasted(&self, pasted: &mut mpsc::UnboundedReceiver<String>) -> Result<String, Error> {
+        loop {
+            let Some(address) = pasted.recv().await else {
+                return std::future::pending().await;
+            };
+            let address = address.trim();
+            if address.is_empty() {
+                continue;
+            }
+            // Browsers may leave out the scheme of what they show.
+            return Url::parse(address)
+                .or_else(|_| Url::parse(&format!("http://{address}")))
+                .ok()
+                .and_then(|url| self.answer(&url))
+                .unwrap_or(Err(Error::NotTheRedirect));
+        }
+    }
+
+    /// What the browser came back with, at `url`: the code, or why the provider refused; None if `url` isn't this
+    /// sign-in's answer.
+    fn answer(&self, url: &Url) -> Option<Result<String, Error>> {
+        let query = |name: &str| {
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
+        if query("state").as_deref() != Some(self.state.as_str()) {
+            return None;
+        }
+        Some(match (query("code"), query("error")) {
+            (Some(code), _) => Ok(code),
+            (None, Some(error)) => Err(Error::Refused(error)),
+            (None, None) => Err(Error::Redirect("no code in the redirect".into())),
+        })
+    }
 }
 
 /// A fresh access token, from `refresh_token`.
@@ -171,7 +348,7 @@ async fn token_request(url: &str, form: &[(&str, &str)]) -> Result<Tokens, Error
             ..
         } => Ok(Tokens {
             access_token,
-            expires: Instant::now() + Duration::from_secs(expires_in.unwrap_or(3600)),
+            expires: SystemTime::now() + Duration::from_secs(expires_in.unwrap_or(3600)),
             refresh_token,
         }),
         TokenResponse {
@@ -185,73 +362,6 @@ async fn token_request(url: &str, form: &[(&str, &str)]) -> Result<Tokens, Error
                 .collect::<Vec<_>>()
                 .join(": "),
         )),
-    }
-}
-
-/// The code the browser is redirected with, once a request for `state` comes; requests for anything else (a
-/// favicon) are turned away.
-async fn redirected(listener: &TcpListener, state: &str) -> Result<String, Error> {
-    loop {
-        let (mut stream, _) = listener
-            .accept()
-            .await
-            .map_err(|error| Error::Redirect(error.to_string()))?;
-        let mut request = Vec::new();
-        let mut buffer = [0; 4096];
-        while !request.windows(4).any(|window| window == b"\r\n\r\n") && request.len() < 64 * 1024 {
-            let read = stream
-                .read(&mut buffer)
-                .await
-                .map_err(|error| Error::Redirect(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-        }
-        let request = String::from_utf8_lossy(&request);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/");
-        let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
-            continue;
-        };
-        let query = |name: &str| {
-            url.query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-        };
-        if query("state").as_deref() != Some(state) {
-            let _ = stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await;
-            continue;
-        }
-        let (status, said) = match (query("code"), query("error")) {
-            (Some(_), _) => ("200 OK", "muttrs is signed in. You can close this tab."),
-            _ => ("400 Bad Request", "Signing in didn't work: see muttrs."),
-        };
-        let page = format!(
-            "<!doctype html><meta charset=utf-8><title>muttrs</title><p style=\"font: 16px sans-serif\">{said}</p>"
-        );
-        let _ = stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
-                     Connection: close\r\n\r\n{page}",
-                    page.len()
-                )
-                .as_bytes(),
-            )
-            .await;
-        return match (query("code"), query("error")) {
-            (Some(code), _) => Ok(code),
-            (None, Some(error)) => Err(Error::Refused(error)),
-            (None, None) => Err(Error::Redirect("no code in the redirect".into())),
-        };
     }
 }
 
@@ -271,16 +381,19 @@ mod tests {
         assert_eq!(random(32).len(), 43);
     }
 
+    /// The query parameter `name` of `url`.
+    fn parameter(url: &str, name: &str) -> String {
+        Url::parse(url)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .unwrap()
+    }
+
     /// Plays the browser: follows the authorization URL's redirect with `code`, after asking for a favicon.
-    async fn browse(authorization: String, code: &str) -> String {
-        let url = reqwest::Url::parse(&authorization).unwrap();
-        let pair = |name: &str| {
-            url.query_pairs()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.into_owned())
-                .unwrap()
-        };
-        let redirect = reqwest::Url::parse(&pair("redirect_uri")).unwrap();
+    async fn browse(authorization: &str, code: &str) -> String {
+        let redirect = Url::parse(&parameter(authorization, "redirect_uri")).unwrap();
         let address = format!("127.0.0.1:{}", redirect.port().unwrap());
         let mut favicon = TcpStream::connect(&address).await.unwrap();
         favicon
@@ -292,7 +405,7 @@ mod tests {
         assert!(ignored.starts_with("HTTP/1.1 404"));
 
         let mut stream = TcpStream::connect(&address).await.unwrap();
-        let state = pair("state");
+        let state = parameter(authorization, "state");
         stream
             .write_all(
                 format!("GET /?state={state}&code={code}&scope=x HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -305,8 +418,8 @@ mod tests {
         page
     }
 
-    #[tokio::test]
-    async fn signing_in_through_the_browser() {
+    /// A token endpoint that gives tokens for the code `the-code`, and a client of it.
+    async fn provider() -> (wiremock::MockServer, OAuth2) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -327,24 +440,82 @@ mod tests {
             token_url: format!("{}/token", server.uri()),
             scopes: vec!["https://mail.google.com/".into()],
         };
-        let (opened, mut url) = tokio::sync::mpsc::unbounded_channel();
-        let signing_in = tokio::spawn(async move {
-            authorize(&oauth2, Some("shh"), "ann@example.com", |url| {
-                opened.send(url.to_owned()).unwrap();
-            })
-            .await
-        });
-        let authorization = url.recv().await.unwrap();
-        assert!(authorization.starts_with("https://accounts.example/auth?response_type=code"));
-        assert!(authorization.contains("code_challenge_method=S256"));
-        assert!(authorization.contains("login_hint=ann%40example.com"));
-        let page = browse(authorization, "the-code").await;
+        (server, oauth2)
+    }
+
+    #[tokio::test]
+    async fn signing_in_through_the_browser() {
+        let (_server, oauth2) = provider().await;
+        let authorization = Authorization::start(&oauth2, "ann@example.com").unwrap();
+        let url = authorization.url();
+        assert!(url.starts_with("https://accounts.example/auth?response_type=code"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("login_hint=ann%40example.com"));
+        // Nothing's pasted, but nothing stops it being.
+        let (_paste, mut pasted) = mpsc::unbounded_channel();
+        let (tokens, page) = tokio::join!(
+            authorization.tokens(Some("shh"), &mut pasted),
+            browse(url, "the-code"),
+        );
         assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
 
-        let tokens = signing_in.await.unwrap().unwrap();
+        let tokens = tokens.unwrap();
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert!(tokens.expires > Instant::now() + Duration::from_secs(3500));
+        assert!(tokens.expires > SystemTime::now() + Duration::from_secs(3500));
+    }
+
+    #[tokio::test]
+    async fn pasting_the_address_the_browser_ended_at() {
+        let (_server, oauth2) = provider().await;
+        let authorization = Authorization::start(&oauth2, "ann@example.com").unwrap();
+        let (redirect, state) = (
+            parameter(authorization.url(), "redirect_uri"),
+            parameter(authorization.url(), "state"),
+        );
+        let (paste, mut pasted) = mpsc::unbounded_channel();
+
+        for wrong in [
+            "the-code".to_owned(),
+            format!("{redirect}/?state=another&code=the-code"),
+        ] {
+            paste.send(wrong).unwrap();
+            assert!(matches!(
+                authorization.tokens(Some("shh"), &mut pasted).await,
+                Err(Error::NotTheRedirect)
+            ));
+        }
+
+        paste.send(" \n".into()).unwrap();
+        // As a browser may show it, without its scheme.
+        let shown = redirect.trim_start_matches("http://");
+        paste
+            .send(format!(" {shown}/?state={state}&code=the-code&scope=x\n"))
+            .unwrap();
+        let tokens = authorization
+            .tokens(Some("shh"), &mut pasted)
+            .await
+            .unwrap();
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+    }
+
+    #[tokio::test]
+    async fn refusing_in_the_browser() {
+        let (_server, oauth2) = provider().await;
+        let authorization = Authorization::start(&oauth2, "ann@example.com").unwrap();
+        let (redirect, state) = (
+            parameter(authorization.url(), "redirect_uri"),
+            parameter(authorization.url(), "state"),
+        );
+        let (paste, mut pasted) = mpsc::unbounded_channel();
+        paste
+            .send(format!("{redirect}/?state={state}&error=access_denied"))
+            .unwrap();
+        let error = authorization
+            .tokens(Some("shh"), &mut pasted)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the provider refused: access_denied");
     }
 
     #[tokio::test]
