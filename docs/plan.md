@@ -147,10 +147,28 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] The History of commands and searches, as vim's: `Up` and `Down` through what starts as typed, `Ctrl-p` and
       `Ctrl-n` through all of it; kept between runs, and between muttrs running at once
 
+### 8. What mutt users would miss
+
+Not there yet, roughly in the order a mutt user would reach for them:
+
+- [ ] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
+      where they went
+- [ ] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`List-Unsubscribe`)
+- [ ] The Pager's full headers, and the Message's source (mutt's `h`)
+- [ ] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`)
+- [ ] Limiting the Index to what a Filter picks (mutt's `l`), without asking the server as `S` does
+- [ ] Piping a Message to a command (`|`), as patches to `git am` or `b4`; a shell (`!`)
+- [ ] Sorting by sender, subject or size, besides threads and newest first
+- [ ] Searching every Mailbox of an Account, not only the open one
+- [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV
+- [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
+      Attachment
+
 ### Later
 
 - Pictures inline in text (icons), animated GIFs, syntax highlighting in `<pre>`
 - PGP/S-MIME, notmuch
+- Local mail, Maildir and mbox, as mbsync and offlineimap keep it: muttrs speaks IMAP only
 - iTerm2's inline images, on macOS
 
 ## Testing
