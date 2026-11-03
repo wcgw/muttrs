@@ -15,6 +15,7 @@ mod html;
 mod ir;
 mod layout;
 mod plain;
+mod prose;
 mod table;
 
 use ratatui_core::style::{Modifier, Style};
@@ -272,6 +273,14 @@ impl Document {
     #[must_use]
     pub fn images(&self) -> &[Image] {
         &self.images
+    }
+
+    /// Its prose: each paragraph's text, apart by blank lines, as it's drawn but not wrapped, without what it quotes,
+    /// what's preformatted, or images. Each drawn line's text is in it, in order, but for what's left out and the
+    /// spaces lines wrap at.
+    #[must_use]
+    pub fn prose(&self) -> String {
+        prose::of(&self.blocks)
     }
 
     /// Lays it out as `options` say.

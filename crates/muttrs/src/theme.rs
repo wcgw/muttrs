@@ -65,6 +65,14 @@ pub(crate) struct Theme {
     pub(crate) error: Style,
     /// The keys in hints and help.
     pub(crate) keys: Style,
+    /// voight's Assessment, on the status line.
+    pub(crate) voight: Style,
+    /// In the Heatmap, prose voight scored 0%; see [`Theme::heat`].
+    pub(crate) heatmap_human: Style,
+    /// In the Heatmap, prose voight scored 50%.
+    pub(crate) heatmap_even: Style,
+    /// In the Heatmap, prose voight scored 100%.
+    pub(crate) heatmap_llm: Style,
     /// Bodies.
     pub(crate) body: Styles,
 }
@@ -118,6 +126,30 @@ impl Theme {
             .with_context(|| format!("in {}", path.display()))
     }
 
+    /// The style of prose in the Heatmap that voight scored `share`, between 0 and 1: `heatmap_human` at 0,
+    /// `heatmap_even` at 0.5 and `heatmap_llm` at 1. In between, the nearer one's, with a background blended from
+    /// both's when they're RGB colours.
+    pub(crate) fn heat(&self, share: f64) -> Style {
+        let share = share.clamp(0.0, 1.0);
+        let (from, to, toward) = if share < 0.5 {
+            (self.heatmap_human, self.heatmap_even, share * 2.0)
+        } else {
+            (self.heatmap_even, self.heatmap_llm, share * 2.0 - 1.0)
+        };
+        let nearer = if toward < 0.5 { from } else { to };
+        let (Some(Color::Rgb(r0, g0, b0)), Some(Color::Rgb(r1, g1, b1))) = (from.bg, to.bg) else {
+            return nearer;
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rounded, between two `u8`s"
+        )]
+        let blend =
+            |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * toward).round() as u8;
+        nearer.bg(Color::Rgb(blend(r0, r1), blend(g0, g1), blend(b0, b1)))
+    }
+
     fn glyphs(icons: &Icons) -> Glyphs {
         Glyphs {
             image: icons.image.to_owned(),
@@ -145,6 +177,11 @@ impl Theme {
             status: Style::new().fg(moon::FG_DARK).bg(moon::BG_HIGHLIGHT),
             error: Style::new().fg(moon::RED),
             keys: Style::new().fg(moon::BLUE).add_modifier(Modifier::BOLD),
+            voight: Style::new().fg(moon::MAGENTA),
+            // Green through yellow to red, blended; the background's colour over them.
+            heatmap_human: Style::new().fg(Color::Rgb(r, g, b)).bg(moon::GREEN),
+            heatmap_even: Style::new().fg(Color::Rgb(r, g, b)).bg(moon::YELLOW),
+            heatmap_llm: Style::new().fg(Color::Rgb(r, g, b)).bg(moon::RED),
             body: Styles {
                 text,
                 page: Some(Rgb(r, g, b)),
@@ -194,6 +231,11 @@ impl Theme {
             status: Style::new().add_modifier(Modifier::REVERSED),
             error: Style::new().fg(Color::Red),
             keys: bold,
+            voight: Style::new().fg(Color::Magenta),
+            // The terminal's green, yellow and red, stepped between rather than blended.
+            heatmap_human: Style::new().fg(Color::Black).bg(Color::Green),
+            heatmap_even: Style::new().fg(Color::Black).bg(Color::Yellow),
+            heatmap_llm: Style::new().fg(Color::Black).bg(Color::Red),
             body: Styles {
                 glyphs: Self::glyphs(icons),
                 ..Styles::default()
@@ -246,6 +288,10 @@ mod file {
         status: Option<Spec>,
         error: Option<Spec>,
         keys: Option<Spec>,
+        voight: Option<Spec>,
+        heatmap_human: Option<Spec>,
+        heatmap_even: Option<Spec>,
+        heatmap_llm: Option<Spec>,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -360,6 +406,14 @@ mod file {
                 (&mut theme.status, &ui.status, "ui.status"),
                 (&mut theme.error, &ui.error, "ui.error"),
                 (&mut theme.keys, &ui.keys, "ui.keys"),
+                (&mut theme.voight, &ui.voight, "ui.voight"),
+                (
+                    &mut theme.heatmap_human,
+                    &ui.heatmap_human,
+                    "ui.heatmap_human",
+                ),
+                (&mut theme.heatmap_even, &ui.heatmap_even, "ui.heatmap_even"),
+                (&mut theme.heatmap_llm, &ui.heatmap_llm, "ui.heatmap_llm"),
             ] {
                 set(style, spec.as_ref(), name)?;
             }
@@ -442,6 +496,27 @@ mod file {
                 Theme::named("terminal", &Icons::PLAIN).unwrap().cursor,
                 "the base's"
             );
+        }
+
+        #[test]
+        fn heat_blends_rgb_backgrounds_and_steps_between_others() {
+            let blended = theme(
+                "[ui]\nheatmap_human = { bg = \"#00ff00\" }\nheatmap_even = { bg = \"#ffff00\" }\n\
+                 heatmap_llm = { bg = \"#ff0000\" }",
+            )
+            .unwrap();
+            assert_eq!(blended.heat(0.0), blended.heatmap_human);
+            assert_eq!(blended.heat(0.5), blended.heatmap_even);
+            assert_eq!(blended.heat(1.0), blended.heatmap_llm);
+            assert_eq!(blended.heat(-1.0), blended.heatmap_human, "clamped");
+            assert_eq!(
+                blended.heat(0.25),
+                Style::new().bg(Color::Rgb(0x80, 0xff, 0))
+            );
+            let stepped = Theme::named("terminal", &Icons::PLAIN).unwrap();
+            assert_eq!(stepped.heat(0.24), stepped.heatmap_human);
+            assert_eq!(stepped.heat(0.26), stepped.heatmap_even);
+            assert_eq!(stepped.heat(0.76), stepped.heatmap_llm);
         }
 
         #[test]

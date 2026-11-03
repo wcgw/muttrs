@@ -23,6 +23,16 @@ words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what'
 cargo install --locked --path crates/muttrs
 ```
 
+That builds [voight](https://github.com/wcgw/voight) in, as ghd does, running on the CPU: it estimates how much of
+the prose the Pager shows an LLM wrote (below). Add `--features cuda` to run it on an NVIDIA GPU (this needs the CUDA
+toolkit's `nvcc`), `--features metal` on a Mac's GPU (on Apple silicon, voight builds with Metal anyway, unless with
+wgpu), or `--features wgpu` on any other GPU, through Vulkan on Linux; wgpu is experimental, on a fork of candle. Or
+leave voight out with `--no-default-features`.
+
+The first time it starts with voight, muttrs downloads voight's model, about 1.7 GB, into the Hugging Face cache
+(`~/.cache/huggingface`, or `$HF_HOME`), and loads it each time it starts, on a thread of its own. Set
+`voight = "off"` to start without it.
+
 ## Accounts
 
 Each Account is an `[[account]]` in the configuration (below). For your own server:
@@ -105,7 +115,7 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
 | Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `o` Links · `v` Attachments · `F` `U` `d` `a` `s` as in the Index · `q` back |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `d` `a` `s` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
@@ -120,6 +130,14 @@ without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:`
 `from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command line, `Tab` and `Shift-Tab`
 complete the command, then the filter's qualifier, then its value: the addresses of the Messages listed (by the
 address, or a word of the name), or `is:`'s values that would pick some of them.
+
+## voight
+
+With voight on, the status line says how much of the prose the Pager shows voight estimates an LLM wrote (`voight
+73%`), once it has assessed it, one Message at a time. What's quoted is left out, as it's someone else's, and so is
+preformatted text; a body with fewer than 50 words of prose isn't assessed. `H` shows the Heatmap: each stretch of
+prose voight scored (about 100 to 400 words) shaded from green (0%) through yellow to red (100%). It's an estimate,
+never evidence of authorship.
 
 ## Searching
 
@@ -191,6 +209,7 @@ max_picture_rows = 24         # the most rows a Picture takes
 threads = true                # the Index in threads (T switches), or newest first
 hide_thread_subjects = false  # a reply's subject as an arrow, ├─>, where it's what it replies to's, as mutt does
 mouse = true                  # the wheel scrolls, clicks choose (and open, clicked again); select text with Shift
+voight = "cpu"                # where voight assesses the Pager's prose: "off", or "cuda", "metal", "wgpu" if built so
 ```
 
 A theme of your own is a file, `~/.config/muttrs/themes/NAME.toml`, that restyles a built-in theme:

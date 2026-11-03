@@ -25,6 +25,21 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-width.workspace = true
 base64.workspace = true
+voight = { workspace = true, optional = true }
+
+[features]
+default = ["voight"]
+# Assessments of the Pager's text, by voight's model (about 1.7 GB, loaded at startup unless `voight = "off"`).
+voight = ["dep:voight"]
+# voight on an NVIDIA GPU (`voight = "cuda"`): CUDA in voight and the candle crates it runs its model with. Needs
+# the CUDA toolkit (`nvcc`) to build.
+cuda = ["voight", "voight/cuda"]
+# voight on a Mac's GPU (`voight = "metal"`): Metal in voight and its candle crates. Already on for Apple silicon,
+# where voight builds with Metal unless it's built with wgpu.
+metal = ["voight", "voight/metal"]
+# voight on any other GPU (`voight = "wgpu"`), Intel or AMD say, through Vulkan on Linux. Experimental: candle's wgpu
+# backend is unreleased, so voight runs on a fork of candle that has it, without Metal unless `metal` is on too.
+wgpu = ["voight", "voight/wgpu"]
 
 [lints]
 workspace = true

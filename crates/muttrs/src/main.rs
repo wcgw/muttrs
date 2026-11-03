@@ -1,9 +1,11 @@
 //! muttrs: a terminal mail client after mutt and vim, that renders HTML mail, images included.
 
 mod addresses;
+mod assessment;
 mod compose;
 mod config;
 mod filter;
+mod heatmap;
 mod icons;
 mod index;
 mod login;
@@ -139,11 +141,28 @@ fn setup() -> anyhow::Result<ui::Setup> {
         theme,
         icons,
         protocol,
+        assessor: None,
     })
 }
 
+/// voight, started on the device the configuration says, if it's on: before the terminal UI takes over the screen,
+/// as the first time, it downloads its model, showing its progress.
+// Built without voight, there's nothing to wait for.
+#[cfg_attr(not(feature = "voight"), allow(clippy::unused_async))]
+async fn voight(config: &Config) -> anyhow::Result<Option<assessment::Assessor>> {
+    match config.voight.device() {
+        #[cfg(feature = "voight")]
+        Some(device) => Ok(Some(assessment::Assessor::start(device).await.context(
+            "couldn't fetch voight's model; set voight = \"off\" in the configuration to start without it",
+        )?)),
+        #[cfg(not(feature = "voight"))]
+        Some(_) => unreachable!("the configuration can't turn voight on in a muttrs built without it"),
+        None => Ok(None),
+    }
+}
+
 async fn mail() -> anyhow::Result<()> {
-    let setup = setup()?;
+    let mut setup = setup()?;
     if setup.config.accounts.is_empty() {
         bail!(
             "there are no accounts in {}: add an [[account]] (see the README), or `muttrs view FILE` reads a file",
@@ -157,11 +176,12 @@ async fn mail() -> anyhow::Result<()> {
         .cloned()
         .map(muttrs_mail::AccountConfig::resolve)
         .collect::<Result<Vec<_>, _>>()?;
+    setup.assessor = voight(&setup.config).await?;
     ui::mail(setup, accounts).await
 }
 
 async fn view(path: &str) -> anyhow::Result<()> {
-    let setup = setup()?;
+    let mut setup = setup()?;
     let bytes = tokio::fs::read(path)
         .await
         .with_context(|| format!("reading {path}"))?;
@@ -169,5 +189,6 @@ async fn view(path: &str) -> anyhow::Result<()> {
         bail!("{path} is empty");
     }
     let message = Message::parse(bytes).with_context(|| format!("reading {path}"))?;
+    setup.assessor = voight(&setup.config).await?;
     ui::view(setup, message).await
 }

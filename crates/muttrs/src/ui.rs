@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::addresses::AddressBook;
+use crate::assessment::{self, Assessed, Assessments, Assessor, Readiness, Window};
 use crate::compose::{self, Compose};
 use crate::config::Config;
 use crate::filter::{self, Filter};
@@ -50,6 +51,8 @@ pub(crate) enum Event {
     },
     /// What an Account says, by its place in the sidebar.
     Account(usize, Update),
+    /// What voight says.
+    Voight(assessment::Event),
     /// The Pager, by its ID, has shown its Message for `pager_read_delay`.
     Read(u64),
     /// How signing in to an Account again goes, by the sign-in's ID.
@@ -62,6 +65,8 @@ pub(crate) struct Setup {
     pub(crate) theme: Theme,
     pub(crate) icons: Icons,
     pub(crate) protocol: Option<Protocol>,
+    /// voight, started, if it's on.
+    pub(crate) assessor: Option<Assessor>,
 }
 
 /// A line typed at the foot of the screen: a search, or a command.
@@ -189,6 +194,11 @@ pub(crate) struct App {
     addresses: AddressBook,
     /// Where the sidebar and the Index were last drawn, for the mouse.
     drawn: (Rect, Rect),
+    /// voight, to assess the Pager's prose, if it's on; and the Assessments it made.
+    assessor: Option<Assessor>,
+    assessments: Option<Assessments>,
+    /// Whether the Pager shows its prose as the Heatmap of its Assessment.
+    heatmap: bool,
     quit: bool,
 }
 
@@ -199,6 +209,18 @@ impl App {
         accounts: Vec<AccountState>,
         standalone: bool,
     ) -> Self {
+        let mut assessor = setup.assessor;
+        if let Some(mut said) = assessor.as_mut().and_then(Assessor::events) {
+            let events = events.clone();
+            tokio::spawn(async move {
+                while let Some(event) = said.recv().await {
+                    if events.send(Event::Voight(event)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        let assessments = assessor.is_some().then(Assessments::default);
         let fetcher = match Fetcher::new() {
             Ok(fetcher) => Some(fetcher),
             Err(error) => {
@@ -240,7 +262,102 @@ impl App {
                 AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
             },
             drawn: (Rect::default(), Rect::default()),
+            assessor,
+            assessments,
+            heatmap: false,
             quit: false,
+        }
+    }
+
+    /// Asks voight for the Assessment of the prose the Pager shows, once it's ready and assessing nothing else.
+    fn start_assessment(&mut self) {
+        let (Some(assessor), Some(assessments)) = (&self.assessor, &mut self.assessments) else {
+            return;
+        };
+        let Some(prose) = self.pager.as_ref().and_then(Pager::prose) else {
+            return;
+        };
+        if !assessments.can_assess() || assessments.get(prose).is_some() {
+            return;
+        }
+        assessments.assessing(Arc::clone(prose));
+        assessor.assess(Arc::clone(prose));
+    }
+
+    /// Takes in what voight says: that its model is loaded, or why it couldn't be, or an Assessment.
+    fn voight_said(&mut self, event: assessment::Event) {
+        let Some(assessments) = &mut self.assessments else {
+            return;
+        };
+        match event {
+            assessment::Event::Loaded { fallback } => {
+                assessments.loaded(true);
+                if let Some(fallback) = fallback {
+                    self.say(&fallback, false);
+                }
+            }
+            assessment::Event::Failed(why) => {
+                assessments.loaded(false);
+                self.say(&format!("voight couldn't load its model: {why}"), true);
+            }
+            assessment::Event::Assessed { key, assessment } => {
+                assessments.assessed(key, assessment);
+            }
+        }
+    }
+
+    /// What the status line says of voight while the Pager shows: that it's loading, assessing, or its Assessment,
+    /// in the Heatmap's colour for it while that shows; `None` when there's nothing to say, as for a body with too
+    /// little prose.
+    fn assessment_label(&self) -> Option<Span<'static>> {
+        let assessments = self.assessments.as_ref()?;
+        let prose = self.pager.as_ref()?.prose()?;
+        let said = |label: &str| Some(Span::styled(label.to_owned(), self.theme.voight));
+        match assessments.readiness() {
+            Readiness::Loading => return said("voight loading…"),
+            Readiness::Failed => return None,
+            Readiness::Ready => {}
+        }
+        match assessments.get(prose) {
+            None | Some(Assessed::Assessing) => said("voight …"),
+            Some(Assessed::Done(Some(assessment))) => {
+                let style = if self.heatmap {
+                    self.theme.voight.patch(self.theme.heat(assessment.share))
+                } else {
+                    self.theme.voight
+                };
+                let label = format!("voight {:.0}%", assessment.share * 100.0);
+                Some(Span::styled(label, style))
+            }
+            Some(Assessed::Done(None)) => None,
+            Some(Assessed::Failed(_)) => said("voight failed"),
+        }
+    }
+
+    /// The windows the Pager's prose is shaded by, while the Heatmap shows: its Assessment's, once made.
+    fn heat(&self) -> Option<Arc<[Window]>> {
+        if !self.heatmap {
+            return None;
+        }
+        match self
+            .assessments
+            .as_ref()?
+            .get(self.pager.as_ref()?.prose()?)?
+        {
+            Assessed::Done(Some(assessment)) => Some(Arc::clone(&assessment.windows)),
+            Assessed::Done(None) | Assessed::Assessing | Assessed::Failed(_) => None,
+        }
+    }
+
+    /// Shows the Heatmap, or stops; says why when it can't show now.
+    fn toggle_heatmap(&mut self) {
+        if self.assessments.is_none() {
+            self.say("No Heatmap: voight is off", false);
+            return;
+        }
+        self.heatmap = !self.heatmap;
+        if self.heatmap && self.heat().is_none() {
+            self.say("The Heatmap shows on prose voight has assessed", false);
         }
     }
 
@@ -369,6 +486,7 @@ impl App {
             }
             Event::Account(account, update) => self.on_account(account, update),
             Event::SignIn(id, progress) => self.signing_in(id, progress),
+            Event::Voight(said) => self.voight_said(said),
             Event::Read(pager) => {
                 if self.reading == Some(pager) {
                     self.reading = None;
@@ -1308,6 +1426,7 @@ impl App {
             }
             KeyCode::Char('o') => self.links(),
             KeyCode::Char('v') => self.attachments(),
+            KeyCode::Char('H') => self.toggle_heatmap(),
             KeyCode::Char('?') => self.help(),
             KeyCode::Esc => {
                 if !pager.clear_search() {
@@ -1728,6 +1847,7 @@ impl App {
                         ("/ n N", "search, next match, previous"),
                         ("T", "HTML or plain text"),
                         ("I", "load Remote Content"),
+                        ("H", "voight's Heatmap of the prose"),
                     ],
                 ),
                 (
@@ -1855,8 +1975,10 @@ impl App {
                 self.config.pager_width,
             );
         } else if self.pager.is_some() {
+            let heat = self.heat();
             let area = self.draw_mini_index(body, buffer);
             let Some(pager) = &mut self.pager else { return };
+            pager.shade(heat);
             let mut cx = pager::Cx {
                 theme: &self.theme,
                 icons: &self.icons,
@@ -2078,7 +2200,12 @@ impl App {
             });
         }
         right.push("? keys".to_owned());
-        let right = format!(" {} ", right.join(" · "));
+        let mut spans = vec![Span::raw(" ")];
+        if let Some(label) = self.assessment_label().filter(|_| self.compose.is_none()) {
+            spans.extend([label, Span::raw(" · ")]);
+        }
+        spans.push(Span::raw(format!("{} ", right.join(" · "))));
+        let right = Line::from(spans);
         let left = match (&self.notice, &self.pager) {
             (Some(notice), _) => Span::styled(
                 format!(" {}", notice.text),
@@ -2099,7 +2226,7 @@ impl App {
         buffer.set_line(
             area.x + area.width - right_width,
             area.y,
-            &Line::raw(right),
+            &right,
             right_width,
         );
     }
@@ -2252,6 +2379,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
         loop {
             app.pictures.forget_unwanted(&mut out)?;
             out.flush()?;
+            app.start_assessment();
             terminal.draw(|frame| app.draw(frame))?;
             if app.quit {
                 return Ok::<_, anyhow::Error>(());

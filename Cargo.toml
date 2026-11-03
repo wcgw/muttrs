@@ -60,11 +60,15 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 wiremock = "0.6.5"
 
+# voight's main, pinned as ghd pins it: the library isn't published.
+voight = { git = "https://github.com/wcgw/voight", rev = "26c88c90f7b971a1700e892332023a6d5771361e", default-features = false }
+
 muttrs-gfx = { path = "crates/muttrs-gfx" }
 muttrs-mail = { path = "crates/muttrs-mail" }
 muttrs-render = { path = "crates/muttrs-render" }
 
-# Decoding and resizing images is unusably slow unoptimized: dependencies are built optimized even in debug builds,
-# which keep muttrs' own code easy to debug.
+# Decoding and resizing images is unusably slow unoptimized, and so is voight's model (an Assessment didn't finish in
+# five minutes, in ghd): dependencies are built optimized even in debug builds, which keep muttrs' own code easy to
+# debug.
 [profile.dev.package."*"]
 opt-level = 3
