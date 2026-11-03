@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use rustls::ClientConfig;
@@ -26,6 +27,10 @@ const IDLE_RENEWAL: Duration = Duration::from_mins(25);
 const POLL: Duration = Duration::from_mins(5);
 /// The longest wait before connecting again.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// A Request asked of an Account, numbered by its Client: what [`Update::Started`] and [`Update::Finished`] tell of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Task(u64);
 
 /// What the UI asks of an Account.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +135,28 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// The Mailbox whose Messages it changes, if it does: their Flags or Labels, or which Messages it has.
+    fn changes(&self) -> Option<&str> {
+        match self {
+            Self::Flag { mailbox, .. }
+            | Self::Label { mailbox, .. }
+            | Self::MoveTo { mailbox, .. }
+            | Self::Move { mailbox, .. }
+            | Self::Expunge { mailbox, .. }
+            | Self::Delete { mailbox, .. }
+            | Self::Archive { mailbox, .. } => Some(mailbox),
+            Self::Refresh
+            | Self::Open(_)
+            | Self::More(_)
+            | Self::Search { .. }
+            | Self::Body { .. }
+            | Self::Append { .. }
+            | Self::Send { .. } => None,
+        }
+    }
+}
+
 /// A Flag the UI sets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flag {
@@ -156,8 +183,20 @@ impl Flag {
 pub enum Update {
     /// Where the connection stands.
     Connection(Connection),
+    /// The worker started on a Task: Tasks are done one at a time, in the order asked, but for a Message to read,
+    /// which goes first.
+    Started(Task),
+    /// The worker is done with a Task, whether it did what was asked or not (as [`Update::Done`] or
+    /// [`Update::Failed`] says); for one that changes a Mailbox's Messages, the Envelopes told next show them as the
+    /// server has them since.
+    Finished(Task),
     /// A Message was sent, or couldn't be, for this reason.
-    Sent(Result<(), String>),
+    Sent {
+        /// The Task that sent it.
+        task: Task,
+        /// Whether it was sent, or why not.
+        sent: Result<(), String>,
+    },
     /// Its Mailboxes, as the server lists them.
     Mailboxes(Vec<Mailbox>),
     /// Its Labels, by name.
@@ -223,7 +262,9 @@ pub type Notify = Arc<dyn Fn(Update) + Send + Sync>;
 /// The handle the UI keeps on an Account.
 #[derive(Clone, Debug)]
 pub struct Client {
-    requests: mpsc::UnboundedSender<Request>,
+    requests: mpsc::UnboundedSender<(Task, Request)>,
+    /// The number of the next Task asked.
+    next: Arc<AtomicU64>,
 }
 
 impl Client {
@@ -236,10 +277,10 @@ impl Client {
         let tls = tls::client_config(&account.trust)?;
         let account = Arc::new(account);
         let credentials = Arc::new(CredentialSource::new(Arc::clone(&account)));
-        let (requests, received) = mpsc::unbounded_channel();
+        let (client, received) = Self::detached();
         let (inbox_changed, changes) = mpsc::unbounded_channel();
         let worker = Worker {
-            own: requests.clone(),
+            own: client.clone(),
             account: Arc::clone(&account),
             tls: Arc::clone(&tls),
             credentials: Arc::clone(&credentials),
@@ -252,15 +293,30 @@ impl Client {
             windows: HashMap::new(),
             open: None,
             selected: None,
+            queue: VecDeque::new(),
         };
         tokio::spawn(worker.run(received, changes));
         tokio::spawn(watch(account, tls, credentials, inbox_changed));
-        Ok(Self { requests })
+        Ok(client)
     }
 
-    /// Asks the Account for something; what comes of it comes as [`Update`]s.
-    pub fn send(&self, request: Request) {
-        let _ = self.requests.send(request);
+    /// A Client of no Account, for trying a UI without one: what's asked of it waits in the receiver returned.
+    #[must_use]
+    pub fn detached() -> (Self, mpsc::UnboundedReceiver<(Task, Request)>) {
+        let (requests, received) = mpsc::unbounded_channel();
+        let client = Self {
+            requests,
+            next: Arc::new(AtomicU64::new(1)),
+        };
+        (client, received)
+    }
+
+    /// Asks the Account for something, as the Task returned; what comes of it comes as [`Update`]s.
+    #[allow(clippy::must_use_candidate)] // Asking is what it's for: the Task, for those that follow it.
+    pub fn send(&self, request: Request) -> Task {
+        let task = Task(self.next.fetch_add(1, Ordering::Relaxed));
+        let _ = self.requests.send((task, request));
+        task
     }
 }
 
@@ -411,7 +467,7 @@ struct Window {
 
 struct Worker {
     /// What the worker asks of itself, after sending.
-    own: mpsc::UnboundedSender<Request>,
+    own: Client,
     account: Arc<Account>,
     tls: Arc<ClientConfig>,
     credentials: Arc<CredentialSource>,
@@ -428,12 +484,14 @@ struct Worker {
     open: Option<String>,
     /// The Mailbox the session has selected.
     selected: Option<String>,
+    /// What's asked and not started yet, in the order asked: kept while offline, and across connections.
+    queue: VecDeque<(Task, Request)>,
 }
 
 impl Worker {
     async fn run(
         mut self,
-        mut requests: mpsc::UnboundedReceiver<Request>,
+        mut requests: mpsc::UnboundedReceiver<(Task, Request)>,
         mut changes: mpsc::UnboundedReceiver<()>,
     ) {
         let mut backoff = Duration::from_secs(2);
@@ -476,48 +534,68 @@ impl Worker {
     /// Mailbox it keeps the Envelopes of, reading a Message it keeps. `false` if nothing more can be asked.
     async fn offline(
         &mut self,
-        requests: &mut mpsc::UnboundedReceiver<Request>,
+        requests: &mut mpsc::UnboundedReceiver<(Task, Request)>,
         timeout: Option<Duration>,
     ) -> bool {
-        let waiting = async {
-            loop {
-                match requests.recv().await {
-                    Some(Request::Refresh) => return true,
-                    Some(Request::Open(mailbox)) => {
-                        self.open = Some(mailbox.clone());
-                        self.listed_from_cache(&mailbox);
-                        self.tell_window(&mailbox);
-                    }
-                    Some(Request::Body { mailbox, uid }) => {
-                        let validity = self.windows.get(&mailbox).map(|window| window.uid_validity);
-                        let body = match validity {
-                            Some(validity) => self.cache.body(&mailbox, validity, uid).await,
-                            None => None,
-                        };
-                        (self.notify)(Update::Body {
-                            mailbox,
-                            uid,
-                            body: body
-                                .map(Arc::new)
-                                .ok_or_else(|| "offline, and it isn't cached".to_owned()),
-                        });
-                    }
-                    Some(Request::Send { .. }) => {
-                        (self.notify)(Update::Sent(Err(
-                            "offline: the Draft stays, to send once online".into(),
-                        )));
-                    }
-                    // What changes the server waits for it.
-                    Some(_) => {
-                        (self.notify)(Update::Failed("Offline: that waits for the server".into()));
-                    }
-                    None => return false,
+        let until = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        loop {
+            // Only waiting for what's asked times out, never doing it: each Task asked is told finished.
+            let asked = match self.queue.pop_front() {
+                Some(asked) => Some(asked),
+                None => match until {
+                    Some(until) => match tokio::time::timeout_at(until, requests.recv()).await {
+                        Ok(asked) => asked,
+                        Err(_) => return true,
+                    },
+                    None => requests.recv().await,
+                },
+            };
+            let Some((task, request)) = asked else {
+                return false;
+            };
+            (self.notify)(Update::Started(task));
+            let changes = request.changes().map(str::to_owned);
+            let refresh = request == Request::Refresh;
+            match request {
+                Request::Refresh => {}
+                Request::Open(mailbox) => {
+                    self.open = Some(mailbox.clone());
+                    self.listed_from_cache(&mailbox);
+                    self.tell_window(&mailbox);
+                }
+                Request::Body { mailbox, uid } => {
+                    let validity = self.windows.get(&mailbox).map(|window| window.uid_validity);
+                    let body = match validity {
+                        Some(validity) => self.cache.body(&mailbox, validity, uid).await,
+                        None => None,
+                    };
+                    (self.notify)(Update::Body {
+                        mailbox,
+                        uid,
+                        body: body
+                            .map(Arc::new)
+                            .ok_or_else(|| "offline, and it isn't cached".to_owned()),
+                    });
+                }
+                Request::Send { .. } => {
+                    (self.notify)(Update::Sent {
+                        task,
+                        sent: Err("offline: send it again once online".into()),
+                    });
+                }
+                // What changes the server waits for it.
+                _ => {
+                    (self.notify)(Update::Failed("Offline: that waits for the server".into()));
                 }
             }
-        };
-        match timeout {
-            Some(timeout) => tokio::time::timeout(timeout, waiting).await.unwrap_or(true),
-            None => waiting.await,
+            (self.notify)(Update::Finished(task));
+            // What the UI showed changed comes back as it was.
+            if let Some(mailbox) = changes {
+                self.tell_window_again(&mailbox);
+            }
+            if refresh {
+                return true;
+            }
         }
     }
 
@@ -525,7 +603,7 @@ impl Worker {
     async fn serve(
         &mut self,
         mut session: Session,
-        requests: &mut mpsc::UnboundedReceiver<Request>,
+        requests: &mut mpsc::UnboundedReceiver<(Task, Request)>,
         changes: &mut mpsc::UnboundedReceiver<()>,
     ) -> Result<(), imap::Error> {
         self.list(&mut session).await?;
@@ -536,20 +614,21 @@ impl Worker {
         }
         loop {
             // What's asked comes first; counting Mailboxes' Messages fills the gaps between.
-            let request = if let Some(mailbox) = counts_due.front().cloned() {
-                match requests.try_recv() {
-                    Ok(request) => Some(request),
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        counts_due.pop_front();
-                        let counted = self.count(&mut session, &mailbox).await;
-                        self.tolerate(counted)?;
-                        continue;
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => None,
-                }
+            let (task, request) = if let Some(asked) = self.next_asked(requests) {
+                asked
+            } else if let Some(mailbox) = counts_due.pop_front() {
+                let counted = self.count(&mut session, &mailbox).await;
+                self.tolerate(counted)?;
+                continue;
             } else {
                 tokio::select! {
-                    request = requests.recv() => request,
+                    asked = requests.recv() => {
+                        let Some(asked) = asked else {
+                            session.logout().await;
+                            return Ok(());
+                        };
+                        asked
+                    }
                     Some(()) = changes.recv() => {
                         let seen = self.changed(&mut session).await;
                         self.tolerate(seen)?;
@@ -565,19 +644,50 @@ impl Worker {
                     }
                 }
             };
-            let Some(request) = request else {
-                session.logout().await;
-                return Ok(());
-            };
-            let handled = self.handle(&mut session, request, &mut counts_due).await;
-            self.tolerate(handled)?;
+            self.work(&mut session, task, request, &mut counts_due)
+                .await?;
         }
     }
 
-    /// Does `request` over `session`.
+    /// Takes what's been asked since into the queue, and the next Task to do from it.
+    fn next_asked(
+        &mut self,
+        requests: &mut mpsc::UnboundedReceiver<(Task, Request)>,
+    ) -> Option<(Task, Request)> {
+        while let Ok(asked) = requests.try_recv() {
+            self.queue.push_back(asked);
+        }
+        next(&mut self.queue)
+    }
+
+    /// Does `task` over `session`, telling the UI when it starts and once it's done (a Message sent, once it's
+    /// sent); then the Envelopes of the Mailbox it changed, as they stand.
+    async fn work(
+        &mut self,
+        session: &mut Session,
+        task: Task,
+        request: Request,
+        counts_due: &mut VecDeque<String>,
+    ) -> Result<(), imap::Error> {
+        (self.notify)(Update::Started(task));
+        let sending = matches!(request, Request::Send { .. });
+        let changes = request.changes().map(str::to_owned);
+        let handled = self.handle(session, task, request, counts_due).await;
+        if !sending {
+            (self.notify)(Update::Finished(task));
+        }
+        // Told again even if it changed nothing, the server refusing, so that the UI shows them as they are.
+        if let Some(mailbox) = changes {
+            self.tell_window_again(&mailbox);
+        }
+        self.tolerate(handled)
+    }
+
+    /// Does `request`, Task `task`, over `session`.
     async fn handle(
         &mut self,
         session: &mut Session,
+        task: Task,
         request: Request,
         counts_due: &mut VecDeque<String>,
     ) -> Result<(), imap::Error> {
@@ -643,7 +753,7 @@ impl Worker {
                 };
                 self.move_to(session, &mailbox, &uids, role).await?;
             }
-            Request::Send { built, answers } => self.send(*built, answers),
+            Request::Send { built, answers } => self.send(task, *built, answers),
             Request::Append {
                 role,
                 message,
@@ -669,9 +779,9 @@ impl Worker {
         Ok(())
     }
 
-    /// Sends `built` in the background, so that reading goes on meanwhile; then asks for the copy in Sent and
-    /// the answered flag.
-    fn send(&self, built: Built, answers: Option<(String, u32)>) {
+    /// Sends `built`, Task `task`, in the background, so that reading goes on meanwhile; then asks for the copy in
+    /// Sent and the answered flag.
+    fn send(&self, task: Task, built: Built, answers: Option<(String, u32)>) {
         let (account, credentials, notify, own) = (
             Arc::clone(&self.account),
             Arc::clone(&self.credentials),
@@ -688,14 +798,14 @@ impl Worker {
             .await;
             if sent.is_ok() {
                 if account.copy_to_sent {
-                    let _ = own.send(Request::Append {
+                    own.send(Request::Append {
                         role: Role::Sent,
                         message: built.kept,
                         draft: false,
                     });
                 }
                 if let Some((mailbox, uid)) = answers {
-                    let _ = own.send(Request::Flag {
+                    own.send(Request::Flag {
                         mailbox,
                         uids: vec![uid],
                         flag: Flag::Answered,
@@ -703,7 +813,8 @@ impl Worker {
                     });
                 }
             }
-            notify(Update::Sent(sent));
+            notify(Update::Sent { task, sent });
+            notify(Update::Finished(task));
         });
     }
 
@@ -1134,6 +1245,17 @@ impl Worker {
         }
     }
 
+    /// Tells the UI the Envelopes of `mailbox` listed, again, as they stand: once a Task that changed them is done.
+    fn tell_window_again(&self, mailbox: &str) {
+        if let Some(window) = self.windows.get(mailbox) {
+            (self.notify)(Update::Envelopes {
+                mailbox: mailbox.to_owned(),
+                envelopes: window.envelopes.values().cloned().collect(),
+                exists: window.exists,
+            });
+        }
+    }
+
     /// The Envelopes of `mailbox` kept in the cache, listed again, unless some are listed already.
     fn listed_from_cache(&mut self, mailbox: &str) {
         if self.windows.contains_key(mailbox) {
@@ -1276,6 +1398,18 @@ impl Worker {
     }
 }
 
+/// The next Task to do of those `queue`d: a Message to read before anything else, as reading waits for it, and
+/// reading only, so it comes to no harm for coming first; else the first asked.
+fn next(queue: &mut VecDeque<(Task, Request)>) -> Option<(Task, Request)> {
+    let reading = queue
+        .iter()
+        .position(|(_, request)| matches!(request, Request::Body { .. }));
+    match reading {
+        Some(at) => queue.remove(at),
+        None => queue.pop_front(),
+    }
+}
+
 /// Gives `envelopes` the Labels whose Mailboxes have them, by `members`, once what each has is found out; unless the
 /// server tells Gmail's labels (`gmail`), which come with them. Until then, they keep what they have, as cached.
 fn labelled<'a>(
@@ -1359,6 +1493,33 @@ async fn watch(
 mod tests {
     use super::*;
     use crate::account::OAuth2;
+
+    #[test]
+    fn a_message_to_read_goes_first_and_the_rest_in_the_order_asked() {
+        let mut queue: VecDeque<(Task, Request)> = [
+            (
+                Task(1),
+                Request::Delete {
+                    mailbox: "INBOX".into(),
+                    uids: vec![1],
+                },
+            ),
+            (Task(2), Request::Open("Work".into())),
+            (
+                Task(3),
+                Request::Body {
+                    mailbox: "INBOX".into(),
+                    uid: 2,
+                },
+            ),
+            (Task(4), Request::Refresh),
+        ]
+        .into();
+        let order: Vec<u64> = std::iter::from_fn(|| next(&mut queue))
+            .map(|(Task(number), _)| number)
+            .collect();
+        assert_eq!(order, [3, 1, 2, 4]);
+    }
 
     #[test]
     fn envelopes_keep_their_labels_until_every_labels_messages_are_found_out() {

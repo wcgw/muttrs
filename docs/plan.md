@@ -146,6 +146,10 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       `Message-ID`); shown in the Index, added or taken off with `Y`, picked by `:select label:`
 - [x] The History of commands and searches, as vim's: `Up` and `Down` through what starts as typed, `Ctrl-p` and
       `Ctrl-n` through all of it; kept between runs, and between muttrs running at once
+- [x] Tasks: what's asked of an Account is numbered, told started and finished; what it changes shows done until
+      it's finished (quick successive actions no longer show what they took out again); a Message to read goes first;
+      sending in the background, the Draft back if it fails; the status line's spinner, the Task being done and how
+      many more; quitting waits for them (`:q!` doesn't)
 
 ### 8. What mutt users would miss
 

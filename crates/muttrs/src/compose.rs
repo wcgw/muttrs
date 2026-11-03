@@ -26,8 +26,6 @@ pub(crate) struct Compose {
     pub(crate) answers: Option<(String, u32)>,
     /// The Postponed Draft it was resumed from, by its Mailbox and UID, expunged once it's sent or kept again.
     pub(crate) replaces: Option<(String, u32)>,
-    /// Whether it's on its way to the server.
-    pub(crate) sending: bool,
     /// Whether discarding it was asked for once, and needs asking again.
     pub(crate) discarding: bool,
     /// What its file said before it was first edited, while it's not been edited yet.
@@ -58,7 +56,6 @@ impl Compose {
             path,
             answers,
             replaces: None,
-            sending: false,
             discarding: false,
             scroll: 0,
             height: 0,

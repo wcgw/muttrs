@@ -16,6 +16,7 @@ mod pictures;
 mod remote;
 mod sidebar;
 mod sign_in;
+mod tasks;
 mod theme;
 mod trust;
 mod ui;
