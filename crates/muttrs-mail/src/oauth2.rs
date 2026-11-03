@@ -6,7 +6,7 @@
 //! for devices without a browser, doesn't allow Gmail's scope.
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -53,8 +53,9 @@ pub enum Error {
 pub struct Tokens {
     /// The access token, for XOAUTH2.
     pub access_token: String,
-    /// When the access token stops working.
-    pub expires: Instant,
+    /// When the access token stops working, by the wall clock: an [`Instant`](std::time::Instant) doesn't count the
+    /// time the computer sleeps, after which a token would seem good for longer than it is.
+    pub expires: SystemTime,
     /// A new refresh token, if the provider gave one (it always does when signing in; some rotate it).
     pub refresh_token: Option<String>,
 }
@@ -347,7 +348,7 @@ async fn token_request(url: &str, form: &[(&str, &str)]) -> Result<Tokens, Error
             ..
         } => Ok(Tokens {
             access_token,
-            expires: Instant::now() + Duration::from_secs(expires_in.unwrap_or(3600)),
+            expires: SystemTime::now() + Duration::from_secs(expires_in.unwrap_or(3600)),
             refresh_token,
         }),
         TokenResponse {
@@ -461,7 +462,7 @@ mod tests {
         let tokens = tokens.unwrap();
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert!(tokens.expires > Instant::now() + Duration::from_secs(3500));
+        assert!(tokens.expires > SystemTime::now() + Duration::from_secs(3500));
     }
 
     #[tokio::test]
