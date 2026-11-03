@@ -538,6 +538,7 @@ impl App {
                     self.open_mailbox(account, &inbox);
                 }
             }
+            Update::Labels(labels) => state.labels = labels,
             Update::Counts { mailbox, counts } => {
                 state.counts.insert(mailbox, counts);
             }
@@ -1077,6 +1078,105 @@ impl App {
         self.overlay = Some(Overlay::new(overlay::Kind::Mailboxes, what, rows));
     }
 
+    /// Lists the Account's Labels, each marked as the Messages an action is for have it, to add or take off.
+    fn choose_labels(&mut self) {
+        let Some((account, _, uids)) = self.targets() else {
+            return;
+        };
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        if state.labels.is_empty() {
+            let why = if state.connection == Connection::Online {
+                format!("{} has no Labels", state.name)
+            } else {
+                format!("{}'s Labels wait for the server", state.name)
+            };
+            self.say(&why, false);
+            return;
+        }
+        let rows = (0..state.labels.len())
+            .map(|label| self.label_row(account, &uids, label))
+            .collect();
+        let title = match uids.len() {
+            1 => "Labels".to_owned(),
+            count => format!("Labels of {count}"),
+        };
+        self.overlay = Some(Overlay::new(overlay::Kind::Labels, title, rows));
+    }
+
+    /// How many of `uids`, of the Index, have `account`'s `label`th Label, of how many the Index lists.
+    fn labelled(&self, account: usize, uids: &[u32], label: usize) -> (usize, usize) {
+        let (Some(index), Some(label)) = (
+            self.index.as_ref(),
+            self.accounts
+                .get(account)
+                .and_then(|state| state.labels.get(label)),
+        ) else {
+            return (0, 0);
+        };
+        let listed: Vec<&muttrs_mail::Envelope> =
+            uids.iter().filter_map(|&uid| index.find(uid)).collect();
+        let have = listed
+            .iter()
+            .filter(|envelope| envelope.labels.contains(&label.name))
+            .count();
+        (have, listed.len())
+    }
+
+    /// The row of the Labels' list for `account`'s `label`th: marked if all of `uids` have it, half if some do.
+    fn label_row(&self, account: usize, uids: &[u32], label: usize) -> Line<'static> {
+        let name = self.accounts[account].labels[label].name.clone();
+        let mark = match self.labelled(account, uids, label) {
+            (0, _) => "  ",
+            (have, all) if have == all => "✓ ",
+            _ => "– ",
+        };
+        Line::from(vec![Span::styled(mark, self.theme.accent), Span::raw(name)])
+    }
+
+    /// Adds the `chosen`th of the Account's Labels to the Messages an action is for: to all of them, unless all have it
+    /// already, when it's taken off them.
+    fn toggle_label(&mut self, chosen: usize) {
+        let Some((account, mailbox, uids)) = self.targets() else {
+            return;
+        };
+        let Some(label) = self
+            .accounts
+            .get(account)
+            .and_then(|state| state.labels.get(chosen))
+            .cloned()
+        else {
+            return;
+        };
+        let (have, all) = self.labelled(account, &uids, chosen);
+        let on = have < all || all == 0;
+        // As it will be, until the server says.
+        if let Some(index) = self.index.as_mut() {
+            for &uid in &uids {
+                if let Some(envelope) = index.find_mut(uid) {
+                    envelope.labels.retain(|name| *name != label.name);
+                    if on {
+                        envelope.labels.push(label.name.clone());
+                        envelope
+                            .labels
+                            .sort_by(|a, b| muttrs_mail::label::order(a, b));
+                    }
+                }
+            }
+        }
+        let row = self.label_row(account, &uids, chosen);
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.set_row(chosen, row);
+        }
+        self.accounts[account].client.send(client::Request::Label {
+            mailbox,
+            uids,
+            label: label.mailbox,
+            on,
+        });
+    }
+
     /// The Mailboxes of `account` Messages of `mailbox` can be moved to, in the sidebar's order.
     fn moving_to(&self, account: usize, mailbox: &str) -> Vec<muttrs_mail::Mailbox> {
         sidebar::rows(&self.accounts)
@@ -1362,6 +1462,7 @@ impl App {
             KeyCode::Char(' ') => index.toggle_selected(),
             KeyCode::Char('F') => self.toggle(Flag::Flagged),
             KeyCode::Char('U') => self.toggle(Flag::Seen),
+            KeyCode::Char('Y') => self.choose_labels(),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
@@ -1439,6 +1540,7 @@ impl App {
             KeyCode::Char('K') => self.step(false),
             KeyCode::Char('F') => self.toggle(Flag::Flagged),
             KeyCode::Char('U') => self.toggle(Flag::Seen),
+            KeyCode::Char('Y') => self.choose_labels(),
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
@@ -1869,6 +1971,7 @@ impl App {
                         ("J K", "in the Pager: the next Message, the previous"),
                         ("Space", "select, or not, and move down"),
                         ("F U", "flag, mark Unread or read: the selected, or this"),
+                        ("Y", "add or take off Labels: the selected, or this"),
                         ("d a s", "delete (to Trash), archive, move to a Mailbox"),
                         ("Tab h l", "the sidebar, the Index"),
                         ("\\", "show or hide the sidebar"),
@@ -1876,7 +1979,7 @@ impl App {
                         (":cd NAME", "open a Mailbox by name"),
                         (
                             ":select F",
-                            "select what filter F picks: from:ann is:unread …",
+                            "select what filter F picks: from:ann is:unread label:work …",
                         ),
                         (":unselect F", "unselect what F picks; without F, all"),
                     ],
@@ -1905,10 +2008,14 @@ impl App {
     }
 
     fn chosen(&mut self, kind: overlay::Kind, index: usize, verb: Verb) {
-        // Moving needs no Pager: what's moved is in the Index.
+        // Moving and labelling need no Pager: what's moved or labelled is in the Index.
         if kind == overlay::Kind::Mailboxes {
             self.overlay = None;
             self.move_to(index);
+            return;
+        }
+        if kind == overlay::Kind::Labels {
+            self.toggle_label(index);
             return;
         }
         let Some(pager) = &self.pager else { return };
@@ -1947,7 +2054,7 @@ impl App {
                 }
                 self.overlay = None;
             }
-            overlay::Kind::Mailboxes | overlay::Kind::Help => {}
+            overlay::Kind::Mailboxes | overlay::Kind::Labels | overlay::Kind::Help => {}
         }
     }
 
@@ -2344,6 +2451,7 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
             connection: Connection::Connecting,
             // As last listed, until the server lists them.
             mailboxes: cache.mailboxes().unwrap_or_default(),
+            labels: Vec::new(),
             counts: std::collections::HashMap::new(),
             sender: sender_of_drafts,
             cache,

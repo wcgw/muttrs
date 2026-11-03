@@ -830,3 +830,143 @@ async fn offline_what_was_listed_and_read_is_still_there() {
     }
     let _ = std::fs::remove_dir_all(cache_root);
 }
+
+/// Waits for what the client says it did, failing if it says it couldn't.
+async fn done(updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>) -> String {
+    until(updates, |update| match update {
+        Update::Done(done) => Some(done.clone()),
+        Update::Failed(failed) => panic!("{failed}"),
+        _ => None,
+    })
+    .await
+}
+
+/// The Labels each of the Inbox's Messages has, by subject.
+type Labelled = Vec<(String, Vec<String>)>;
+
+/// Waits for the client to list the Inbox's Messages with the Labels `wanted`, in the order listed, failing if it
+/// doesn't in a while: their UIDs. It may list them otherwise first, as before finding out what each Label has.
+async fn labels_listed(
+    updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>,
+    wanted: &Labelled,
+) -> Vec<u32> {
+    until(updates, |update| match update {
+        Update::Envelopes {
+            mailbox, envelopes, ..
+        } if mailbox == "INBOX" => {
+            let listed: Labelled = envelopes
+                .iter()
+                .map(|envelope| (envelope.subject.clone(), envelope.labels.clone()))
+                .collect();
+            (listed == *wanted).then(|| envelopes.iter().map(|envelope| envelope.uid).collect())
+        }
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn labels_as_mailboxes_of_their_own_as_protons_bridge_keeps_them() {
+    let username = user("labels");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["one", "two"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    session.create("Labels/GH").await.unwrap();
+    session.create("Labels/Rust for Linux").await.unwrap();
+    // "one" labelled GH before the client connects, as by another.
+    session
+        .append("Labels/GH", "()", &message("one"))
+        .await
+        .unwrap();
+
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    let labels = until(&mut updates, |update| match update {
+        Update::Labels(labels) => Some(labels.clone()),
+        _ => None,
+    })
+    .await;
+    let names: Vec<(&str, &str)> = labels
+        .iter()
+        .map(|label| (label.name.as_str(), label.mailbox.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("GH", "Labels/GH"),
+            ("Rust for Linux", "Labels/Rust for Linux")
+        ]
+    );
+
+    client.send(Request::Open("INBOX".into()));
+    let labelled = |one: &[&str], two: &[&str]| -> Labelled {
+        let owned = |names: &[&str]| names.iter().map(|&name| name.to_owned()).collect();
+        vec![
+            ("one".to_owned(), owned(one)),
+            ("two".to_owned(), owned(two)),
+        ]
+    };
+    let uids = labels_listed(&mut updates, &labelled(&["GH"], &[])).await;
+    let (one, two) = (uids[0], uids[1]);
+    let label = |uids: &[u32], label: &str, on: bool| Request::Label {
+        mailbox: "INBOX".into(),
+        uids: uids.to_vec(),
+        label: label.into(),
+        on,
+    };
+
+    // Both labelled GH: "two" copied there, "one" not again.
+    client.send(label(&[one, two], "Labels/GH", true));
+    assert_eq!(done(&mut updates).await, "Labelled 2 Messages GH");
+    labels_listed(&mut updates, &labelled(&["GH"], &["GH"])).await;
+    assert_eq!(session.counts("Labels/GH").await.unwrap().messages, 2);
+
+    client.send(label(&[two], "Labels/Rust for Linux", true));
+    assert_eq!(
+        done(&mut updates).await,
+        "Labelled a Message Rust for Linux"
+    );
+    labels_listed(&mut updates, &labelled(&["GH"], &["GH", "Rust for Linux"])).await;
+
+    // Taken off by expunging the copy, found by its Message-ID; the Message stays in the Inbox.
+    client.send(label(&[one], "Labels/GH", false));
+    assert_eq!(done(&mut updates).await, "Took GH off a Message");
+    labels_listed(&mut updates, &labelled(&[], &["GH", "Rust for Linux"])).await;
+    assert_eq!(session.counts("Labels/GH").await.unwrap().messages, 1);
+    assert_eq!(session.counts("INBOX").await.unwrap().messages, 2);
+
+    // Labelled by another meanwhile: seen when the Inbox is opened again.
+    session
+        .append("Labels/GH", "()", &message("one"))
+        .await
+        .unwrap();
+    client.send(Request::Open("INBOX".into()));
+    labels_listed(&mut updates, &labelled(&["GH"], &["GH", "Rust for Linux"])).await;
+    session.logout().await;
+}

@@ -1,5 +1,5 @@
-//! Lists that pop up over what's on screen: a Message's Links, its Attachments, the Mailboxes to move to, the
-//! keys.
+//! Lists that pop up over what's on screen: a Message's Links, its Attachments, the Mailboxes to move to, the Labels
+//! to add or take off, the keys.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
@@ -16,6 +16,8 @@ pub(crate) enum Kind {
     Attachments,
     /// The Mailboxes to move Messages to, narrowed as their names are typed.
     Mailboxes,
+    /// The Labels to add to Messages or take off them, narrowed as the Mailboxes are; it stays open as they're chosen.
+    Labels,
     Help,
 }
 
@@ -64,6 +66,7 @@ impl Overlay {
             Kind::Links => " 1-9 Enter open · y copy · Esc ",
             Kind::Attachments => " Enter open · s save · Esc ",
             Kind::Mailboxes => " type to narrow · ↑ ↓ Enter move · Esc ",
+            Kind::Labels => " type to narrow · ↑ ↓ Enter add or take off · Esc ",
             Kind::Help => " Esc ",
         };
         let names = rows
@@ -94,6 +97,13 @@ impl Overlay {
         self.kind
     }
 
+    /// Shows the `index`th row as `row` now, found by the name it had.
+    pub(crate) fn set_row(&mut self, index: usize, row: Line<'static>) {
+        if let Some(shown) = self.rows.get_mut(index) {
+            *shown = row;
+        }
+    }
+
     /// Narrows the list to the rows whose names hold what's typed.
     fn narrow(&mut self) {
         let filter = self.filter.to_lowercase();
@@ -105,7 +115,7 @@ impl Overlay {
 
     pub(crate) fn key(&mut self, key: KeyEvent) -> Outcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        if self.kind == Kind::Mailboxes {
+        if matches!(self.kind, Kind::Mailboxes | Kind::Labels) {
             match key.code {
                 KeyCode::Esc => return Outcome::Close,
                 KeyCode::Char('c') if control => return Outcome::Close,
@@ -124,6 +134,12 @@ impl Overlay {
                 KeyCode::Char('u') if control => {
                     self.filter.clear();
                     self.narrow();
+                }
+                // A Label's name may have spaces, but doesn't start with one.
+                KeyCode::Char(' ') if self.kind == Kind::Labels && self.filter.is_empty() => {
+                    if let Some(&row) = self.shown.get(self.cursor) {
+                        return Outcome::Chosen(row, Verb::Open);
+                    }
                 }
                 KeyCode::Char(character) => {
                     self.filter.push(character);
@@ -203,7 +219,7 @@ impl Overlay {
             .border_type(BorderType::Rounded)
             .border_style(theme.accent)
             .title(Span::styled(
-                if self.kind == Kind::Mailboxes {
+                if matches!(self.kind, Kind::Mailboxes | Kind::Labels) {
                     format!(" {}: {}▏", self.title, self.filter)
                 } else {
                     format!(" {} ", self.title)
@@ -322,5 +338,33 @@ mod tests {
             press(&mut mailboxes, KeyCode::Enter),
             Outcome::Chosen(2, Verb::Open)
         );
+    }
+
+    #[test]
+    fn labels_are_chosen_by_space_until_a_name_is_typed() {
+        let rows = ["GH", "Rust for Linux", "Rustls"]
+            .into_iter()
+            .map(Line::raw)
+            .collect();
+        let mut labels = Overlay::new(Kind::Labels, "Labels", rows);
+        assert_eq!(
+            press(&mut labels, KeyCode::Char(' ')),
+            Outcome::Chosen(0, Verb::Open)
+        );
+        for character in "rust f".chars() {
+            assert_eq!(press(&mut labels, KeyCode::Char(character)), Outcome::Stay);
+        }
+        assert_eq!(
+            press(&mut labels, KeyCode::Enter),
+            Outcome::Chosen(1, Verb::Open),
+            "the space typed, in the name"
+        );
+        labels.set_row(1, Line::raw("✓ Rust for Linux"));
+        assert_eq!(
+            press(&mut labels, KeyCode::Enter),
+            Outcome::Chosen(1, Verb::Open),
+            "still found by its name, and still open"
+        );
+        assert_eq!(press(&mut labels, KeyCode::Esc), Outcome::Close);
     }
 }

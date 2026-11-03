@@ -1,9 +1,9 @@
-//! Gmail's Threads (`X-GM-THRID`), against a server on the loopback that answers as Gmail does: neither GreenMail
-//! nor Dovecot has Gmail's extensions.
+//! Gmail's Threads (`X-GM-THRID`) and labels (`X-GM-LABELS`), against a server on the loopback that answers as Gmail
+//! does: neither GreenMail nor Dovecot has Gmail's extensions.
 
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use muttrs_mail::account::{Endpoint, Tls};
 use muttrs_mail::imap::{Credentials, Session};
@@ -20,13 +20,15 @@ const HEADERS: [&str; 3] = [
     "Subject: c\r\nMessage-ID: <c@example.com>\r\nDate: Mon, 2 Nov 2026 12:00:00 +0000\r\n\r\n",
 ];
 
-/// A Gmail-like server on the loopback, which tells the Threads if `tells`, or refuses to; and how many times it
-/// was asked.
-async fn gmail(tells: bool) -> (u16, Arc<AtomicUsize>) {
+/// A Gmail-like server on the loopback, which tells the Threads if `tells`, or refuses to; how many times it was
+/// asked for them, and the commands that changed labels.
+async fn gmail(tells: bool) -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let asked = Arc::new(AtomicUsize::new(0));
     let counted = asked.clone();
+    let labelling = Arc::new(Mutex::new(Vec::new()));
+    let labelled = labelling.clone();
     tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let (read, mut write) = tcp.into_split();
@@ -38,6 +40,12 @@ async fn gmail(tells: bool) -> (u16, Arc<AtomicUsize>) {
             if command.contains("X-GM-THRID") {
                 counted.fetch_add(1, Ordering::SeqCst);
             }
+            if command.contains("STORE") {
+                labelled
+                    .lock()
+                    .unwrap()
+                    .push(line.split_once(' ').unwrap().1.to_owned());
+            }
             let (untagged, status) = answer(&command, tells);
             write
                 .write_all(format!("{untagged}{tag} {status} done\r\n").as_bytes())
@@ -45,7 +53,7 @@ async fn gmail(tells: bool) -> (u16, Arc<AtomicUsize>) {
                 .unwrap();
         }
     });
-    (port, asked)
+    (port, asked, labelling)
 }
 
 /// What the server answers `command`, before its status.
@@ -64,14 +72,30 @@ fn answer(command: &str, tells: bool) -> (String, &'static str) {
         if tells {
             // As Gmail orders them, with a Flags change meanwhile.
             (
-                "* 1 FETCH (X-GM-THRID 1001 UID 1)\r\n* 2 FETCH (X-GM-THRID 1001 UID 2)\r\n\
-                 * 3 FETCH (FLAGS (\\Seen))\r\n* 3 FETCH (X-GM-THRID 1003 UID 3)\r\n"
+                "* 1 FETCH (X-GM-THRID 1001 X-GM-LABELS (\\Inbox Work) UID 1)\r\n\
+                 * 2 FETCH (X-GM-THRID 1001 X-GM-LABELS (\\Inbox \\Starred) UID 2)\r\n\
+                 * 3 FETCH (FLAGS (\\Seen))\r\n\
+                 * 3 FETCH (X-GM-THRID 1003 X-GM-LABELS (\"Rust for Linux\" Work) UID 3)\r\n"
                     .into(),
                 "OK",
             )
         } else {
             (String::new(), "BAD")
         }
+    } else if command.contains("X-GM-LABELS") && command.contains("STORE") {
+        (
+            "* 2 FETCH (X-GM-LABELS (\\Inbox Work) UID 2)\r\n".into(),
+            "OK",
+        )
+    } else if command.contains("X-GM-LABELS") {
+        // Since Work was added to 2.
+        (
+            "* 1 FETCH (X-GM-LABELS (\\Inbox Work) UID 1)\r\n\
+             * 2 FETCH (X-GM-LABELS (\\Inbox Work) UID 2)\r\n\
+             * 3 FETCH (X-GM-LABELS (\"Rust for Linux\" Work) UID 3)\r\n"
+                .into(),
+            "OK",
+        )
     } else if command.contains("FETCH") {
         let mut fetched = String::new();
         for (headers, n) in HEADERS.iter().zip(1..) {
@@ -109,7 +133,7 @@ async fn signed_in(port: u16) -> Session {
 
 #[tokio::test]
 async fn gmails_threads_join_what_references_dont() {
-    let (port, asked) = gmail(true).await;
+    let (port, asked, _) = gmail(true).await;
     let mut session = signed_in(port).await;
     let mut envelopes = session.newest(3, 50).await.unwrap();
     let threads: Vec<_> = envelopes.iter().map(|e| e.gmail_thread).collect();
@@ -133,7 +157,7 @@ async fn gmails_threads_join_what_references_dont() {
 
 #[tokio::test]
 async fn a_server_that_wont_tell_threads_is_still_listed() {
-    let (port, asked) = gmail(false).await;
+    let (port, asked, _) = gmail(false).await;
     let mut session = signed_in(port).await;
     let envelopes = session.newest(3, 50).await.unwrap();
     assert_eq!(envelopes.len(), 3);
@@ -141,5 +165,38 @@ async fn a_server_that_wont_tell_threads_is_still_listed() {
     assert_eq!(envelopes[1].subject, "Re: a", "the connection goes on");
     session.newest(3, 50).await.unwrap();
     assert_eq!(asked.load(Ordering::SeqCst), 1, "not asked again");
+    session.logout().await;
+}
+
+#[tokio::test]
+async fn gmails_labels_are_told_with_the_envelopes_and_changed_by_store() {
+    let (port, _, labelling) = gmail(true).await;
+    let mut session = signed_in(port).await;
+    let mut envelopes = session.newest(3, 50).await.unwrap();
+    let labels: Vec<Vec<String>> = envelopes.iter().map(|e| e.labels.clone()).collect();
+    assert_eq!(
+        labels,
+        [
+            vec!["Work".to_owned()],
+            vec![],
+            vec!["Rust for Linux".to_owned(), "Work".to_owned()]
+        ],
+        "Gmail's own, as \\Starred, left out"
+    );
+
+    session.set_gmail_label(&[2], "Work", true).await.unwrap();
+    session
+        .set_gmail_label(&[1, 3], "Rust for Linux", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        *labelling.lock().unwrap(),
+        [
+            "UID STORE 2 +X-GM-LABELS (\"Work\")",
+            "UID STORE 1,3 -X-GM-LABELS (\"Rust for Linux\")"
+        ]
+    );
+    session.refresh_gmail_labels(&mut envelopes).await.unwrap();
+    assert_eq!(envelopes[1].labels, ["Work"]);
     session.logout().await;
 }

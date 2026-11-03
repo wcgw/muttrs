@@ -295,6 +295,7 @@ mod tests {
             size: 0,
             has_attachments: false,
             gmail_thread: None,
+            labels: Vec::new(),
         }
     }
 
