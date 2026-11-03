@@ -11,6 +11,7 @@ mod pager;
 mod pictures;
 mod remote;
 mod sidebar;
+mod sign_in;
 mod theme;
 mod trust;
 mod ui;
@@ -32,6 +33,7 @@ muttrs, a terminal mail client
 Usage:
   muttrs               read and write mail, with the accounts in the configuration
   muttrs login NAME    sign in to account NAME, keeping its password or OAuth2 token in the keyring
+                       (`:login NAME`, in muttrs, signs in again with OAuth2 without leaving it)
   muttrs trust NAME    trust the certificates account NAME's servers present, as they are (self-signed ones)
   muttrs view FILE     show a Message saved as a file (.eml), in the Pager
   muttrs --help        show this

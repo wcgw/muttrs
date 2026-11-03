@@ -43,3 +43,7 @@ Outlook and Dovecot all report, and can be set in the configuration.
   proves its key. lettre takes no verifier of muttrs' own, so SMTP connects without verifying, then compares the
   certificate presented before signing in; lettre's lenient verifier still checks the handshake's signatures.
 - Outlook and Microsoft 365 work the same way, with Microsoft's endpoints and scopes, but are untested.
+- Signing in again doesn't mean leaving muttrs: `:login` runs the same flow from the UI, as it's needed once a
+  refresh token runs out (every 7 days for an app Google has "in testing"). A browser on another machine (over SSH)
+  can't reach the loopback port, so the address it ends at, which holds the code, can be pasted instead. Google no
+  longer shows codes to copy ("out of band"), and its device flow doesn't allow Gmail's scope.
