@@ -37,6 +37,9 @@ pub struct Task(u64);
 pub enum Request {
     /// List its Mailboxes again, and connect again now if it's offline.
     Refresh,
+    /// Forget what's kept of a Mailbox, its Envelopes listed (the cache's too) and which Messages each Label has, and
+    /// list it anew, as when it was first opened; and the Mailboxes, as [`Request::Refresh`] does.
+    Resync(String),
     /// Open a Mailbox, and list its newest Messages' Envelopes.
     Open(String),
     /// List older Envelopes of a Mailbox than those listed: as many again as were listed first.
@@ -147,6 +150,7 @@ impl Request {
             | Self::Delete { mailbox, .. }
             | Self::Archive { mailbox, .. } => Some(mailbox),
             Self::Refresh
+            | Self::Resync(_)
             | Self::Open(_)
             | Self::More(_)
             | Self::Search { .. }
@@ -703,6 +707,22 @@ impl Worker {
                 self.open = Some(mailbox.clone());
                 self.open(session, &mailbox).await?;
             }
+            Request::Resync(mailbox) => {
+                self.list(session).await?;
+                *counts_due = self.counts_due();
+                self.members.clear();
+                self.open = Some(mailbox.clone());
+                self.open_as(session, &mailbox, true).await?;
+                let label = self
+                    .mailboxes
+                    .iter()
+                    .find(|known| known.name == mailbox)
+                    .map_or_else(
+                        || crate::mailbox::decode(&mailbox),
+                        |known| known.label().to_owned(),
+                    );
+                (self.notify)(Update::Done(format!("Listed {label} anew")));
+            }
             Request::More(mailbox) => self.more(session, &mailbox).await?,
             Request::Search { mailbox, query } => self.search(session, mailbox, query).await?,
             Request::Body { mailbox, uid } => self.body(session, &mailbox, uid).await?,
@@ -1078,11 +1098,25 @@ impl Worker {
 
     /// Opens `mailbox`, and tells its Envelopes: the newest, the first time; what's new and changed since, after.
     async fn open(&mut self, session: &mut Session, mailbox: &str) -> Result<(), imap::Error> {
+        self.open_as(session, mailbox, false).await
+    }
+
+    /// Opens `mailbox`: lists its newest Messages' Envelopes, as when it's first opened or if `anew`, else brings
+    /// those listed up to date. Listed anew, what was listed stays until what replaces it is had: the connection
+    /// dropping meanwhile leaves it as it was.
+    async fn open_as(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        anew: bool,
+    ) -> Result<(), imap::Error> {
         // What the cache keeps is brought up to date, rather than fetched again.
-        self.listed_from_cache(mailbox);
+        if !anew {
+            self.listed_from_cache(mailbox);
+        }
         let selected = self.select(session, mailbox).await?;
         let window = self.windows.entry(mailbox.to_owned()).or_default();
-        if window.uid_validity != selected.uid_validity || window.envelopes.is_empty() {
+        if anew || window.uid_validity != selected.uid_validity || window.envelopes.is_empty() {
             *window = Window {
                 uid_validity: selected.uid_validity,
                 exists: selected.exists,

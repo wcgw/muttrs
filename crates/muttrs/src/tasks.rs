@@ -80,7 +80,7 @@ impl Tasks {
         let effect = effect(&request, labels);
         let at_once = matches!(
             request,
-            Request::Refresh | Request::Search { .. } | Request::Send { .. }
+            Request::Refresh | Request::Resync(_) | Request::Search { .. } | Request::Send { .. }
         );
         let task = client.send(request);
         self.queued.push(Queued {
@@ -223,6 +223,7 @@ fn effect(request: &Request, labels: &[Label]) -> Effect {
             None => Effect::None,
         },
         Request::Refresh
+        | Request::Resync(_)
         | Request::Open(_)
         | Request::More(_)
         | Request::Search { .. }
@@ -251,6 +252,7 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
     };
     match request {
         Request::Refresh => "Asking for what's new".to_owned(),
+        Request::Resync(mailbox) => format!("Listing {} anew", named(mailbox)),
         Request::Open(mailbox) => format!("Opening {}", named(mailbox)),
         Request::More(mailbox) => format!("Listing more of {}", named(mailbox)),
         Request::Search { mailbox, query } => format!("Searching {} for {query}", named(mailbox)),

@@ -1565,6 +1565,18 @@ impl App {
         self.prompt = Some(Prompt::new(kind, String::new()));
     }
 
+    /// Forgets what's kept of the open Mailbox, and lists it anew.
+    fn resync(&mut self) {
+        let Some(index) = &self.index else {
+            self.say("No Mailbox is open", true);
+            return;
+        };
+        let mailbox = index.mailbox.clone();
+        if let Some(state) = self.accounts.get_mut(index.account) {
+            state.ask(client::Request::Resync(mailbox));
+        }
+    }
+
     /// Asks every Account what's new, connecting again any that's offline.
     fn refresh(&mut self) {
         for account in &mut self.accounts {
@@ -1590,6 +1602,7 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => pager.bottom(),
             KeyCode::Char('n') => pager.next_match(true),
             KeyCode::Char('N') => pager.next_match(false),
+            KeyCode::Char('$') => self.refresh(),
             KeyCode::Char('/') => {
                 self.prompt = Some(Prompt::new(PromptKind::Search, String::new()));
             }
@@ -1829,6 +1842,7 @@ impl App {
             "q!" | "qa!" => self.quit = true,
             "help" | "h" => self.help(),
             "refresh" | "sync" => self.refresh(),
+            "refresh!" | "sync!" => self.resync(),
             "login" => self.login(argument),
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
@@ -2093,7 +2107,6 @@ impl App {
                         ("d a s", "delete (to Trash), archive, move to a Mailbox"),
                         ("Tab h l", "the sidebar, the Index"),
                         ("\\", "show or hide the sidebar"),
-                        ("$ :refresh", "ask for what's new"),
                         (":cd NAME", "open a Mailbox by name"),
                         (
                             ":select F",
@@ -2119,6 +2132,11 @@ impl App {
                         ("?", "these keys"),
                         (":q q", "quit once what's asked is done, or close the Pager"),
                         (":q!", "quit now"),
+                        ("$ :refresh", "ask for what's new"),
+                        (
+                            ":sync!",
+                            "forget what's kept of the open Mailbox, and list it anew",
+                        ),
                         (":login NAME", "sign in to an Account again, in the browser"),
                         (
                             "↑ ↓",
@@ -2751,7 +2769,15 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 6] = ["select ", "unselect ", "cd ", "refresh", "help", "quit"];
+const COMMANDS: [&str; 7] = [
+    "select ",
+    "unselect ",
+    "cd ",
+    "refresh",
+    "sync!",
+    "help",
+    "quit",
+];
 
 /// The ways to complete the command typed, `text`, each as the whole of it: its name, until there's a space after it;
 /// then, for `select` and `unselect`, the filter's last word, by the Messages `listed`.
@@ -2804,7 +2830,7 @@ mod tests {
 
     #[test]
     fn commands_then_filters_complete() {
-        assert_eq!(command_completions("s", &[]), ["select "]);
+        assert_eq!(command_completions("s", &[]), ["select ", "sync!"]);
         assert_eq!(command_completions("", &[]).len(), COMMANDS.len());
         assert_eq!(
             command_completions("unselect is:u", &[]),
