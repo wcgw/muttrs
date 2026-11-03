@@ -134,6 +134,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       left out of reply-all; a new Draft left as it was is dropped
 - [x] The mouse: the wheel scrolls what it's over, a click chooses, a second opens; themes from files, over a
       built-in theme (Catppuccin Mocha shipped as the example)
+- [x] `:select` and `:unselect` with a Filter (`from:`, `to:`, `cc:`, `subject:`, `is:`, `has:attachment`, `-`), as
+      ghd's; `Tab` completes the command, the qualifier and its values from what's listed
 - [x] The Index above the Pager, as mutt's `pager_index_lines` (a click there opens the Message clicked), and
       NeoMutt's `pager_read_delay`: a Message is marked read once shown that long (1 second by default)
 

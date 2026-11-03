@@ -25,6 +25,7 @@ use unicode_width::UnicodeWidthStr as _;
 use crate::addresses::AddressBook;
 use crate::compose::{self, Compose};
 use crate::config::Config;
+use crate::filter::{self, Filter};
 use crate::icons::Icons;
 use crate::index::{self, Index};
 use crate::overlay::{self, Outcome, Overlay, Verb};
@@ -1363,9 +1364,10 @@ impl App {
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 prompt.text.clear();
             }
-            KeyCode::Tab | KeyCode::BackTab if prompt.kind == PromptKind::To => {
-                let forward = key.code == KeyCode::Tab;
-                Self::complete(prompt, &self.addresses, forward);
+            KeyCode::Tab | KeyCode::BackTab
+                if matches!(prompt.kind, PromptKind::To | PromptKind::Command) =>
+            {
+                self.complete(key.code == KeyCode::Tab);
             }
             KeyCode::Char(character) => prompt.text.push(character),
             KeyCode::Enter => {
@@ -1392,7 +1394,12 @@ impl App {
 
     /// Completes the address being typed in `prompt` from `addresses`, going through the completions as `Tab` (or,
     /// backwards, `Shift-Tab`) is pressed again.
-    fn complete(prompt: &mut Prompt, addresses: &AddressBook, forward: bool) {
+    /// Completes what's typed last in the prompt, as its kind does: an address; or a command, then a filter's word.
+    /// Pressed again, it goes through the other ways, forward or back.
+    fn complete(&mut self, forward: bool) {
+        let Some(prompt) = &mut self.prompt else {
+            return;
+        };
         if let Some(completing) = &mut prompt.completing {
             let count = completing.candidates.len();
             completing.at = if forward {
@@ -1406,11 +1413,17 @@ impl App {
             );
             return;
         }
-        let (before, fragment) = match prompt.text.rsplit_once(',') {
-            Some((before, fragment)) => (format!("{before}, "), fragment),
-            None => (String::new(), prompt.text.as_str()),
+        let (before, candidates) = if prompt.kind == PromptKind::To {
+            match prompt.text.rsplit_once(',') {
+                Some((before, fragment)) => {
+                    (format!("{before}, "), self.addresses.complete(fragment))
+                }
+                None => (String::new(), self.addresses.complete(&prompt.text)),
+            }
+        } else {
+            let listed = self.index.as_ref().map_or(&[][..], Index::envelopes);
+            (String::new(), command_completions(&prompt.text, listed))
         };
-        let candidates = addresses.complete(fragment);
         if let Some(first) = candidates.first() {
             prompt.text = format!("{before}{first}");
             prompt.completing = Some(Completing {
@@ -1458,8 +1471,33 @@ impl App {
             "help" | "h" => self.help(),
             "refresh" | "sync" => self.refresh(),
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
+            "select" => self.select_by(true, argument),
+            "unselect" => self.select_by(false, argument),
             _ => self.say(&format!("Not a command: {command}"), true),
         }
+    }
+
+    /// Selects, or unselects, the Messages the Index lists that `filter` picks: all of them, without one.
+    fn select_by(&mut self, on: bool, filter: &str) {
+        let parsed = match filter.parse::<Filter>() {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.say(&error.to_string(), true);
+                return;
+            }
+        };
+        let Some(index) = &mut self.index else { return };
+        let (picked, changed) = index.select_where(on, |envelope| parsed.matches(envelope));
+        let done = if on { "selected" } else { "unselected" };
+        let text = match (picked, changed) {
+            (0, _) if filter.is_empty() => "No Message listed".to_owned(),
+            (0, _) => format!("No Message listed matches {filter}"),
+            (_, 0) if on => "All of those are selected already".to_owned(),
+            (_, 0) => "None of those is selected".to_owned(),
+            (_, 1) => format!("1 Message {done}"),
+            (_, changed) => format!("{changed} Messages {done}"),
+        };
+        self.say(&text, false);
     }
 
     /// Opens the Mailbox called `wanted` (by its name for people, or on the server), of the Account shown first.
@@ -1621,6 +1659,11 @@ impl App {
                         ("\\", "show or hide the sidebar"),
                         ("$ :refresh", "ask for what's new"),
                         (":cd NAME", "open a Mailbox by name"),
+                        (
+                            ":select F",
+                            "select what filter F picks: from:ann is:unread …",
+                        ),
+                        (":unselect F", "unselect what F picks; without F, all"),
                     ],
                 ),
                 (
@@ -2157,6 +2200,26 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
     outcome
 }
 
+/// The commands `:` completes, in the order offered; those that take more with a space after.
+const COMMANDS: [&str; 6] = ["select ", "unselect ", "cd ", "refresh", "help", "quit"];
+
+/// The ways to complete the command typed, `text`, each as the whole of it: its name, until there's a space after it;
+/// then, for `select` and `unselect`, the filter's last word, by the Messages `listed`.
+fn command_completions(text: &str, listed: &[muttrs_mail::Envelope]) -> Vec<String> {
+    match text.split_once(' ') {
+        None => COMMANDS
+            .iter()
+            .filter(|command| command.starts_with(text))
+            .map(|command| (*command).to_owned())
+            .collect(),
+        Some((name @ ("select" | "unselect"), filter)) => filter::completions(filter, listed)
+            .into_iter()
+            .map(|filter| format!("{name} {filter}"))
+            .collect(),
+        Some(_) => Vec::new(),
+    }
+}
+
 /// Where the mini-index's rows, its status line and the Pager go in `body`: `lines` rows above the Pager, the status
 /// line among them, at most half of `body`, and no more than the Index has `rows` for. None without room for a row
 /// and the status line.
@@ -2188,6 +2251,19 @@ fn mini_index(body: Rect, lines: u16, rows: usize) -> Option<(Rect, Rect, Rect)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_then_filters_complete() {
+        assert_eq!(command_completions("s", &[]), ["select "]);
+        assert_eq!(command_completions("", &[]).len(), COMMANDS.len());
+        assert_eq!(
+            command_completions("unselect is:u", &[]),
+            Vec::<String>::new(),
+            "nothing listed is Unread"
+        );
+        assert_eq!(command_completions("select -su", &[]), ["select -subject:"]);
+        assert_eq!(command_completions("cd In", &[]), Vec::<String>::new());
+    }
 
     #[test]
     fn the_mini_index_above_the_pager() {

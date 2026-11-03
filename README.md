@@ -108,6 +108,14 @@ They work as in mutt and vim. `?` shows the ones that apply.
 `F`, `U`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on a
 folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
 
+`:select` and `:unselect` select, or unselect, the Messages listed that a filter picks, folded or not (all of them,
+without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:` (part of a name or an address),
+`subject:` (part of it, in double quotes if it has spaces), `is:unread`, `is:read`, `is:flagged`, `is:answered`,
+`is:draft` and `has:attachment`; `-` before a term leaves out what it picks. A qualifier repeated picks either, as in
+`from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command line, `Tab` and `Shift-Tab`
+complete the command, then the filter's qualifier, then its value: the addresses of the Messages listed (by the
+address, or a word of the name), or `is:`'s values that would pick some of them.
+
 ## Searching
 
 `/` searches what the Index lists, by sender and subject, as you'd search in vim. `S` searches the whole Mailbox on
