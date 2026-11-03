@@ -126,6 +126,19 @@ impl PromptKind {
     }
 }
 
+/// What `u` undoes: Messages moved, archived or deleted to Trash, moved back from where they went.
+struct Undo {
+    account: usize,
+    went: client::Went,
+    /// Where they were, by its name on the server.
+    from: String,
+    /// Theirs: they're found by them where they went, with UIDs of their own there.
+    message_ids: Vec<String>,
+}
+
+/// How many moves `u` can undo, the last first.
+const UNDOES: usize = 100;
+
 /// What's being written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Writing {
@@ -221,6 +234,8 @@ pub(crate) struct App {
     assessments: Option<Assessments>,
     /// Whether the Pager shows its prose as the Heatmap of its Assessment.
     heatmap: bool,
+    /// What `u` undoes, the last done last.
+    undo: Vec<Undo>,
     /// When the UI started: the status line's spinner turns by it.
     started: Instant,
     /// Whether to quit once the Accounts' Tasks are done, as quitting asked; until a key's pressed.
@@ -294,6 +309,7 @@ impl App {
             assessor,
             assessments,
             heatmap: false,
+            undo: Vec::new(),
             started: Instant::now(),
             quitting: false,
             quit: false,
@@ -1084,6 +1100,20 @@ impl App {
         let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
+        // Deleted from Trash, they're deleted for good: there's no undoing that.
+        let in_trash = self.accounts.get(account).is_some_and(|state| {
+            state
+                .mailbox(&mailbox)
+                .is_some_and(|known| known.role == Some(Role::Trash))
+        });
+        if !in_trash {
+            let went = if archive {
+                client::Went::Archived
+            } else {
+                client::Went::Trash
+            };
+            self.remember_undo(account, &mailbox, &uids, went);
+        }
         let Some(state) = self.accounts.get_mut(account) else {
             return;
         };
@@ -1101,6 +1131,44 @@ impl App {
             }
         });
         self.taken_out(&uids);
+    }
+
+    /// Keeps, for `u` to undo, that `account`'s Messages `uids` of `mailbox` `went` elsewhere: those with a
+    /// `Message-ID`, which find them there.
+    fn remember_undo(&mut self, account: usize, mailbox: &str, uids: &[u32], went: client::Went) {
+        let message_ids: Vec<String> = self
+            .index
+            .iter()
+            .flat_map(|index| uids.iter().filter_map(|&uid| index.find(uid)))
+            .filter_map(|envelope| envelope.message_id.clone())
+            .collect();
+        if message_ids.is_empty() {
+            return;
+        }
+        if self.undo.len() == UNDOES {
+            self.undo.remove(0);
+        }
+        self.undo.push(Undo {
+            account,
+            went,
+            from: mailbox.to_owned(),
+            message_ids,
+        });
+    }
+
+    /// Moves the Messages last moved, archived or deleted to Trash back where they were.
+    fn undo(&mut self) {
+        let Some(undo) = self.undo.pop() else {
+            self.say("Nothing to undo", false);
+            return;
+        };
+        if let Some(state) = self.accounts.get_mut(undo.account) {
+            state.ask(client::Request::MoveBack {
+                went: undo.went,
+                to: undo.from,
+                message_ids: undo.message_ids,
+            });
+        }
     }
 
     /// Takes the Messages `uids` out of the Index, as they've gone elsewhere, going on to the next one in the Pager.
@@ -1258,6 +1326,12 @@ impl App {
         let Some(target) = self.moving_to(account, &mailbox).into_iter().nth(chosen) else {
             return;
         };
+        self.remember_undo(
+            account,
+            &mailbox,
+            &uids,
+            client::Went::Mailbox(target.name.clone()),
+        );
         if let Some(state) = self.accounts.get_mut(account) {
             state.ask(client::Request::Move {
                 mailbox,
@@ -1525,6 +1599,7 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('u') if !control => self.undo(),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
@@ -1640,6 +1715,7 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('u') if !control => self.undo(),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
@@ -2105,6 +2181,7 @@ impl App {
                         ("F U", "flag, mark Unread or read: the selected, or this"),
                         ("Y", "add or take off Labels: the selected, or this"),
                         ("d a s", "delete (to Trash), archive, move to a Mailbox"),
+                        ("u", "undo the last of those: move them back"),
                         ("Tab h l", "the sidebar, the Index"),
                         ("\\", "show or hide the sidebar"),
                         (":cd NAME", "open a Mailbox by name"),

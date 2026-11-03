@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use muttrs_mail::account::{Endpoint, Tls};
 use muttrs_mail::cache::{Cache, Listed};
-use muttrs_mail::client::{Client, Connection, Request, Update};
+use muttrs_mail::client::{Client, Connection, Request, Update, Went};
 use muttrs_mail::imap::{Credentials, Error, Session};
 use muttrs_mail::tls::Trust;
 use muttrs_mail::{AccountConfig, Envelope, Flags, Message, Role, tls};
@@ -1052,6 +1052,126 @@ async fn resyncing_lists_anew_what_was_kept_wrong() {
     let kept = Cache::new(Some(root.clone())).envelopes("INBOX").unwrap();
     assert_eq!(kept.envelopes[0].subject, "as it is", "kept anew");
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn moving_back_undoes_deleting_and_moving() {
+    let username = user("undo");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["kept", "deleted", "moved"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    session.create("Trash").await.unwrap();
+    session.create("Work").await.unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\ntrash = \"Trash\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 3 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    let of = |subject: &str| {
+        let envelope = listed.iter().find(|e| e.subject == subject).unwrap();
+        (envelope.uid, envelope.message_id.clone().unwrap())
+    };
+    let ((deleted, deleted_id), (moved, moved_id)) = (of("deleted"), of("moved"));
+    // What's said once the Task's finished: what it did, or why it didn't.
+    let said = async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>, task| {
+        let mut said = String::new();
+        until(updates, |update| match update {
+            Update::Done(text) | Update::Failed(text) => {
+                said.clone_from(text);
+                None
+            }
+            Update::Finished(finished) if *finished == task => Some(()),
+            _ => None,
+        })
+        .await;
+        said
+    };
+    let delete = client.send(Request::Delete {
+        mailbox: "INBOX".into(),
+        uids: vec![deleted],
+    });
+    assert_eq!(said(&mut updates, delete).await, "Moved a Message to Trash");
+    let elsewhere = client.send(Request::Move {
+        mailbox: "INBOX".into(),
+        uids: vec![moved],
+        to: "Work".into(),
+    });
+    assert_eq!(
+        said(&mut updates, elsewhere).await,
+        "Moved a Message to Work"
+    );
+    assert_eq!(session.counts("INBOX").await.unwrap().messages, 1);
+
+    // Undone, the last first.
+    let back = client.send(Request::MoveBack {
+        went: Went::Mailbox("Work".into()),
+        to: "INBOX".into(),
+        message_ids: vec![moved_id],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Inbox"
+    );
+    let back = client.send(Request::MoveBack {
+        went: Went::Trash,
+        to: "INBOX".into(),
+        message_ids: vec![deleted_id.clone()],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Inbox"
+    );
+    for (mailbox, messages) in [("INBOX", 3), ("Trash", 0), ("Work", 0)] {
+        assert_eq!(
+            session.counts(mailbox).await.unwrap().messages,
+            messages,
+            "{mailbox}"
+        );
+    }
+
+    // What's no longer where it went isn't found there.
+    let again = client.send(Request::MoveBack {
+        went: Went::Trash,
+        to: "INBOX".into(),
+        message_ids: vec![deleted_id],
+    });
+    assert_eq!(
+        said(&mut updates, again).await,
+        "Not moved back: they're no longer in Trash"
+    );
 }
 
 /// Waits for what the client says it did, failing if it says it couldn't.

@@ -114,14 +114,17 @@ They work as in mutt and vim. `?` shows the ones that apply.
 |---|---|
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` as in the Index · `q` back |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `Esc` unselect · `Tab` `h` the sidebar |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
 `F`, `U`, `Y`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on
-a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
+a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name. `u` moves the
+Messages last deleted, archived or moved back where they were, and the ones before them as it's pressed again, found
+where they went by their `Message-ID`; on Gmail, a Message archived goes back to the Inbox as a copy, as taking it
+out of All Mail would delete it. What's deleted from Trash is deleted for good: there's no undoing that.
 
 What muttrs asks of the server, it asks in the background, one Task at a time, in the order asked (a Message to read
 first): what you flag, delete, archive, move or label shows done at once, and stays so while the server catches up.

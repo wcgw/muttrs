@@ -228,6 +228,7 @@ fn effect(request: &Request, labels: &[Label]) -> Effect {
         | Request::More(_)
         | Request::Search { .. }
         | Request::Body { .. }
+        | Request::MoveBack { .. }
         | Request::Append { .. }
         | Request::Send { .. } => Effect::None,
     }
@@ -297,6 +298,9 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
             }
         }
         Request::Archive { uids, .. } => format!("Archiving {}", count(uids.len())),
+        Request::MoveBack {
+            to, message_ids, ..
+        } => format!("Moving {} back to {}", count(message_ids.len()), named(to)),
         Request::Append { role, .. } => match role {
             Role::Drafts => "Postponing to Drafts".to_owned(),
             Role::Sent => "Keeping a copy in Sent".to_owned(),

@@ -157,8 +157,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 
 Not there yet, roughly in the order a mutt user would reach for them:
 
-- [ ] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
-      where they went
+- [x] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
+      where they went, found there by their `Message-ID`
 - [ ] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`List-Unsubscribe`)
 - [ ] The Pager's full headers, and the Message's source (mutt's `h`)
 - [ ] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`)

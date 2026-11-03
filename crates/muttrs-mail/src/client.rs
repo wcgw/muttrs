@@ -119,6 +119,16 @@ pub enum Request {
         /// Their UIDs there.
         uids: Vec<u32>,
     },
+    /// Move Messages back to where they were moved from, as undoing it does: those with `message_ids` (and only
+    /// those), found by them where they went.
+    MoveBack {
+        /// Where they went.
+        went: Went,
+        /// Where they were, by its name on the server.
+        to: String,
+        /// Their `Message-ID`s.
+        message_ids: Vec<String>,
+    },
     /// Add a Message to the Mailbox with a Role, as a Draft or a copy of what was sent.
     Append {
         /// The Role of the Mailbox to add it to.
@@ -138,6 +148,17 @@ pub enum Request {
     },
 }
 
+/// Where Messages were moved to: a Mailbox, or where deleting or archiving puts them, as the worker knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Went {
+    /// A Mailbox, by its name on the server.
+    Mailbox(String),
+    /// Trash, as deleting moves them.
+    Trash,
+    /// Where archiving moves them: the Archive Mailbox, or on Gmail All Mail.
+    Archived,
+}
+
 impl Request {
     /// The Mailbox whose Messages it changes, if it does: their Flags or Labels, or which Messages it has.
     fn changes(&self) -> Option<&str> {
@@ -155,6 +176,7 @@ impl Request {
             | Self::More(_)
             | Self::Search { .. }
             | Self::Body { .. }
+            | Self::MoveBack { .. }
             | Self::Append { .. }
             | Self::Send { .. } => None,
         }
@@ -713,15 +735,10 @@ impl Worker {
                 self.members.clear();
                 self.open = Some(mailbox.clone());
                 self.open_as(session, &mailbox, true).await?;
-                let label = self
-                    .mailboxes
-                    .iter()
-                    .find(|known| known.name == mailbox)
-                    .map_or_else(
-                        || crate::mailbox::decode(&mailbox),
-                        |known| known.label().to_owned(),
-                    );
-                (self.notify)(Update::Done(format!("Listed {label} anew")));
+                (self.notify)(Update::Done(format!(
+                    "Listed {} anew",
+                    self.named(&mailbox)
+                )));
             }
             Request::More(mailbox) => self.more(session, &mailbox).await?,
             Request::Search { mailbox, query } => self.search(session, mailbox, query).await?,
@@ -766,13 +783,14 @@ impl Worker {
                 self.delete(session, &mailbox, &uids).await?;
             }
             Request::Archive { mailbox, uids } => {
-                let role = if self.account.gmail {
-                    Role::All
-                } else {
-                    Role::Archive
-                };
-                self.move_to(session, &mailbox, &uids, role).await?;
+                self.move_to(session, &mailbox, &uids, self.archive_role())
+                    .await?;
             }
+            Request::MoveBack {
+                went,
+                to,
+                message_ids,
+            } => self.move_back(session, &went, &to, &message_ids).await?,
             Request::Send { built, answers } => self.send(task, *built, answers),
             Request::Append {
                 role,
@@ -1409,6 +1427,78 @@ impl Worker {
         }
         self.refresh_window(session, mailbox).await?;
         self.count(session, target).await
+    }
+
+    /// The Mailbox named `name` on the server, by its name for people.
+    fn named(&self, name: &str) -> String {
+        self.mailboxes
+            .iter()
+            .find(|known| known.name == name)
+            .map_or_else(
+                || crate::mailbox::decode(name),
+                |known| known.label().to_owned(),
+            )
+    }
+
+    /// The Role of the Mailbox archiving moves Messages to: All Mail on Gmail, which archives by taking them out of
+    /// the Inbox; the Archive elsewhere.
+    fn archive_role(&self) -> Role {
+        if self.account.gmail {
+            Role::All
+        } else {
+            Role::Archive
+        }
+    }
+
+    /// Moves the Messages with `message_ids` in the Mailbox they `went` to back `to` where they were.
+    async fn move_back(
+        &mut self,
+        session: &mut Session,
+        went: &Went,
+        to: &str,
+        message_ids: &[String],
+    ) -> Result<(), imap::Error> {
+        let from = match went {
+            Went::Mailbox(name) => Some(name.clone()),
+            Went::Trash => self.with_role(Role::Trash),
+            Went::Archived => self.with_role(self.archive_role()),
+        };
+        let Some(from) = from else {
+            (self.notify)(Update::Failed("Nowhere to move them back from".into()));
+            return Ok(());
+        };
+        self.select(session, &from).await?;
+        let uids = session.with_message_ids(message_ids).await?;
+        if uids.is_empty() {
+            (self.notify)(Update::Failed(format!(
+                "Not moved back: they're no longer in {}",
+                self.named(&from)
+            )));
+            return Ok(());
+        }
+        // Taken out of All Mail, a Gmail Message is deleted: one archived goes back to the Inbox as a copy, which
+        // labels it so again.
+        let moved = if self.with_role(Role::All).as_deref() == Some(from.as_str()) {
+            session.copy(&uids, to).await
+        } else {
+            session.move_to(&uids, to).await
+        };
+        match moved {
+            Ok(()) => (self.notify)(Update::Done(format!(
+                "Moved {} back to {}",
+                count(uids.len()),
+                self.named(to)
+            ))),
+            Err(error) => (self.notify)(Update::Failed(format!("Moving back: {error}"))),
+        }
+        for mailbox in [from.as_str(), to] {
+            if self.windows.contains_key(mailbox) {
+                self.select(session, mailbox).await?;
+                self.refresh_window(session, mailbox).await?;
+            }
+            self.count(session, mailbox).await?;
+        }
+        Ok(())
     }
 
     async fn delete(

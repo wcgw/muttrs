@@ -372,6 +372,22 @@ impl Session {
         Ok(uids)
     }
 
+    /// The UIDs of the open Mailbox's Messages with any of `message_ids`, by their `Message-ID` header, in order.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn with_message_ids(&mut self, message_ids: &[String]) -> Result<Vec<u32>, Error> {
+        let mut uids = Vec::new();
+        // A few at a time: each is a term of the search, ORed with the others.
+        for some in message_ids.chunks(25) {
+            uids.extend(self.session.uid_search(any_message_id(some)).await?);
+        }
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
+    }
+
     /// The `Message-ID`s of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set, by UID: None for
     /// one without.
     ///
@@ -931,6 +947,16 @@ fn gmail_of(response: &Response<'_>) -> Option<(u32, Gmail)> {
 }
 
 /// `text` as an IMAP quoted string.
+/// A search for the Messages with any of `message_ids` (one at least): `OR HEADER Message-ID "<b>" HEADER Message-ID
+/// "<a>"`.
+fn any_message_id(message_ids: &[String]) -> String {
+    message_ids
+        .iter()
+        .map(|id| format!("HEADER Message-ID {}", quoted(id)))
+        .reduce(|others, term| format!("OR {term} {others}"))
+        .unwrap_or_else(|| "NOT ALL".to_owned())
+}
+
 fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -1004,6 +1030,17 @@ mod tests {
             "a Flags change, meanwhile"
         );
         assert_eq!(gmail_of(&parsed(b"* 3 EXISTS\r\n")), None);
+    }
+
+    #[test]
+    fn messages_are_searched_for_by_any_of_their_message_ids() {
+        let ids = |ids: &[&str]| ids.iter().map(|&id| id.to_owned()).collect::<Vec<_>>();
+        assert_eq!(any_message_id(&ids(&["a@x"])), "HEADER Message-ID \"a@x\"");
+        assert_eq!(
+            any_message_id(&ids(&["a@x", "b@x", "c@x"])),
+            "OR HEADER Message-ID \"c@x\" OR HEADER Message-ID \"b@x\" HEADER Message-ID \"a@x\""
+        );
+        assert_eq!(any_message_id(&[]), "NOT ALL", "none: nothing found");
     }
 
     #[test]
