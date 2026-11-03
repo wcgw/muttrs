@@ -109,7 +109,7 @@ fn words(filter: &str) -> Result<Vec<&str>, FilterError> {
 
 /// The qualifiers muttrs understands, in the order completion offers them: adding one to [`Condition::parse`] means
 /// adding it here.
-const QUALIFIERS: [&str; 6] = ["from", "to", "cc", "subject", "is", "has"];
+const QUALIFIERS: [&str; 7] = ["from", "to", "cc", "subject", "label", "is", "has"];
 
 /// The `is:` values, in the order completion offers them.
 const IS_VALUES: [&str; 5] = ["unread", "read", "flagged", "answered", "draft"];
@@ -126,6 +126,8 @@ enum Condition {
     Cc(String),
     /// `subject:`: the subject holds this, in lower case.
     Subject(String),
+    /// `label:`: it has the Label of this name, in lower case.
+    Label(String),
     /// `is:unread` (`true`) or `is:read`.
     Unread(bool),
     /// `is:flagged`.
@@ -147,6 +149,7 @@ impl Condition {
             "to" => Ok(Self::To(lower)),
             "cc" => Ok(Self::Cc(lower)),
             "subject" => Ok(Self::Subject(lower)),
+            "label" => Ok(Self::Label(lower)),
             "is" => match lower.as_str() {
                 "unread" => Ok(Self::Unread(true)),
                 "read" => Ok(Self::Unread(false)),
@@ -178,6 +181,10 @@ impl Condition {
             Self::To(text) => holds(&envelope.to, text),
             Self::Cc(text) => holds(&envelope.cc, text),
             Self::Subject(text) => envelope.subject.to_lowercase().contains(text.as_str()),
+            Self::Label(name) => envelope
+                .labels
+                .iter()
+                .any(|label| label.to_lowercase() == *name),
             Self::Unread(unread) => envelope.flags.seen != *unread,
             Self::Flagged => envelope.flags.flagged,
             Self::Answered => envelope.flags.answered,
@@ -201,10 +208,10 @@ fn holds(addresses: &[Address], text: &str) -> bool {
 /// The ways the last word of `input` can be completed, each as the whole of `input` with that word completed, in the
 /// order to offer them, negated if the word is, ignoring case: while it has no `:`, the qualifiers it starts; once it
 /// has, the values of its qualifier its value starts that would pick any of the Messages `listed`. An address's
-/// value is started by the address, or by a word of the name.
+/// value is started by the address, or by a word of the name; a value with spaces is completed in double quotes.
 pub(crate) fn completions(input: &str, listed: &[Envelope]) -> Vec<String> {
-    let word = input.rsplit(char::is_whitespace).next().unwrap_or_default();
-    let before = &input[..input.len() - word.len()];
+    let before = &input[..last_word(input)];
+    let word = &input[before.len()..];
     let (negation, term) = match word.strip_prefix('-') {
         Some(term) => ("-", term),
         None => ("", word),
@@ -218,19 +225,33 @@ pub(crate) fn completions(input: &str, listed: &[Envelope]) -> Vec<String> {
             .collect();
     };
     let qualifier = qualifier.to_ascii_lowercase();
-    let value = value.to_lowercase();
+    let value = value.trim_start_matches('"').to_lowercase();
     values(&qualifier, &value, listed)
         .into_iter()
         .filter(|candidate| {
-            Condition::parse(&qualifier, candidate)
+            Condition::parse(&qualifier, &candidate.replace('"', ""))
                 .is_ok_and(|condition| listed.iter().any(|envelope| condition.matches(envelope)))
         })
         .map(|candidate| format!("{before}{negation}{qualifier}:{candidate}"))
         .collect()
 }
 
-/// The values of `qualifier` that `value` starts, in order: `is:`'s and `has:`'s own, or the addresses of the
-/// Messages `listed`, sorted. Some may pick none of them.
+/// Where the last word of `input` starts: after its last space outside double quotes.
+fn last_word(input: &str) -> usize {
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, character) in input.char_indices() {
+        if character == '"' {
+            quoted = !quoted;
+        } else if character.is_whitespace() && !quoted {
+            start = at + character.len_utf8();
+        }
+    }
+    start
+}
+
+/// The values of `qualifier` that `value` starts, in order: `is:`'s and `has:`'s own, or the addresses or Labels of
+/// the Messages `listed`, sorted. Some may pick none of them.
 fn values(qualifier: &str, value: &str, listed: &[Envelope]) -> Vec<String> {
     let addresses = |of: fn(&Envelope) -> &[Address]| -> Vec<String> {
         listed
@@ -260,6 +281,21 @@ fn values(qualifier: &str, value: &str, listed: &[Envelope]) -> Vec<String> {
         "from" => addresses(|envelope| &envelope.from),
         "to" => addresses(|envelope| &envelope.to),
         "cc" => addresses(|envelope| &envelope.cc),
+        "label" => listed
+            .iter()
+            .flat_map(|envelope| &envelope.labels)
+            .filter(|label| label.to_lowercase().starts_with(value))
+            .map(|label| (label.to_lowercase(), label))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .map(|label| {
+                if label.contains(char::is_whitespace) {
+                    format!("\"{label}\"")
+                } else {
+                    label.clone()
+                }
+            })
+            .collect(),
         "is" => own(&IS_VALUES),
         "has" => own(&["attachment"]),
         _ => Vec::new(),
@@ -294,6 +330,7 @@ mod tests {
             size: 0,
             has_attachments: false,
             gmail_thread: None,
+            labels: Vec::new(),
         }
     }
 
@@ -301,6 +338,7 @@ mod tests {
         vec![
             Envelope {
                 has_attachments: true,
+                labels: vec!["GH".into(), "Rust for Linux".into()],
                 ..envelope(
                     1,
                     address(Some("Ann Lee"), "ann@example.com"),
@@ -314,6 +352,7 @@ mod tests {
                     ..Flags::default()
                 },
                 cc: vec![address(None, "cy@example.org")],
+                labels: vec!["Rustls".into()],
                 ..envelope(
                     2,
                     address(Some("Bob"), "bob@example.com"),
@@ -352,6 +391,11 @@ mod tests {
         assert_eq!(picked("is:unread"), [1]);
         assert_eq!(picked("is:flagged"), [2]);
         assert_eq!(picked("has:attachment"), [1]);
+        assert_eq!(picked("label:gh"), [1], "a Label's name, ignoring case");
+        assert_eq!(picked("label:\"rust for linux\""), [1]);
+        assert_eq!(picked("label:rust"), Vec::<u32>::new(), "the whole name");
+        assert_eq!(picked("label:gh label:rustls"), [1, 2]);
+        assert_eq!(picked("-label:gh"), [2, 3]);
     }
 
     #[test]
@@ -377,8 +421,8 @@ mod tests {
         );
         assert_eq!(problem("from:"), "from: needs a value");
         assert_eq!(
-            problem("label:work"),
-            "unknown qualifier label:; muttrs knows from:, to:, cc:, subject:, is:, has:"
+            problem("list:work"),
+            "unknown qualifier list:; muttrs knows from:, to:, cc:, subject:, label:, is:, has:"
         );
         assert_eq!(
             problem("is:starred"),
@@ -393,7 +437,7 @@ mod tests {
         let listed = listed();
         assert_eq!(
             completions("", &listed),
-            ["from:", "to:", "cc:", "subject:", "is:", "has:"]
+            ["from:", "to:", "cc:", "subject:", "label:", "is:", "has:"]
         );
         assert_eq!(completions("is:read -f", &listed), ["is:read -from:"]);
         assert_eq!(
@@ -417,5 +461,18 @@ mod tests {
         );
         assert_eq!(completions("has:", &listed), ["has:attachment"]);
         assert_eq!(completions("subject:lu", &listed), Vec::<String>::new());
+        assert_eq!(
+            completions("label:", &listed),
+            ["label:GH", "label:\"Rust for Linux\"", "label:Rustls"]
+        );
+        assert_eq!(
+            completions("is:read -label:ru", &listed),
+            ["is:read -label:\"Rust for Linux\"", "is:read -label:Rustls"]
+        );
+        assert_eq!(
+            completions("label:\"rust f", &listed),
+            ["label:\"Rust for Linux\""],
+            "a name with spaces, begun in quotes"
+        );
     }
 }

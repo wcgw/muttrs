@@ -653,10 +653,11 @@ impl Index {
         let mut room = width.saturating_sub(flags_width + 7 + who_width + 2);
         if row.repeated {
             // mutt's arrow, for the subject left out.
-            spans.push(Span::styled(
-                truncate(&format!("{}>", row.tree), room),
-                theme.dim,
-            ));
+            let arrow = truncate(&format!("{}>", row.tree), room);
+            room = room.saturating_sub(arrow.width() + 1);
+            spans.push(Span::styled(arrow, theme.dim));
+            spans.push(Span::raw(" "));
+            spans.extend(labels(&envelope.labels, room, theme));
             return Line::from(spans);
         }
         if !row.tree.is_empty() {
@@ -670,6 +671,10 @@ impl Index {
             room = room.saturating_sub(count.width());
             spans.push(Span::styled(count, theme.accent));
         }
+        // As Gmail shows them: before the subject, but leaving it most of the room.
+        let labels = labels(&envelope.labels, room / 2, theme);
+        room = room.saturating_sub(labels.iter().map(|span| span.content.width()).sum());
+        spans.extend(labels);
         let subject = if envelope.subject.is_empty() {
             "(no subject)"
         } else {
@@ -678,6 +683,24 @@ impl Index {
         spans.push(Span::styled(truncate(subject, room), text));
         Line::from(spans)
     }
+}
+
+/// The Labels named `labels`, as many as fit in `room` cells, each padded in `theme`'s label style and a space apart
+/// from what follows.
+fn labels(labels: &[String], room: usize, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut left = room;
+    for name in labels {
+        let label = format!(" {name} ");
+        let width = label.width() + 1;
+        if width > left {
+            break;
+        }
+        left -= width;
+        spans.push(Span::styled(label, theme.label));
+        spans.push(Span::raw(" "));
+    }
+    spans
 }
 
 /// `subject` without its `Re:`s and `Fwd:`s, as a reply's is compared with what it replies to's.
@@ -745,6 +768,7 @@ mod tests {
             size: 0,
             has_attachments: false,
             gmail_thread: None,
+            labels: Vec::new(),
         }
     }
 

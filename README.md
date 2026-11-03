@@ -114,22 +114,37 @@ They work as in mutt and vim. `?` shows the ones that apply.
 |---|---|
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `d` `a` `s` as in the Index · `q` back |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` as in the Index · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
-`F`, `U`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on a
-folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
+`F`, `U`, `Y`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on
+a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
 
 `:select` and `:unselect` select, or unselect, the Messages listed that a filter picks, folded or not (all of them,
 without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:` (part of a name or an address),
-`subject:` (part of it, in double quotes if it has spaces), `is:unread`, `is:read`, `is:flagged`, `is:answered`,
-`is:draft` and `has:attachment`; `-` before a term leaves out what it picks. A qualifier repeated picks either, as in
-`from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command line, `Tab` and `Shift-Tab`
-complete the command, then the filter's qualifier, then its value: the addresses of the Messages listed (by the
-address, or a word of the name), or `is:`'s values that would pick some of them.
+`subject:` (part of it, in double quotes if it has spaces), `label:` (a Label's whole name), `is:unread`, `is:read`,
+`is:flagged`, `is:answered`, `is:draft` and `has:attachment`; `-` before a term leaves out what it picks. A qualifier
+repeated picks either, as in `from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command
+line, `Tab` and `Shift-Tab` complete the command, then the filter's qualifier, then its value: the addresses of the
+Messages listed (by the address, or a word of the name), their Labels (in double quotes, with spaces), or `is:`'s
+values that would pick some of them.
+
+## Labels
+
+A Label is a Mailbox a Message can be in as well as the one it's listed in: on Gmail, its own labels; elsewhere, the
+Mailboxes under `Labels`, as Proton Mail's Bridge keeps them. The Index shows a Message's Labels before its subject,
+and `:select label:NAME` picks by them. `Y` lists the Account's Labels, marked `✓` where the Messages it acts on all
+have one and `–` where some do; `Enter`, or `Space` before anything's typed, adds a Label to all of them, or takes it
+off all of them if they all have it. Typing narrows the list, as `s`'s.
+
+On Gmail, the Labels come with the Messages (`X-GM-LABELS`). Elsewhere, a Message is labelled by copying it to the
+Label's Mailbox, and its Label taken off by expunging that copy; muttrs finds which Messages each Label's Mailbox
+has by their `Message-ID`, asking each time a Mailbox is opened, and listing again only those that changed since; a
+Message without a `Message-ID` shows none. On the Bridge, taking a Label off this way leaves the Message in its other
+Mailboxes, as moving it out of the Label's would ([docs/adr/0005-labels.md](docs/adr/0005-labels.md)).
 
 ## voight
 

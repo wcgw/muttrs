@@ -142,6 +142,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       ghd's; `Tab` completes the command, the qualifier and its values from what's listed
 - [x] The Index above the Pager, as mutt's `pager_index_lines` (a click there opens the Message clicked), and
       NeoMutt's `pager_read_delay`: a Message is marked read once shown that long (1 second by default)
+- [x] Labels: Gmail's (`X-GM-LABELS`), and the Mailboxes under `Labels` as Proton's Bridge keeps them (by
+      `Message-ID`); shown in the Index, added or taken off with `Y`, picked by `:select label:`
 
 ### Later
 

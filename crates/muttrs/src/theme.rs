@@ -50,6 +50,8 @@ pub(crate) struct Theme {
     pub(crate) read: Style,
     /// Flagged Messages' mark.
     pub(crate) flagged: Style,
+    /// A Label a Message has, in the Index: its name, padded a cell each side.
+    pub(crate) label: Style,
     /// A Message's subject in the Pager.
     pub(crate) subject: Style,
     /// Attachments, in the Pager's headers and their list.
@@ -169,6 +171,7 @@ impl Theme {
             unread: Style::new().fg(moon::FG).add_modifier(Modifier::BOLD),
             read: Style::new().fg(moon::FG_DARK),
             flagged: Style::new().fg(moon::ORANGE),
+            label: Style::new().fg(moon::CYAN).bg(moon::BG_HIGHLIGHT),
             subject: Style::new().fg(moon::FG).add_modifier(Modifier::BOLD),
             attachment: Style::new().fg(moon::TEAL),
             banner: Style::new().fg(moon::YELLOW),
@@ -223,6 +226,9 @@ impl Theme {
             unread: bold,
             read: Style::new(),
             flagged: Style::new().fg(Color::Yellow),
+            label: Style::new()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED),
             subject: bold,
             attachment: Style::new().fg(Color::Cyan),
             banner: Style::new().fg(Color::Yellow),
@@ -280,6 +286,7 @@ mod file {
         unread: Option<Spec>,
         read: Option<Spec>,
         flagged: Option<Spec>,
+        label: Option<Spec>,
         subject: Option<Spec>,
         attachment: Option<Spec>,
         banner: Option<Spec>,
@@ -394,6 +401,7 @@ mod file {
                 (&mut theme.unread, &ui.unread, "ui.unread"),
                 (&mut theme.read, &ui.read, "ui.read"),
                 (&mut theme.flagged, &ui.flagged, "ui.flagged"),
+                (&mut theme.label, &ui.label, "ui.label"),
                 (&mut theme.subject, &ui.subject, "ui.subject"),
                 (&mut theme.attachment, &ui.attachment, "ui.attachment"),
                 (&mut theme.banner, &ui.banner, "ui.banner"),

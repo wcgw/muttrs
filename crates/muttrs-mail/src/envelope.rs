@@ -75,6 +75,9 @@ pub struct Envelope {
     /// Gmail's ID of its Thread (`X-GM-THRID`), on Gmail: what threads it with Messages its References don't name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail_thread: Option<u64>,
+    /// The names of the Labels it has, in the order of the Account's (see [`crate::label`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl Envelope {
@@ -103,6 +106,7 @@ impl Envelope {
                 size,
                 has_attachments: false,
                 gmail_thread: None,
+                labels: Vec::new(),
             };
         };
         let root = parsed.root();
@@ -128,6 +132,7 @@ impl Envelope {
             size,
             has_attachments,
             gmail_thread: None,
+            labels: Vec::new(),
         }
     }
 }

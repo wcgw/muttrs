@@ -7,8 +7,8 @@ status: accepted
 `:select` and `:unselect` take a Filter: `qualifier:value` terms apart by spaces, as Gmail's search writes them, and
 as ghd's filters do. `from:`, `to:` and `cc:` pick a Message one of whose senders, or recipients in that header, has
 the value in their name or address, ignoring case; `subject:` one whose subject holds it (in double quotes if it has
-spaces); `is:` `unread`, `read`, `flagged`, `answered` or `draft` by its Flags; `has:attachment` one that likely has
-Attachments, as the Index's mark says. `-` before a term leaves out what it picks.
+spaces); `label:` one with the Label of that name, all of it, ignoring case; `is:` `unread`, `read`, `flagged`,
+`answered` or `draft` by its Flags; `has:attachment` one that likely has Attachments, as the Index's mark says. `-` before a term leaves out what it picks.
 
 A qualifier repeated picks any of its values (`from:ann from:bob`); different qualifiers, all of them (`from:ann
 is:unread`); negated terms, none. As in ghd, `is:` counts as several qualifiers for that rule, one a Flag, so

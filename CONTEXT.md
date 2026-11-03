@@ -13,7 +13,13 @@ _Avoid_: profile, login, identity
 
 **Mailbox**:
 A named collection of Messages on an Account's IMAP server. Gmail's labels are Mailboxes.
-_Avoid_: folder, label
+_Avoid_: folder
+
+**Label**:
+A Mailbox a Message can be in as well as the one it's listed in, shown with it: on Gmail, its own labels (not
+`[Gmail]/…` nor the Inbox); elsewhere, the Mailboxes under `Labels`, as Proton Mail's Bridge keeps them. Its name is
+the Mailbox's path without `Labels/`.
+_Avoid_: tag, keyword (IMAP's keywords are Flags, which muttrs doesn't show)
 
 **Role**:
 What a Mailbox is for, when it has a special use: Inbox, Sent, Drafts, Trash, Junk, Archive, All. The server says so
@@ -120,6 +126,8 @@ A Draft saved to the Drafts Mailbox, to finish later.
 
 - An **Account** has many **Mailboxes**; at most one **Mailbox** of an **Account** has each **Role**.
 - A **Message** belongs to one **Mailbox**. The same email in two Gmail labels is two **Messages**, one in each.
+- A **Message** has the **Labels** whose **Mailboxes** have it too: on Gmail, as Gmail says; elsewhere, a **Message**
+  there with the same `Message-ID`. Adding a **Label** copies it there, taking it off expunges that copy.
 - The **Index** shows the **Envelopes** of one **Mailbox**; the **Pager** shows one **Message** of it.
 - A **Message**'s body is one **Part**, or chosen among alternatives (HTML or plain text); its **Inline Images** and
   **Attachments** are other **Parts**.

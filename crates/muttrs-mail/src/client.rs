@@ -2,7 +2,7 @@
 //! connection drops, and a watcher that IDLEs on the Inbox for new mail. The UI never waits on the network: it
 //! sends [`Request`]s and is told [`Update`]s.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -14,6 +14,7 @@ use crate::cache::{Cache, Listed};
 use crate::compose::Built;
 use crate::envelope::{Envelope, Flags};
 use crate::imap::{self, Credentials, Session};
+use crate::label::{self, Label, Members};
 use crate::mailbox::{Counts, Mailbox, Role};
 use crate::{oauth2, secret, smtp, tls};
 
@@ -58,6 +59,17 @@ pub enum Request {
         /// The Flag to set or take off.
         flag: Flag,
         /// Whether to set it, rather than take it off.
+        on: bool,
+    },
+    /// Add a Label to Messages, or take it off them.
+    Label {
+        /// The Mailbox they're in, by its name on the server.
+        mailbox: String,
+        /// Their UIDs there.
+        uids: Vec<u32>,
+        /// The Label, by its Mailbox's name on the server.
+        label: String,
+        /// Whether to add it, rather than take it off.
         on: bool,
     },
     /// Move Messages to the Mailbox with a Role.
@@ -148,6 +160,8 @@ pub enum Update {
     Sent(Result<(), String>),
     /// Its Mailboxes, as the server lists them.
     Mailboxes(Vec<Mailbox>),
+    /// Its Labels, by name.
+    Labels(Vec<Label>),
     /// A Mailbox's Messages, counted.
     Counts {
         /// The Mailbox, by its name on the server.
@@ -232,6 +246,9 @@ impl Client {
             cache,
             notify,
             mailboxes: Vec::new(),
+            gmail: false,
+            labels: Vec::new(),
+            members: HashMap::new(),
             windows: HashMap::new(),
             open: None,
             selected: None,
@@ -401,6 +418,11 @@ struct Worker {
     cache: Cache,
     notify: Notify,
     mailboxes: Vec<Mailbox>,
+    /// Whether the server tells Gmail's labels (`X-GM-LABELS`), rather than keep Labels as Mailboxes of their own.
+    gmail: bool,
+    labels: Vec<Label>,
+    /// Which Messages each Label's Mailbox has, by its name, where the server doesn't tell Gmail's labels.
+    members: HashMap<String, Members>,
     windows: HashMap<String, Window>,
     /// The Mailbox the UI has open, opened again after reconnecting.
     open: Option<String>,
@@ -586,6 +608,12 @@ impl Worker {
                 }
                 self.refresh_window(session, &mailbox).await?;
             }
+            Request::Label {
+                mailbox,
+                uids,
+                label,
+                on,
+            } => self.label(session, &mailbox, &uids, &label, on).await?,
             Request::MoveTo {
                 mailbox,
                 uids,
@@ -696,6 +724,188 @@ impl Worker {
         self.mailboxes = session.mailboxes().await?;
         self.cache.keep_mailboxes(&self.mailboxes);
         (self.notify)(Update::Mailboxes(self.mailboxes.clone()));
+        self.gmail = session.is_gmail();
+        self.labels = label::of(&self.mailboxes, self.gmail);
+        let labels: HashSet<&str> = self
+            .labels
+            .iter()
+            .map(|label| label.mailbox.as_str())
+            .collect();
+        self.members
+            .retain(|mailbox, _| labels.contains(mailbox.as_str()));
+        (self.notify)(Update::Labels(self.labels.clone()));
+        Ok(())
+    }
+
+    /// Finds out which Messages each Label's Mailbox has, where it changed since it was last found out, and where
+    /// the server doesn't tell Gmail's labels: whether any had. It opens those Mailboxes.
+    async fn find_members(&mut self, session: &mut Session) -> Result<bool, imap::Error> {
+        if self.gmail {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for label in self.labels.clone() {
+            match self.find_members_of(session, &label.mailbox).await {
+                Ok(found) => changed |= found,
+                // A Label's Mailbox gone since it was listed isn't the connection failing.
+                Err(imap::Error::Protocol(async_imap::error::Error::No(why))) => {
+                    tracing::info!(
+                        label = label.name,
+                        why,
+                        "a Label's Messages couldn't be listed"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Finds out which Messages the Label's Mailbox `mailbox` has, if it changed since it was last found out:
+    /// whether it had.
+    async fn find_members_of(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+    ) -> Result<bool, imap::Error> {
+        let now = session.status(mailbox).await?;
+        if self
+            .members
+            .get(mailbox)
+            .is_some_and(|members| members.is_current(now))
+        {
+            return Ok(false);
+        }
+        let examined = session.examine(mailbox).await?;
+        self.selected = Some(mailbox.to_owned());
+        let uids = session.uids().await?;
+        let members = self.members.entry(mailbox.to_owned()).or_default();
+        let lacking = members.keep(examined.uid_validity, &uids);
+        if !lacking.is_empty() {
+            for (uid, message_id) in session.message_ids(&imap::uid_set(&lacking)).await? {
+                members.add(uid, message_id);
+            }
+        }
+        members.listed = Some(now);
+        Ok(true)
+    }
+
+    /// Gives `mailbox`'s Envelopes listed the Labels they have, as found out: Gmail's come with them.
+    fn label_window(&mut self, mailbox: &str) {
+        if let Some(window) = self.windows.get_mut(mailbox) {
+            labelled(
+                self.gmail,
+                &self.labels,
+                &self.members,
+                window.envelopes.values_mut(),
+            );
+        }
+    }
+
+    /// Adds the Label whose Mailbox is `label` to the Messages `uids` of `mailbox`, or takes it off them: on Gmail by
+    /// its labels, elsewhere by copying them to the Label's Mailbox, or expunging their copies there.
+    async fn label(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        uids: &[u32],
+        label: &str,
+        on: bool,
+    ) -> Result<(), imap::Error> {
+        let Some(label) = self
+            .labels
+            .iter()
+            .find(|known| known.mailbox == label)
+            .cloned()
+        else {
+            (self.notify)(Update::Failed(format!(
+                "There's no Label {}",
+                crate::mailbox::decode(label)
+            )));
+            self.tell_window(mailbox);
+            return Ok(());
+        };
+        let labelled = if self.gmail {
+            self.select(session, mailbox).await?;
+            session.set_gmail_label(uids, &label.mailbox, on).await
+        } else {
+            self.label_by_copies(session, mailbox, uids, &label, on)
+                .await
+        };
+        match labelled {
+            Ok(()) if on => (self.notify)(Update::Done(format!(
+                "Labelled {} {}",
+                count(uids.len()),
+                label.name
+            ))),
+            Ok(()) => (self.notify)(Update::Done(format!(
+                "Took {} off {}",
+                label.name,
+                count(uids.len())
+            ))),
+            Err(error) if !error.is_fatal() => {
+                (self.notify)(Update::Failed(format!("Labelling: {error}")));
+            }
+            Err(error) => return Err(error),
+        }
+        if !self.gmail {
+            self.find_members_of(session, &label.mailbox).await?;
+        }
+        // The window's Mailbox, which refreshing it takes to be open.
+        self.select(session, mailbox).await?;
+        self.refresh_window(session, mailbox).await?;
+        self.count(session, &label.mailbox).await
+    }
+
+    /// Adds `label` to the Messages `uids` of `mailbox` by copying those that lack it to its Mailbox, or takes it
+    /// off them by expunging their copies there, found by their `Message-ID`s.
+    async fn label_by_copies(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        uids: &[u32],
+        label: &Label,
+        on: bool,
+    ) -> Result<(), imap::Error> {
+        self.select(session, mailbox).await?;
+        let ids: HashMap<u32, String> = session
+            .message_ids(&imap::uid_set(uids))
+            .await?
+            .into_iter()
+            .filter_map(|(uid, id)| Some((uid, id?)))
+            .collect();
+        // What's there now, rather than when it was last found out.
+        self.find_members_of(session, &label.mailbox).await?;
+        let members = self
+            .members
+            .get(&label.mailbox)
+            .cloned()
+            .unwrap_or_default();
+        let theirs = members.message_ids();
+        if on {
+            let lacking: Vec<u32> = uids
+                .iter()
+                .copied()
+                .filter(|uid| ids.get(uid).is_none_or(|id| !theirs.contains(id.as_str())))
+                .collect();
+            if lacking.is_empty() {
+                return Ok(());
+            }
+            self.select(session, mailbox).await?;
+            return session.copy(&lacking, &label.mailbox).await;
+        }
+        if ids.is_empty() {
+            return Err(imap::Error::Missing("Message-ID, to find their copies by"));
+        }
+        let copies = members.uids_of(&ids.values().map(String::as_str).collect());
+        if copies.is_empty() {
+            return Ok(());
+        }
+        self.select(session, &label.mailbox).await?;
+        session.expunge(&copies).await?;
+        if let Some(members) = self.members.get_mut(&label.mailbox) {
+            members.forget(&copies);
+        }
         Ok(())
     }
 
@@ -776,6 +986,7 @@ impl Worker {
             window.exists = selected.exists;
             Self::update_window(session, window).await?;
         }
+        self.label_window(mailbox);
         self.tell_window(mailbox);
         let unread = session.unread().await?;
         if let Some(window) = self.windows.get(mailbox) {
@@ -786,6 +997,12 @@ impl Worker {
                     unread,
                 },
             });
+        }
+        // Last, so that what's new shows first: finding out takes a while the first time, and opens the Labels'
+        // Mailboxes.
+        if self.find_members(session).await? {
+            self.label_window(mailbox);
+            self.tell_window(mailbox);
         }
         Ok(())
     }
@@ -802,11 +1019,12 @@ impl Worker {
         }
         let uids = session.search(&query, self.account.gmail).await?;
         let newest = &uids[uids.len().saturating_sub(WINDOW as usize)..];
-        let envelopes = if newest.is_empty() {
+        let mut envelopes = if newest.is_empty() {
             Vec::new()
         } else {
             session.envelopes(&imap::uid_set(newest)).await?
         };
+        labelled(self.gmail, &self.labels, &self.members, &mut envelopes);
         (self.notify)(Update::Found {
             mailbox,
             query,
@@ -841,6 +1059,7 @@ impl Worker {
                     .extend(older.into_iter().map(|envelope| (envelope.uid, envelope)));
             }
         }
+        self.label_window(mailbox);
         self.tell_window(mailbox);
         Ok(())
     }
@@ -878,6 +1097,9 @@ impl Worker {
         session
             .add_gmail_threads(window.envelopes.values_mut())
             .await?;
+        session
+            .refresh_gmail_labels(window.envelopes.values_mut())
+            .await?;
         Ok(())
     }
 
@@ -888,6 +1110,7 @@ impl Worker {
     ) -> Result<(), imap::Error> {
         if let Some(window) = self.windows.get_mut(mailbox) {
             Self::update_window(session, window).await?;
+            self.label_window(mailbox);
             self.tell_window(mailbox);
         }
         Ok(())
@@ -1053,6 +1276,26 @@ impl Worker {
     }
 }
 
+/// Gives `envelopes` the Labels whose Mailboxes have them, by `members`, once what each has is found out; unless the
+/// server tells Gmail's labels (`gmail`), which come with them. Until then, they keep what they have, as cached.
+fn labelled<'a>(
+    gmail: bool,
+    labels: &[Label],
+    members: &HashMap<String, Members>,
+    envelopes: impl IntoIterator<Item = &'a mut Envelope>,
+) {
+    if gmail {
+        return;
+    }
+    let found: Option<Vec<(&Label, &Members)>> = labels
+        .iter()
+        .map(|label| Some((label, members.get(&label.mailbox)?)))
+        .collect();
+    if let Some(found) = found {
+        label::label(envelopes, &found);
+    }
+}
+
 /// "a Message", or "3 Messages".
 fn count(messages: usize) -> String {
     if messages == 1 {
@@ -1116,6 +1359,39 @@ async fn watch(
 mod tests {
     use super::*;
     use crate::account::OAuth2;
+
+    #[test]
+    fn envelopes_keep_their_labels_until_every_labels_messages_are_found_out() {
+        let label = |name: &str| Label {
+            name: name.to_owned(),
+            mailbox: format!("Labels/{name}"),
+        };
+        let labels = [label("GH"), label("RfL")];
+        let mut gh = Members::default();
+        gh.keep(1, &[1]);
+        gh.add(1, Some("a@x".into()));
+        let mut members = HashMap::from([("Labels/GH".to_owned(), gh)]);
+        let mut envelopes = [Envelope {
+            message_id: Some("a@x".into()),
+            labels: vec!["RfL".into()],
+            ..Envelope::read(1, Flags::default(), None, 0, b"")
+        }];
+        labelled(false, &labels, &members, &mut envelopes);
+        assert_eq!(
+            envelopes[0].labels,
+            ["RfL"],
+            "as cached: RfL's aren't known yet"
+        );
+        members.insert("Labels/RfL".to_owned(), Members::default());
+        labelled(true, &labels, &members, &mut envelopes);
+        assert_eq!(
+            envelopes[0].labels,
+            ["RfL"],
+            "Gmail's come with the Envelopes"
+        );
+        labelled(false, &labels, &members, &mut envelopes);
+        assert_eq!(envelopes[0].labels, ["GH"]);
+    }
 
     /// A client of the token endpoint at `token_url`.
     fn client_of(token_url: String) -> OAuth2 {

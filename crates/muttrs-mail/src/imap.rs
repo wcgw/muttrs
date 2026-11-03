@@ -17,6 +17,7 @@ use tokio::net::TcpStream;
 
 use crate::account::{Endpoint, Tls};
 use crate::envelope::{self, Envelope, Flags};
+use crate::label;
 use crate::mailbox::{Counts, Mailbox};
 use crate::tls::{self, Stream};
 
@@ -217,6 +218,12 @@ impl Session {
         self.can_idle
     }
 
+    /// Whether the server has Gmail's extensions, and tells them: its Threads and labels.
+    #[must_use]
+    pub fn is_gmail(&self) -> bool {
+        self.gmail
+    }
+
     /// Every Mailbox of the Account.
     ///
     /// # Errors
@@ -270,6 +277,23 @@ impl Session {
         })
     }
 
+    /// How `mailbox` stands, without opening it: how many Messages it has, its UIDVALIDITY and UIDNEXT.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn status(&mut self, mailbox: &str) -> Result<Selected, Error> {
+        let status = self
+            .session
+            .status(mailbox, "(MESSAGES UIDNEXT UIDVALIDITY)")
+            .await?;
+        Ok(Selected {
+            exists: status.exists,
+            uid_validity: status.uid_validity.unwrap_or(0),
+            uid_next: status.uid_next,
+        })
+    }
+
     /// How many Messages of the open Mailbox are Unread.
     ///
     /// # Errors
@@ -288,7 +312,6 @@ impl Session {
     /// If the server fails the command, as when it can't search that, or the connection.
     pub async fn search(&mut self, query: &str, gmail: bool) -> Result<Vec<u32>, Error> {
         let criterion = if gmail { "X-GM-RAW" } else { "TEXT" };
-        let quoted = format!("\"{}\"", query.replace('\\', "\\\\").replace('"', "\\\""));
         // Strictly, a quoted string is ASCII; servers that take UTF-8 at all take it so, said to be.
         let charset = if query.is_ascii() {
             ""
@@ -297,7 +320,7 @@ impl Session {
         };
         let mut uids: Vec<u32> = self
             .session
-            .uid_search(format!("{charset}{criterion} {quoted}"))
+            .uid_search(format!("{charset}{criterion} {}", quoted(query)))
             .await?
             .into_iter()
             .collect();
@@ -312,7 +335,21 @@ impl Session {
     /// If the server fails the command, or the connection.
     pub async fn select(&mut self, mailbox: &str) -> Result<Selected, Error> {
         let selected = self.session.select(mailbox).await?;
-        Ok(Selected {
+        Ok(Self::selected(mailbox, &selected))
+    }
+
+    /// Opens `mailbox` only to read it (EXAMINE): what's read of it stays Unread.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn examine(&mut self, mailbox: &str) -> Result<Selected, Error> {
+        let examined = self.session.examine(mailbox).await?;
+        Ok(Self::selected(mailbox, &examined))
+    }
+
+    fn selected(mailbox: &str, selected: &async_imap::types::Mailbox) -> Selected {
+        Selected {
             exists: selected.exists,
             // A server that doesn't say (GreenMail's response lacks the text RFC 3501 wants after the code, so it
             // isn't read) is taken never to renumber its Messages.
@@ -321,7 +358,44 @@ impl Session {
                 0
             }),
             uid_next: selected.uid_next,
-        })
+        }
+    }
+
+    /// The UIDs of all of the open Mailbox's Messages, in order.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn uids(&mut self) -> Result<Vec<u32>, Error> {
+        let mut uids: Vec<u32> = self.session.uid_search("ALL").await?.into_iter().collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    /// The `Message-ID`s of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set, by UID: None for
+    /// one without.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn message_ids(&mut self, uids: &str) -> Result<Vec<(u32, Option<String>)>, Error> {
+        let fetches: Vec<Fetch> = self
+            .session
+            .uid_fetch(uids, "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            .await?
+            .try_collect()
+            .await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|fetch| {
+                let uid = fetch.uid?;
+                let header = fetch.header().unwrap_or_default();
+                Some((
+                    uid,
+                    Envelope::read(uid, Flags::default(), None, 0, header).message_id,
+                ))
+            })
+            .collect())
     }
 
     /// The Envelopes of the newest `count` Messages of the open Mailbox, which has `exists`.
@@ -397,8 +471,9 @@ impl Session {
             .await
     }
 
-    /// Gives those of `envelopes`, of the open Mailbox, that lack it their Gmail Thread's ID, when the server is
-    /// Gmail's; on others, does nothing. A server that says it's Gmail's but won't tell isn't asked again.
+    /// Gives those of `envelopes`, of the open Mailbox, that lack it their Gmail Thread's ID, and their labels, when
+    /// the server is Gmail's; on others, does nothing. A server that says it's Gmail's but won't tell isn't asked
+    /// again.
     ///
     /// # Errors
     ///
@@ -418,7 +493,10 @@ impl Session {
             return Ok(());
         }
         let uids: Vec<u32> = lacking.iter().map(|envelope| envelope.uid).collect();
-        let Some(threads) = self.gmail_threads(&uid_set(&uids)).await? else {
+        let Some(mut told) = self
+            .gmail_fetch(&uid_set(&uids), "X-GM-THRID X-GM-LABELS")
+            .await?
+        else {
             tracing::debug!(
                 "the server has X-GM-EXT-1, but doesn't fetch X-GM-THRID: not asked again"
             );
@@ -426,9 +504,72 @@ impl Session {
             return Ok(());
         };
         for envelope in &mut lacking {
-            envelope.gmail_thread = threads.get(&envelope.uid).copied();
+            if let Some(gmail) = told.remove(&envelope.uid) {
+                envelope.gmail_thread = gmail.thread;
+                if let Some(labels) = gmail.labels {
+                    envelope.labels = labels;
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Gives `envelopes`, of the open Mailbox, the labels Gmail says they have now, when the server is Gmail's; on
+    /// others, does nothing.
+    ///
+    /// # Errors
+    ///
+    /// If the connection fails.
+    pub async fn refresh_gmail_labels<'a>(
+        &mut self,
+        envelopes: impl IntoIterator<Item = &'a mut Envelope>,
+    ) -> Result<(), Error> {
+        if !self.gmail {
+            return Ok(());
+        }
+        let mut envelopes: Vec<&mut Envelope> = envelopes.into_iter().collect();
+        if envelopes.is_empty() {
+            return Ok(());
+        }
+        let uids: Vec<u32> = envelopes.iter().map(|envelope| envelope.uid).collect();
+        let Some(mut told) = self.gmail_fetch(&uid_set(&uids), "X-GM-LABELS").await? else {
+            tracing::debug!("the server doesn't fetch X-GM-LABELS");
+            return Ok(());
+        };
+        for envelope in &mut envelopes {
+            if let Some(labels) = told.remove(&envelope.uid).and_then(|gmail| gmail.labels) {
+                envelope.labels = labels;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds Gmail's label `label` (its Mailbox's name on the server) to the Messages `uids` of the open Mailbox, or
+    /// takes it off them.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn set_gmail_label(
+        &mut self,
+        uids: &[u32],
+        label: &str,
+        on: bool,
+    ) -> Result<(), Error> {
+        let sign = if on { '+' } else { '-' };
+        let command = format!(
+            "UID STORE {} {sign}X-GM-LABELS ({})",
+            uid_set(uids),
+            quoted(label)
+        );
+        if self.gmail_command(command).await?.0 {
+            Ok(())
+        } else {
+            Err(Error::Protocol(async_imap::error::Error::No(format!(
+                "Gmail wouldn't change the label {}",
+                crate::mailbox::decode(label)
+            ))))
+        }
     }
 
     async fn with_gmail_threads(
@@ -439,15 +580,28 @@ impl Session {
         Ok(envelopes)
     }
 
-    /// The Gmail Thread IDs of the Messages of the open Mailbox whose UIDs are in `uids`, by UID; None if the server
-    /// refuses the command.
-    async fn gmail_threads(&mut self, uids: &str) -> Result<Option<HashMap<u32, u64>>, Error> {
-        // async-imap reads X-GM-THRID but has nothing that tells it: the command's responses are read as they come.
-        let tag = self
-            .session
-            .run_command(format!("UID FETCH {uids} (UID X-GM-THRID)"))
+    /// What Gmail tells of `items` (its extensions' fetch items: `X-GM-THRID X-GM-LABELS`) of the Messages of the
+    /// open Mailbox whose UIDs are in `uids`, by UID; None if the server refuses the command.
+    async fn gmail_fetch(
+        &mut self,
+        uids: &str,
+        items: &str,
+    ) -> Result<Option<HashMap<u32, Gmail>>, Error> {
+        let (done, told) = self
+            .gmail_command(format!("UID FETCH {uids} (UID {items})"))
             .await?;
-        let mut threads = HashMap::new();
+        Ok(done.then_some(told))
+    }
+
+    /// Runs `command`, reading what Gmail tells of Messages meanwhile, by UID: and whether the server did it.
+    async fn gmail_command(
+        &mut self,
+        command: String,
+    ) -> Result<(bool, HashMap<u32, Gmail>), Error> {
+        // async-imap reads X-GM-THRID and X-GM-LABELS but has nothing that tells them: the command's responses are
+        // read as they come.
+        let tag = self.session.run_command(command).await?;
+        let mut told = HashMap::new();
         loop {
             let response = self
                 .session
@@ -459,13 +613,13 @@ impl Session {
                 Response::Done {
                     tag: done, status, ..
                 } if *done == tag => {
-                    return Ok(matches!(status, Status::Ok).then_some(threads));
+                    return Ok((matches!(status, Status::Ok), told));
                 }
                 // What else comes meanwhile (EXISTS, Flags changed) is let go, as after async-imap's own commands:
                 // refreshing finds it.
                 parsed => {
-                    if let Some((uid, thread)) = gmail_thread(parsed) {
-                        threads.insert(uid, thread);
+                    if let Some((uid, gmail)) = gmail_of(parsed) {
+                        told.insert(uid, gmail);
                     }
                 }
             }
@@ -540,6 +694,16 @@ impl Session {
         }
         self.session.uid_copy(&set, target).await?;
         self.expunge(uids).await
+    }
+
+    /// Copies the Messages `uids` of the open Mailbox to `target`.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn copy(&mut self, uids: &[u32], target: &str) -> Result<(), Error> {
+        self.session.uid_copy(uid_set(uids), target).await?;
+        Ok(())
     }
 
     /// Marks the Messages `uids` of the open Mailbox Deleted, and expunges them: only them, where the server has
@@ -732,20 +896,43 @@ fn read_envelope(fetch: &Fetch) -> Option<Envelope> {
     ))
 }
 
-/// The UID and Gmail Thread ID a FETCH response tells, if it tells both.
-fn gmail_thread(response: &Response<'_>) -> Option<(u32, u64)> {
+/// What Gmail tells of a Message by its extensions, as far as it was asked.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Gmail {
+    /// Its Thread's ID (`X-GM-THRID`).
+    thread: Option<u64>,
+    /// The names of its labels (`X-GM-LABELS`), but Gmail's own.
+    labels: Option<Vec<String>>,
+}
+
+/// The UID a FETCH response tells, and what Gmail tells with it, if it tells any.
+fn gmail_of(response: &Response<'_>) -> Option<(u32, Gmail)> {
     let Response::Fetch(_, attributes) = response else {
         return None;
     };
-    let uid = attributes.iter().find_map(|attribute| match attribute {
-        AttributeValue::Uid(uid) => Some(*uid),
-        _ => None,
-    })?;
-    let thread = attributes.iter().find_map(|attribute| match attribute {
-        AttributeValue::GmailThrId(thread) => Some(*thread),
-        _ => None,
-    })?;
-    Some((uid, thread))
+    let mut uid = None;
+    let mut gmail = Gmail::default();
+    for attribute in attributes {
+        match attribute {
+            AttributeValue::Uid(told) => uid = Some(*told),
+            AttributeValue::GmailThrId(thread) => gmail.thread = Some(*thread),
+            AttributeValue::GmailLabels(labels) => {
+                let mut names: Vec<String> = labels
+                    .iter()
+                    .filter_map(|label| label::gmail_name(label))
+                    .collect();
+                names.sort_by(|a, b| label::order(a, b));
+                gmail.labels = Some(names);
+            }
+            _ => {}
+        }
+    }
+    (gmail != Gmail::default()).then_some((uid?, gmail))
+}
+
+/// `text` as an IMAP quoted string.
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// UIDs as a UID set, runs of consecutive UIDs as ranges: `1:3,7`.
@@ -784,20 +971,45 @@ mod tests {
     }
 
     #[test]
-    fn gmail_threads_from_fetch_responses() {
+    fn gmails_threads_and_labels_from_fetch_responses() {
         let parsed = |line: &'static [u8]| Response::parse(line).unwrap().1;
         assert_eq!(
-            gmail_thread(&parsed(
+            gmail_of(&parsed(
                 b"* 2 FETCH (X-GM-THRID 1266894439832287888 UID 7)\r\n"
             )),
-            Some((7, 1_266_894_439_832_287_888))
+            Some((
+                7,
+                Gmail {
+                    thread: Some(1_266_894_439_832_287_888),
+                    labels: None
+                }
+            ))
         );
         assert_eq!(
-            gmail_thread(&parsed(b"* 2 FETCH (UID 7 FLAGS (\\Seen))\r\n")),
+            gmail_of(&parsed(
+                b"* 2 FETCH (UID 7 X-GM-LABELS (\\Inbox Work \"Muy Importante\" &AMk-t&AOk-))\r\n"
+            )),
+            Some((
+                7,
+                Gmail {
+                    thread: None,
+                    labels: Some(vec!["Muy Importante".into(), "Work".into(), "Été".into()])
+                }
+            )),
+            "Gmail's own \\Inbox left out, the rest by name"
+        );
+        assert_eq!(
+            gmail_of(&parsed(b"* 2 FETCH (UID 7 FLAGS (\\Seen))\r\n")),
             None,
             "a Flags change, meanwhile"
         );
-        assert_eq!(gmail_thread(&parsed(b"* 3 EXISTS\r\n")), None);
+        assert_eq!(gmail_of(&parsed(b"* 3 EXISTS\r\n")), None);
+    }
+
+    #[test]
+    fn quoted_strings_escape_quotes_and_backslashes() {
+        assert_eq!(quoted("Work"), "\"Work\"");
+        assert_eq!(quoted("a \"b\" \\c"), "\"a \\\"b\\\" \\\\c\"");
     }
 
     #[test]

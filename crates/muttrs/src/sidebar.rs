@@ -20,6 +20,8 @@ pub(crate) struct AccountState {
     pub(crate) client: Client,
     pub(crate) connection: Connection,
     pub(crate) mailboxes: Vec<Mailbox>,
+    /// Its Labels, by name, as the server last told them.
+    pub(crate) labels: Vec<muttrs_mail::Label>,
     pub(crate) counts: HashMap<String, Counts>,
     /// Who it sends as.
     pub(crate) sender: muttrs_mail::compose::Sender,
