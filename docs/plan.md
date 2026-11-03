@@ -144,6 +144,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       NeoMutt's `pager_read_delay`: a Message is marked read once shown that long (1 second by default)
 - [x] Labels: Gmail's (`X-GM-LABELS`), and the Mailboxes under `Labels` as Proton's Bridge keeps them (by
       `Message-ID`); shown in the Index, added or taken off with `Y`, picked by `:select label:`
+- [x] The History of commands and searches, as vim's: `Up` and `Down` through what starts as typed, `Ctrl-p` and
+      `Ctrl-n` through all of it; kept between runs, and between muttrs running at once
 
 ### Later
 
