@@ -68,6 +68,10 @@ A line of `qualifier:value` terms, as Gmail's search writes them (`from:ann is:u
 Index; `:select` and `:unselect` act on what it picks.
 _Avoid_: pattern, query (that's what `S` sends the server)
 
+**History**:
+What was typed at the prompt before, kept between runs: commands (`:`), and searches (`/` and `S`, which share
+theirs). `Up` and `Down` go back through it.
+
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
 _Avoid_: preview, viewer, reader

@@ -6,6 +6,7 @@ mod compose;
 mod config;
 mod filter;
 mod heatmap;
+mod history;
 mod icons;
 mod index;
 mod login;

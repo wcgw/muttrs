@@ -112,7 +112,7 @@ They work as in mutt and vim. `?` shows the ones that apply.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser |
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager) · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
 | Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` as in the Index · `q` back |
@@ -131,6 +131,11 @@ repeated picks either, as in `from:ann from:bob`; different ones, both, as in `f
 line, `Tab` and `Shift-Tab` complete the command, then the filter's qualifier, then its value: the addresses of the
 Messages listed (by the address, or a word of the name), their Labels (in double quotes, with spaces), or `is:`'s
 values that would pick some of them.
+
+After `:`, `/` or `S`, `Up` and `Down` go back through what was typed there before that starts with what's typed, as
+in vim; `Ctrl-p` and `Ctrl-n` through all of it. Commands have a History of their own, searches (`/` and `S`) share
+one; the newest 200 of each are kept in `~/.local/state/muttrs/history` (or under `$XDG_STATE_HOME`), readable by
+you alone.
 
 ## Labels
 

@@ -27,6 +27,7 @@ use crate::assessment::{self, Assessed, Assessments, Assessor, Readiness, Window
 use crate::compose::{self, Compose};
 use crate::config::Config;
 use crate::filter::{self, Filter};
+use crate::history::{self, History, Recall};
 use crate::icons::Icons;
 use crate::index::{self, Index};
 use crate::login;
@@ -75,6 +76,8 @@ struct Prompt {
     text: String,
     /// The completions `Tab` goes through, while it does.
     completing: Option<Completing>,
+    /// Going back through the History, while `Up`, `Down`, `Ctrl-P` or `Ctrl-N` do.
+    recalling: Option<Recall>,
 }
 
 impl Prompt {
@@ -83,6 +86,7 @@ impl Prompt {
             kind,
             text,
             completing: None,
+            recalling: None,
         }
     }
 }
@@ -108,6 +112,17 @@ enum PromptKind {
     To,
     /// A new Message's subject, after whom it's to.
     Subject,
+}
+
+impl PromptKind {
+    /// The History of what's typed at it, if it has one.
+    fn history(self) -> Option<history::Kind> {
+        match self {
+            Self::Command => Some(history::Kind::Command),
+            Self::Search | Self::Server => Some(history::Kind::Search),
+            Self::Attach | Self::To | Self::Subject => None,
+        }
+    }
 }
 
 /// What's being written.
@@ -192,6 +207,8 @@ pub(crate) struct App {
     writing_to: Option<Vec<muttrs_mail::Address>>,
     /// The addresses seen, to complete with.
     addresses: AddressBook,
+    /// What was typed at the prompt before.
+    history: History,
     /// Where the sidebar and the Index were last drawn, for the mouse.
     drawn: (Rect, Rect),
     /// voight, to assess the Pager's prose, if it's on; and the Assessments it made.
@@ -261,6 +278,7 @@ impl App {
             } else {
                 AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
             },
+            history: History::load(xdg::state_dir().map(|state| state.join("history"))),
             drawn: (Rect::default(), Rect::default()),
             assessor,
             assessments,
@@ -1583,9 +1601,18 @@ impl App {
     }
 
     fn prompt_key(&mut self, key: KeyEvent) {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Up => return self.recall(true, true),
+            KeyCode::Down => return self.recall(false, true),
+            KeyCode::Char('p') if control => return self.recall(true, false),
+            KeyCode::Char('n') if control => return self.recall(false, false),
+            _ => {}
+        }
         let Some(prompt) = &mut self.prompt else {
             return;
         };
+        prompt.recalling = None;
         if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             prompt.completing = None;
         }
@@ -1613,6 +1640,15 @@ impl App {
             KeyCode::Char(character) => prompt.text.push(character),
             KeyCode::Enter => {
                 let Prompt { kind, text, .. } = self.prompt.take().expect("a prompt");
+                if let Some(history) = kind.history() {
+                    // As it's run: a search of what's listed or shown takes it as typed, spaces too.
+                    let entry = if kind == PromptKind::Search {
+                        text.as_str()
+                    } else {
+                        text.trim()
+                    };
+                    self.history.add(history, entry);
+                }
                 match kind {
                     PromptKind::Search if !text.is_empty() => {
                         if let Some(pager) = &mut self.pager {
@@ -1633,8 +1669,24 @@ impl App {
         }
     }
 
-    /// Completes the address being typed in `prompt` from `addresses`, going through the completions as `Tab` (or,
-    /// backwards, `Shift-Tab`) is pressed again.
+    /// Shows what was typed at the prompt before, from its History: the entry older than the one shown, or newer,
+    /// of those that start with what was typed if `matching` (as `Up` and `Down` do), else of all of them.
+    fn recall(&mut self, older: bool, matching: bool) {
+        let Some(prompt) = &mut self.prompt else {
+            return;
+        };
+        let Some(kind) = prompt.kind.history() else {
+            return;
+        };
+        prompt.completing = None;
+        let recalling = prompt
+            .recalling
+            .get_or_insert_with(|| Recall::new(prompt.text.clone()));
+        if let Some(entry) = recalling.step(self.history.entries(kind), older, matching) {
+            prompt.text = entry.to_owned();
+        }
+    }
+
     /// Completes what's typed last in the prompt, as its kind does: an address; or a command, then a filter's word.
     /// Pressed again, it goes through the other ways, forward or back.
     fn complete(&mut self, forward: bool) {
@@ -2001,6 +2053,14 @@ impl App {
                         ("?", "these keys"),
                         (":q q", "quit, or close the Pager"),
                         (":login NAME", "sign in to an Account again, in the browser"),
+                        (
+                            "↑ ↓",
+                            "after : / or S, what was typed before, starting the same",
+                        ),
+                        (
+                            "Ctrl-p Ctrl-n",
+                            "after : / or S, what was typed before, all of it",
+                        ),
                     ],
                 ),
             ],
