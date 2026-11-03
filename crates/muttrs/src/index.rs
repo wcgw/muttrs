@@ -313,6 +313,31 @@ impl Index {
         any
     }
 
+    /// Selects, or unselects, the Messages listed that `picks` picks, folded ones too: how many it picks, and how
+    /// many of those it selected, or unselected, that weren't, or were.
+    pub(crate) fn select_where(
+        &mut self,
+        on: bool,
+        picks: impl Fn(&Envelope) -> bool,
+    ) -> (usize, usize) {
+        let (mut picked, mut changed) = (0, 0);
+        for envelope in self.envelopes.iter().filter(|envelope| picks(envelope)) {
+            picked += 1;
+            let did = if on {
+                self.selected.insert(envelope.uid)
+            } else {
+                self.selected.remove(&envelope.uid)
+            };
+            changed += usize::from(did);
+        }
+        (picked, changed)
+    }
+
+    /// The Envelopes listed, in no particular order.
+    pub(crate) fn envelopes(&self) -> &[Envelope] {
+        &self.envelopes
+    }
+
     /// How many Messages are selected.
     pub(crate) fn selected(&self) -> usize {
         self.selected.len()
@@ -982,6 +1007,39 @@ mod tests {
         );
         let first: String = (0..60).map(|x| buffer[(x, 0)].symbol()).collect();
         assert!(first.trim_end().ends_with("m10"), "{first:?}");
+    }
+
+    #[test]
+    fn selecting_what_a_filter_picks_folded_or_not() {
+        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None, true);
+        index.set(
+            vec![
+                envelope(1, 1, "Lunch", "Ann"),
+                reply(2, 2, &[1]),
+                envelope(3, 3, "Report", "Bob"),
+            ],
+            3,
+        );
+        index.fold_all(true);
+        assert_eq!(
+            index.select_where(true, |e| e.uid != 1),
+            (2, 2),
+            "the folded reply too"
+        );
+        assert_eq!(index.targets(), [2, 3]);
+        assert_eq!(
+            index.select_where(true, |_| true),
+            (3, 1),
+            "two were already"
+        );
+        assert_eq!(index.select_where(false, |e| e.uid == 3), (1, 1));
+        assert_eq!(index.targets(), [1, 2]);
+        assert_eq!(
+            index.select_where(false, |e| e.uid == 3),
+            (1, 0),
+            "not selected now"
+        );
+        assert_eq!(index.select_where(true, |_| false), (0, 0));
     }
 
     #[test]

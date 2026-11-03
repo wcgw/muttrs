@@ -3,6 +3,7 @@
 mod addresses;
 mod compose;
 mod config;
+mod filter;
 mod icons;
 mod index;
 mod login;

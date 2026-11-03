@@ -57,6 +57,11 @@ The Messages of the Index the user marked to act on together; when there is one,
 moving act on all of it instead of the Message at the cursor.
 _Avoid_: tagged, marked
 
+**Filter**:
+A line of `qualifier:value` terms, as Gmail's search writes them (`from:ann is:unread`), that picks Messages of the
+Index; `:select` and `:unselect` act on what it picks.
+_Avoid_: pattern, query (that's what `S` sends the server)
+
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
 _Avoid_: preview, viewer, reader
