@@ -11,7 +11,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::assessment::{self, Window};
 use crate::config::Prefer;
+use crate::heatmap;
 use crate::icons::Icons;
 use crate::pictures::{self, Pictures};
 use crate::theme::Theme;
@@ -98,6 +100,10 @@ pub(crate) struct Pager {
     /// How many lines the Pager last had to draw on.
     height: usize,
     search: Option<Search>,
+    /// The prose of the body shown, as voight assesses it.
+    prose: Option<assessment::Key>,
+    /// The windows of the prose its Heatmap shades, while it shows.
+    heat: Option<Arc<[Window]>>,
 }
 
 impl Pager {
@@ -138,7 +144,7 @@ impl Pager {
                 })
                 .collect()
         });
-        Self {
+        let mut pager = Self {
             id,
             message,
             html,
@@ -150,6 +156,32 @@ impl Pager {
             scroll: 0,
             height: 0,
             search: None,
+            prose: None,
+            heat: None,
+        };
+        pager.prose = pager.prose_shown();
+        pager
+    }
+
+    fn prose_shown(&self) -> Option<assessment::Key> {
+        self.document().map(|document| Arc::from(document.prose()))
+    }
+
+    /// The prose of the body shown, as voight assesses it; `None` without a body.
+    pub(crate) fn prose(&self) -> Option<&assessment::Key> {
+        self.prose.as_ref()
+    }
+
+    /// Shades the body shown as the Heatmap of `heat`, the windows of its prose's Assessment; with `None`, not.
+    pub(crate) fn shade(&mut self, heat: Option<Arc<[Window]>>) {
+        let same = match (&self.heat, &heat) {
+            (None, None) => true,
+            (Some(shaded), Some(heat)) => Arc::ptr_eq(shaded, heat),
+            _ => false,
+        };
+        if !same {
+            self.heat = heat;
+            self.relayout();
         }
     }
 
@@ -216,6 +248,8 @@ impl Pager {
             _ => return false,
         };
         self.showing = other;
+        self.prose = self.prose_shown();
+        self.heat = None;
         self.relayout();
         self.scroll = 0;
         true
@@ -310,7 +344,11 @@ impl Pager {
         let mut slots = Vec::new();
         match rendering {
             Some(rendering) => {
-                lines.extend(rendering.lines);
+                let mut body = rendering.lines;
+                if let (Some(heat), Some(prose)) = (&self.heat, &self.prose) {
+                    heatmap::shade(&mut body, prose, heat, cx.theme);
+                }
+                lines.extend(body);
                 slots = rendering
                     .pictures
                     .into_iter()

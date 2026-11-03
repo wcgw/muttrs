@@ -30,3 +30,8 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: Tests
         run: cargo test --workspace
+      # As ghd checks it: muttrs builds, and its tests pass, with voight left out too.
+      - name: Lints without voight
+        run: cargo clippy --workspace --all-targets --no-default-features
+      - name: Tests without voight
+        run: cargo test --workspace --no-default-features

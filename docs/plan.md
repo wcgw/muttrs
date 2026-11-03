@@ -136,6 +136,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       left out of reply-all; a new Draft left as it was is dropped
 - [x] The mouse: the wheel scrolls what it's over, a click chooses, a second opens; themes from files, over a
       built-in theme (Catppuccin Mocha shipped as the example)
+- [x] voight, as in ghd: an Assessment of the prose the Pager shows (quotes left out) on the status line, and its
+      Heatmap (`H`); built in by default (`--features cuda`, `metal`, `wgpu`), `voight = "off"` to start without it
 - [x] `:select` and `:unselect` with a Filter (`from:`, `to:`, `cc:`, `subject:`, `is:`, `has:attachment`, `-`), as
       ghd's; `Tab` completes the command, the qualifier and its values from what's listed
 - [x] The Index above the Pager, as mutt's `pager_index_lines` (a click there opens the Message clicked), and

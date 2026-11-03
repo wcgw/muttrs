@@ -66,6 +66,18 @@ _Avoid_: pattern, query (that's what `S` sends the server)
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
 _Avoid_: preview, viewer, reader
 
+**Assessment**:
+voight's estimate, as a percentage, of how much of the prose the **Pager** shows was written by an LLM: the body's
+paragraphs, but what's quoted and what's preformatted; made only of prose long enough to mean something. Never
+evidence of authorship.
+_Avoid_: score, AI detection, verdict
+
+**Heatmap**:
+The prose an **Assessment** is of, as the **Pager** shows it, each window of prose voight scored on its own (paragraphs
+of about 100 to 400 words) shaded by its own estimate, from green at 0% through yellow to red at 100%; what it didn't
+score, like a quote, stays as it is.
+_Avoid_: highlighting, heat
+
 **Rendering**:
 A Message's body laid out for the Pager's width: styled lines, the Links in them, and slots for its images.
 

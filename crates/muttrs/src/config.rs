@@ -7,6 +7,7 @@ use anyhow::{Context as _, bail};
 use muttrs_mail::AccountConfig;
 use serde::Deserialize;
 
+use crate::assessment::Device;
 use crate::xdg;
 
 /// What the configuration file says.
@@ -49,6 +50,9 @@ pub(crate) struct Config {
     pub(crate) hide_thread_subjects: bool,
     /// Whether muttrs takes the mouse: its wheel scrolls, its clicks choose. Terminals then select text with Shift.
     pub(crate) mouse: bool,
+    /// Where voight assesses the Pager's prose: `"cpu"` (the default, if muttrs was built with voight), `"metal"`,
+    /// `"cuda"` or `"wgpu"` in a muttrs built for them, or `"off"`.
+    pub(crate) voight: Voight,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -72,7 +76,43 @@ impl Default for Config {
             threads: true,
             hide_thread_subjects: false,
             mouse: true,
+            voight: Voight::default(),
             accounts: Vec::new(),
+        }
+    }
+}
+
+/// The `voight` setting: `"off"`, or the device to run on.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Voight {
+    Off,
+    Cpu,
+    Metal,
+    Cuda,
+    Wgpu,
+}
+
+impl Default for Voight {
+    /// On the CPU, if muttrs was built with voight.
+    fn default() -> Self {
+        if cfg!(feature = "voight") {
+            Self::Cpu
+        } else {
+            Self::Off
+        }
+    }
+}
+
+impl Voight {
+    /// The device voight runs on; `None` when it's off.
+    pub(crate) fn device(self) -> Option<Device> {
+        match self {
+            Self::Off => None,
+            Self::Cpu => Some(Device::Cpu),
+            Self::Metal => Some(Device::Metal),
+            Self::Cuda => Some(Device::Cuda),
+            Self::Wgpu => Some(Device::Wgpu),
         }
     }
 }
@@ -166,6 +206,19 @@ impl Config {
         if config.pager_width < 20 {
             bail!("in {}: pager_width is at least 20", path.display());
         }
+        match config.voight.device() {
+            Some(device) if !cfg!(feature = "voight") => bail!(
+                "in {}: voight = \"{device}\", but this muttrs was built without voight: set voight = \"off\", \
+                 or build muttrs with its `voight` feature",
+                path.display()
+            ),
+            Some(device) if !device.is_built_in() => bail!(
+                "in {}: voight = \"{device}\", but this muttrs was built without {device} support: set voight = \
+                 \"cpu\", or build muttrs with `--features {device}`",
+                path.display()
+            ),
+            _ => {}
+        }
         Ok(config)
     }
 
@@ -193,6 +246,10 @@ mod tests {
         assert_eq!(config.icons, Auto::Detect);
         assert!(!config.load_remote_content);
         assert_eq!((config.pager_index_lines, config.pager_read_delay), (0, 1));
+        assert_eq!(
+            config.voight.device(),
+            cfg!(feature = "voight").then_some(Device::Cpu)
+        );
     }
 
     #[test]
@@ -207,6 +264,23 @@ mod tests {
         assert_eq!(config.images, Images::Blocks);
         assert_eq!(config.prefer, Prefer::Plain);
         assert_eq!(config.pager_width, 80);
+    }
+
+    #[test]
+    fn voight_runs_where_muttrs_was_built_to() {
+        assert_eq!(parse("voight = \"off\"\n").unwrap().voight, Voight::Off);
+        let cuda = parse("voight = \"cuda\"\n");
+        let refused = |cuda: anyhow::Result<Config>, why: &str| {
+            assert!(cuda.unwrap_err().to_string().contains(why));
+        };
+        if cfg!(feature = "cuda") {
+            assert_eq!(cuda.unwrap().voight, Voight::Cuda);
+        } else if cfg!(feature = "voight") {
+            refused(cuda, "without cuda support");
+        } else {
+            refused(cuda, "without voight");
+        }
+        assert!(parse("voight = \"tpu\"\n").is_err());
     }
 
     #[test]
