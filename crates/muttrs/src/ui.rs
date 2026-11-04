@@ -1700,17 +1700,51 @@ impl App {
             return;
         }
         let Some(index) = &mut self.index else { return };
-        if self.pending.take() == Some('z') {
-            match key.code {
-                KeyCode::Char('a' | 'A' | 'c' | 'o') => index.toggle_fold(),
-                KeyCode::Char('M') => index.fold_all(true),
-                KeyCode::Char('R') => index.fold_all(false),
-                _ => {}
+        match self.pending.take() {
+            Some('z') => {
+                match key.code {
+                    KeyCode::Char('a' | 'A' | 'c' | 'o') => index.toggle_fold(),
+                    KeyCode::Char('M') => index.fold_all(true),
+                    KeyCode::Char('R') => index.fold_all(false),
+                    _ => {}
+                }
+                return;
             }
-            return;
+            Some(sorting @ ('o' | 'O')) => {
+                let sort = match key.code {
+                    KeyCode::Char('d') => Some(index::Sort::Date),
+                    KeyCode::Char('f') => Some(index::Sort::Sender),
+                    KeyCode::Char('s') => Some(index::Sort::Subject),
+                    KeyCode::Char('z') => Some(index::Sort::Size),
+                    KeyCode::Char('t') => None,
+                    _ => return,
+                };
+                index.sort(sort, sorting == 'O');
+                let said = index.sorted().unwrap_or(if sort.is_some() {
+                    "Newest first"
+                } else {
+                    "In threads"
+                });
+                let said = format!("{}{}", said[..1].to_uppercase(), &said[1..]);
+                self.say(&said, false);
+                return;
+            }
+            _ => {}
         }
         match key.code {
             KeyCode::Char('z') => self.pending = Some('z'),
+            KeyCode::Char(sorting @ ('o' | 'O')) => {
+                self.pending = Some(sorting);
+                let way = if sorting == 'O' {
+                    "the other way: "
+                } else {
+                    ""
+                };
+                self.say(
+                    &format!("Sort {way}(d)ate (f)rom (s)ubject si(z)e (t)hreads"),
+                    false,
+                );
+            }
             KeyCode::Char('T') => {
                 let threaded = index.toggle_threads();
                 self.say(
@@ -2569,6 +2603,10 @@ impl App {
                     ("/ n N", "search senders and subjects"),
                     ("S", "search the server (Gmail's syntax on Gmail)"),
                     ("T", "threads, or newest first"),
+                    (
+                        "o O",
+                        "sort, or the other way: (d)ate (f)rom (s)ubject si(z)e (t)hreads",
+                    ),
                     ("za zM zR", "fold the thread, all, none"),
                     ("J K", "in the Pager: the next Message, the previous"),
                     ("Space", "select, or not, and move down"),
@@ -2930,7 +2968,10 @@ impl App {
             let limited = index
                 .limited()
                 .map_or_else(String::new, |filter| format!(" · limited to {filter}"));
-            format!(" · {messages}, {unread} Unread{listed}{limited}{selected}")
+            let sorted = index
+                .sorted()
+                .map_or_else(String::new, |sorted| format!(" · {sorted}"));
+            format!(" · {messages}, {unread} Unread{listed}{sorted}{limited}{selected}")
         } else {
             String::new()
         };

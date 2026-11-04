@@ -171,7 +171,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       the server as `S` does
 - [x] Piping a Message to a command (`|`), as patches to `git am` or `b4` (several as an mbox, the oldest first);
       a shell (`!`)
-- [ ] Sorting by sender, subject or size, besides threads and newest first
+- [x] Sorting by sender, subject or size, besides threads and newest first: `o`, or `O` the other way, then a
+      letter, as mutt's
 - [ ] Searching every Mailbox of an Account, not only the open one
 - [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV
 - [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
