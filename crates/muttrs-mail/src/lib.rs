@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod cache;
+pub mod carddav;
 pub mod client;
 pub mod compose;
 pub mod envelope;

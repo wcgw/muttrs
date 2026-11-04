@@ -52,6 +52,20 @@ pub struct AccountConfig {
     pub signature: Option<String>,
     /// A file holding the signature, rather than writing it here.
     pub signature_file: Option<PathBuf>,
+    /// The Account's address book on a CardDAV server, to complete addresses from.
+    pub carddav: Option<CardDavConfig>,
+}
+
+/// An address book on a CardDAV server, as the configuration says.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardDavConfig {
+    /// The address book's URL: the collection its cards are in.
+    pub url: String,
+    /// The user name to sign in with: the Account's, if it's not given.
+    pub username: Option<String>,
+    /// A command that prints the password: the Account's password, if it's not given.
+    pub password_command: Option<String>,
 }
 
 /// A server as the configuration writes it.
@@ -236,6 +250,8 @@ pub struct Account {
     pub identities: Vec<Address>,
     /// What goes under its Drafts.
     pub signature: Option<String>,
+    /// Its address book on a CardDAV server, if it has one.
+    pub carddav: Option<crate::carddav::CardDav>,
 }
 
 impl Account {
@@ -389,8 +405,14 @@ impl AccountConfig {
             sending_as(&self.identities, self.signature, self.signature_file).map_err(invalid)?;
         let gmail = self.provider == Some(Provider::Gmail)
             || imap.host.eq_ignore_ascii_case("imap.gmail.com");
+        let username = self.username.unwrap_or_else(|| self.email.clone());
+        let carddav = self
+            .carddav
+            .map(|book| address_book(book, &username, &auth))
+            .transpose()
+            .map_err(invalid)?;
         Ok(Account {
-            username: self.username.unwrap_or_else(|| self.email.clone()),
+            username,
             name: self.name,
             email: self.email,
             display_name: self.display_name,
@@ -404,8 +426,32 @@ impl AccountConfig {
             gmail,
             identities,
             signature,
+            carddav,
         })
     }
+}
+
+/// The address book `book` says, signed in to as `username` with `auth`'s password unless it says its own; or what's
+/// wrong with it.
+fn address_book(
+    book: CardDavConfig,
+    username: &str,
+    auth: &Auth,
+) -> Result<crate::carddav::CardDav, String> {
+    let password = match (book.password_command, auth) {
+        (Some(command), _) => PasswordSource::Command(command),
+        (None, Auth::Password(source)) => source.clone(),
+        (None, Auth::OAuth2(_)) => {
+            return Err(
+                "carddav needs a password_command: the Account signs in with OAuth2".into(),
+            );
+        }
+    };
+    Ok(crate::carddav::CardDav {
+        url: book.url,
+        username: book.username.unwrap_or_else(|| username.to_owned()),
+        password,
+    })
 }
 
 /// The addresses `identities` say, and the signature, written or in a file; or what's wrong with them.

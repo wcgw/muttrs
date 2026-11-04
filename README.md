@@ -232,6 +232,18 @@ On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
 > Lunch on Thursday?
 ```
 
+Addresses complete from those muttrs has seen; from a command, as mutt's `query_command` (`query_command = "khard
+email --parsable %s"`, or `"abook --mutt-query %s"`: `%s` is what's typed, and it prints a line of its own, then one
+an address, `address<TAB>name`), whose addresses come first once it answers; and from an Account's address book on a
+CardDAV server, read when muttrs starts:
+
+```toml
+[account.carddav]
+url = "https://dav.example.com/addressbooks/alex/contacts/" # the address book's collection
+# username = "alex"                                         # the Account's, by default
+# password_command = "pass show dav"                        # the Account's password, by default
+```
+
 The addresses muttrs has seen are kept in `~/.cache/muttrs/addresses.txt`, one a line, which vim and Neovim can
 complete from in the Draft's headers too (`Ctrl-X Ctrl-K`), with `autocmd FileType mail setlocal
 dictionary+=~/.cache/muttrs/addresses.txt iskeyword+=@-@,.,-`.

@@ -63,6 +63,10 @@ pub(crate) enum Event {
     SignIn(u64, sign_in::Progress),
     /// Unsubscribing from a mailing list by its one-click URL went so: what's said of it.
     Unsubscribed(Result<String, String>),
+    /// What the query command found for what was typed.
+    Queried(String, Vec<muttrs_mail::Address>),
+    /// An Account's address book's contacts, by the Account's name, or why they couldn't be had.
+    Contacts(String, Result<Vec<muttrs_mail::Address>, String>),
 }
 
 /// What the UI is set up with.
@@ -100,6 +104,8 @@ impl Prompt {
 struct Completing {
     /// What's before it: the addresses typed already.
     before: String,
+    /// What was typed, that it completes.
+    typed: String,
     candidates: Vec<String>,
     /// The one shown.
     at: usize,
@@ -257,6 +263,10 @@ pub(crate) struct App {
     writing_to: Option<Vec<muttrs_mail::Address>>,
     /// The addresses seen, to complete with.
     addresses: AddressBook,
+    /// What the query command found, and for what that was typed.
+    queried: Option<(String, Vec<muttrs_mail::Address>)>,
+    /// What the query command is asked for, while it is.
+    querying: Option<String>,
     /// What was typed at the prompt before.
     history: History,
     /// Where the sidebar and the Index were last drawn, for the mouse.
@@ -347,6 +357,8 @@ impl App {
             } else {
                 AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
             },
+            queried: None,
+            querying: None,
             history: History::load(xdg::state_dir().map(|state| state.join("history"))),
             drawn: (Rect::default(), Rect::default()),
             assessor,
@@ -582,6 +594,11 @@ impl App {
             Event::Account(account, update) => self.on_account(account, update),
             Event::SignIn(id, progress) => self.signing_in(id, progress),
             Event::Voight(said) => self.voight_said(said),
+            Event::Queried(asked, found) => self.take_queried(&asked, found),
+            Event::Contacts(account, contacts) => match contacts {
+                Ok(contacts) => self.addresses.add_contacts(contacts),
+                Err(why) => self.say(&format!("{account}'s address book: {why}"), true),
+            },
             Event::Unsubscribed(said) => match said {
                 Ok(said) => self.say(&said, false),
                 Err(said) => self.say(&said, true),
@@ -2242,24 +2259,87 @@ impl App {
             );
             return;
         }
-        let (before, candidates) = if prompt.kind == PromptKind::To {
-            match prompt.text.rsplit_once(',') {
-                Some((before, fragment)) => {
-                    (format!("{before}, "), self.addresses.complete(fragment))
+        let (before, typed, candidates) = if prompt.kind == PromptKind::To {
+            let (before, typed) = match prompt.text.rsplit_once(',') {
+                Some((before, typed)) => (format!("{before}, "), typed.trim().to_owned()),
+                None => (String::new(), prompt.text.trim().to_owned()),
+            };
+            // What the query command found first, once it has; then what's been seen.
+            let mut candidates: Vec<String> = match &self.queried {
+                Some((asked, found)) if *asked == typed => {
+                    found.iter().map(ToString::to_string).collect()
                 }
-                None => (String::new(), self.addresses.complete(&prompt.text)),
+                _ => Vec::new(),
+            };
+            for seen in self.addresses.complete(&typed) {
+                if !candidates.contains(&seen) {
+                    candidates.push(seen);
+                }
             }
+            if let Some(command) = &self.config.query_command
+                && !typed.is_empty()
+                && self
+                    .queried
+                    .as_ref()
+                    .is_none_or(|(asked, _)| *asked != typed)
+                && self.querying.as_ref() != Some(&typed)
+            {
+                self.querying = Some(typed.clone());
+                let (command, asked, events) =
+                    (command.clone(), typed.clone(), self.events.clone());
+                tokio::task::spawn_blocking(move || {
+                    let found = crate::addresses::query(&command, &asked);
+                    let _ = events.send(Event::Queried(asked, found));
+                });
+            }
+            (before, typed, candidates)
         } else {
             let listed = self.index.as_ref().map_or(&[][..], Index::envelopes);
-            (String::new(), command_completions(&prompt.text, listed))
+            let typed = prompt.text.clone();
+            (
+                String::new(),
+                typed,
+                command_completions(&prompt.text, listed),
+            )
         };
         if let Some(first) = candidates.first() {
             prompt.text = format!("{before}{first}");
             prompt.completing = Some(Completing {
                 before,
+                typed,
                 candidates,
                 at: 0,
             });
+        }
+    }
+
+    /// Takes what the query command found for `asked`: offered first, once Tab completes it again; at once, if it's
+    /// what's being completed.
+    fn take_queried(&mut self, asked: &str, found: Vec<muttrs_mail::Address>) {
+        if self.querying.as_deref() == Some(asked) {
+            self.querying = None;
+        }
+        self.queried = Some((asked.to_owned(), found));
+        let Some(prompt) = self
+            .prompt
+            .as_mut()
+            .filter(|prompt| prompt.kind == PromptKind::To)
+        else {
+            return;
+        };
+        let completing = match &prompt.completing {
+            Some(completing) if completing.typed == asked => Some(completing.before.clone()),
+            Some(_) => None,
+            None => match prompt.text.rsplit_once(',') {
+                Some((before, typed)) if typed.trim() == asked => Some(format!("{before}, ")),
+                None if prompt.text.trim() == asked => Some(String::new()),
+                _ => None,
+            },
+        };
+        if let Some(before) = completing {
+            prompt.text = format!("{before}{asked}");
+            prompt.completing = None;
+            self.complete(true);
         }
     }
 
@@ -3317,6 +3397,16 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     let mut states = Vec::new();
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
+        // The address book's contacts, aside, once at the start.
+        if let Some(book) = account.carddav.clone() {
+            let (events, name) = (events.clone(), name.clone());
+            tokio::spawn(async move {
+                let contacts = muttrs_mail::carddav::contacts(&book, &name)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = events.send(Event::Contacts(name, contacts));
+            });
+        }
         let sender_of_drafts = account.sender();
         let cache = muttrs_mail::cache::Cache::new(
             xdg::cache_dir().map(|cache| cache.join("accounts").join(&name)),

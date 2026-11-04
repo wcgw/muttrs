@@ -175,7 +175,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       letter, as mutt's
 - [x] Searching every Mailbox of an Account, not only the open one (`:search`): where it found Messages, how many
       in each; one chosen, what's found there
-- [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV
+- [x] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), asked aside
+      as `Tab` completes; CardDAV (`[account.carddav]`), its cards read when muttrs starts
 - [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
       Attachment
 
