@@ -1275,6 +1275,99 @@ async fn searching_every_mailbox_says_where_it_found_messages() {
     assert_eq!(done(&mut updates).await, "Moved a Message to Trash");
 }
 
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn mailboxes_are_created_renamed_and_deleted_and_messages_bounced() {
+    let username = user("boxes");
+    let to = user("bounced-to");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session
+        .append("INBOX", "()", &message("bounced"))
+        .await
+        .unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 31587, tls = \"starttls\" }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    let listed = async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>| {
+        let mut names = until(updates, |update| match update {
+            Update::Mailboxes(mailboxes) => Some(
+                mailboxes
+                    .iter()
+                    .map(|mailbox| mailbox.path.join("/"))
+                    .filter(|path| path.starts_with("Work"))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .await;
+        names.sort();
+        names
+    };
+    client.send(Request::CreateMailbox("Work/Reports".into()));
+    assert_eq!(done(&mut updates).await, "Created Work/Reports");
+    assert_eq!(listed(&mut updates).await, ["Work", "Work/Reports"]);
+    client.send(Request::RenameMailbox {
+        mailbox: "Work/Reports".into(),
+        to: "Work/Été".into(),
+    });
+    assert_eq!(done(&mut updates).await, "Renamed Reports Work/Été");
+    assert_eq!(listed(&mut updates).await, ["Work", "Work/Été"]);
+    client.send(Request::DeleteMailbox("Work/&AMk-t&AOk-".into()));
+    assert_eq!(done(&mut updates).await, "Deleted Été");
+    // `Work`, only ever its parent, may go with it, as Dovecot's does.
+    assert!(!listed(&mut updates).await.contains(&"Work/Été".to_owned()));
+
+    // Sent on as it is, under Resent- headers.
+    let original = message("bounced");
+    let from = muttrs_mail::Address {
+        name: None,
+        email: username.clone(),
+    };
+    let built = muttrs_mail::compose::bounced(
+        &original,
+        &from,
+        &[muttrs_mail::Address {
+            name: None,
+            email: to.clone(),
+        }],
+        "<resent@example.com>",
+    );
+    client.send(Request::Bounce {
+        built: Box::new(built),
+    });
+    let sent = until(&mut updates, |update| match update {
+        Update::Sent { sent, .. } => Some(sent.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(sent, Ok(()));
+    assert_eq!(delivered(&to).await, ["bounced"]);
+}
+
 /// Waits for what the client says it did, failing if it says it couldn't.
 async fn done(updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>) -> String {
     until(updates, |update| match update {

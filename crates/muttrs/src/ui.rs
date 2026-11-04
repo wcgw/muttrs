@@ -158,9 +158,17 @@ struct Shell {
     input: Option<Vec<u8>>,
 }
 
-/// Messages being fetched, to pipe to a command once they've all come.
+/// What's done with Messages once they're fetched.
+enum Then {
+    /// They're piped to this command.
+    Pipe(String),
+    /// They're sent on as they are to these (mutt's bounce).
+    Bounce(Vec<muttrs_mail::Address>),
+}
+
+/// Messages being fetched, to do something with once they've all come.
 struct Piping {
-    command: String,
+    then: Then,
     account: usize,
     mailbox: String,
     /// Their UIDs, in the order they're piped: the oldest first.
@@ -180,6 +188,8 @@ enum Writing {
     /// A reply to the mailing list the Message came through.
     ReplyList,
     Forward,
+    /// A forward with the Message as an Attachment of its own.
+    ForwardAttached,
     /// A Postponed Draft, resumed.
     Resume,
 }
@@ -285,8 +295,12 @@ pub(crate) struct App {
     /// What a search of every Mailbox found, while its list shows: the Account, the query, and the Mailboxes, by
     /// their names on the server, as listed.
     found_in: Option<(usize, String, Vec<String>)>,
-    /// The Messages being fetched, to pipe to a command once they've all come.
+    /// The Messages being fetched, to do something with once they've all come.
     piping: Option<Piping>,
+    /// The Messages being sent on as they are, by their Account and Task: to whom, as written.
+    bouncing: Vec<(usize, Task, String)>,
+    /// The open Mailbox, being renamed: its Account, and its new path (`Work/Reports`), to open it by.
+    renamed: Option<(usize, String)>,
     /// When the UI started: the status line's spinner turns by it.
     started: Instant,
     /// Whether to quit once the Accounts' Tasks are done, as quitting asked; until a key's pressed.
@@ -369,6 +383,8 @@ impl App {
             shell: None,
             found_in: None,
             piping: None,
+            bouncing: Vec::new(),
+            renamed: None,
             started: Instant::now(),
             quitting: false,
             quit: false,
@@ -644,16 +660,7 @@ impl App {
                     state.connection = connection;
                 }
             }
-            Update::Mailboxes(mailboxes) => {
-                state.mailboxes = mailboxes;
-                // The first Account's Inbox, to start with.
-                if self.index.is_none()
-                    && let Some(inbox) =
-                        state.with_role(Role::Inbox).map(|inbox| inbox.name.clone())
-                {
-                    self.open_mailbox(account, &inbox);
-                }
-            }
+            Update::Mailboxes(mailboxes) => self.listed(account, mailboxes),
             Update::Labels(labels) => state.labels = labels,
             Update::Counts { mailbox, counts } => {
                 state.counts.insert(mailbox, counts);
@@ -824,6 +831,10 @@ impl App {
                     Some((mailbox, uid)),
                 )
             }
+            Writing::ForwardAttached => (
+                muttrs_mail::compose::Draft::forward_attached(message, &me),
+                None,
+            ),
             Writing::Forward | Writing::New => (
                 muttrs_mail::compose::Draft::forward(message, &me, &text),
                 None,
@@ -971,8 +982,50 @@ impl App {
         }
     }
 
+    /// Takes `account`'s Mailboxes, as the server lists them: the open one renamed is opened by its new name, and the
+    /// first Account's Inbox, to start with.
+    fn listed(&mut self, account: usize, mailboxes: Vec<muttrs_mail::Mailbox>) {
+        let Some(state) = self.accounts.get_mut(account) else {
+            return;
+        };
+        state.mailboxes = mailboxes;
+        // The open Mailbox renamed: it's opened by its new name, once it's listed so.
+        if let Some((of, path)) = self.renamed.take_if(|(of, _)| *of == account) {
+            match state
+                .mailboxes
+                .iter()
+                .find(|mailbox| mailbox.path.join("/") == path)
+            {
+                Some(renamed) => {
+                    let name = renamed.name.clone();
+                    self.open_mailbox(account, &name);
+                    return;
+                }
+                None => self.renamed = Some((of, path)),
+            }
+        }
+        // The first Account's Inbox, to start with.
+        if self.index.is_none()
+            && let Some(inbox) = state.with_role(Role::Inbox).map(|inbox| inbox.name.clone())
+        {
+            self.open_mailbox(account, &inbox);
+        }
+    }
+
     /// Takes what came of sending the Draft of `account`'s Task `task`: done with it, or it's shown again.
     fn sent(&mut self, account: usize, task: Task, sent: Result<(), String>) {
+        if let Some(at) = self
+            .bouncing
+            .iter()
+            .position(|(of, asked, _)| *of == account && *asked == task)
+        {
+            let (_, _, whom) = self.bouncing.remove(at);
+            match sent {
+                Ok(()) => self.say(&format!("Bounced to {whom}"), false),
+                Err(why) => self.say(&format!("Not bounced: {why}"), true),
+            }
+            return;
+        }
         if let Some(at) = self
             .unsubscribing
             .iter()
@@ -1241,6 +1294,22 @@ impl App {
         } else {
             client::Request::Delete { mailbox, uids }
         });
+    }
+
+    /// Moves the Messages an action is for to Junk, as spam, going on to the next one.
+    fn junk(&mut self) {
+        let Some((account, mailbox, uids)) = self.targets() else {
+            return;
+        };
+        self.remember_undo(account, &mailbox, &uids, client::Went::Junk);
+        self.taken_out(&uids);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::MoveTo {
+                mailbox,
+                uids,
+                role: Role::Junk,
+            });
+        }
     }
 
     /// Keeps, for `u` to undo, that `account`'s Messages `uids` of `mailbox` `went` elsewhere: those with a
@@ -1927,20 +1996,33 @@ impl App {
         }
     }
 
-    /// Pipes the Messages an action is for to `command`: the one the Pager shows, as it came; else those of the
-    /// Index, the oldest first, once they're fetched.
+    /// Pipes the Messages an action is for to `command`.
     fn pipe(&mut self, command: &str) {
-        if command.is_empty() {
-            return;
+        if !command.is_empty() {
+            self.fetch_then(Then::Pipe(command.to_owned()));
         }
+    }
+
+    /// Sends the Messages an action is for on, as they are, to the addresses `to` writes (mutt's bounce).
+    fn bounce(&mut self, to: &str) {
+        match muttrs_mail::compose::parse_addresses(to) {
+            Ok(addresses) if !addresses.is_empty() => self.fetch_then(Then::Bounce(addresses)),
+            Ok(_) => self.say(":bounce takes whom to: :bounce ann@example.com", true),
+            Err(error) => self.say(&error.to_string(), true),
+        }
+    }
+
+    /// Does `then` with the Messages an action is for: the one the Pager shows, as it came; else those of the
+    /// Index, the oldest first, once they're fetched.
+    fn fetch_then(&mut self, then: Then) {
         if let Some(pager) = &self.pager
-            && self.shown.is_some()
-            && self.shown == self.opened
+            && let Some(shown) = self
+                .shown
+                .as_ref()
+                .filter(|shown| self.opened.as_ref() == Some(shown))
         {
-            self.shell = Some(Shell {
-                command: command.to_owned(),
-                input: Some(muttrs_mail::mbox::for_commands(&[pager.message().raw()])),
-            });
+            let (account, message) = (shown.account, Arc::new(pager.message().raw().to_vec()));
+            self.then(then, account, &[message]);
             return;
         }
         let Some((account, mailbox, mut uids)) = self.targets() else {
@@ -1959,7 +2041,7 @@ impl App {
             });
         }
         self.piping = Some(Piping {
-            command: command.to_owned(),
+            then,
             account,
             mailbox,
             uids,
@@ -1967,7 +2049,8 @@ impl App {
         });
     }
 
-    /// Takes Message `uid` of `account`'s `mailbox`, fetched, if it's to be piped; pipes them once they've all come.
+    /// Takes Message `uid` of `account`'s `mailbox`, fetched, if something's to be done with it; does it once
+    /// they've all come.
     fn pipe_when_fetched(
         &mut self,
         account: usize,
@@ -1987,7 +2070,7 @@ impl App {
             Err(why) => {
                 self.piping = None;
                 self.say(
-                    &format!("Not piped: a Message couldn't be fetched: {why}"),
+                    &format!("Not done: a Message couldn't be fetched: {why}"),
                     true,
                 );
                 return;
@@ -1999,15 +2082,49 @@ impl App {
         let Some(piping) = self.piping.take() else {
             return;
         };
-        let messages: Vec<&[u8]> = piping
+        let messages: Vec<Arc<Vec<u8>>> = piping
             .uids
             .iter()
-            .filter_map(|uid| piping.got.get(uid).map(|bytes| bytes.as_slice()))
+            .filter_map(|uid| piping.got.get(uid).cloned())
             .collect();
-        self.shell = Some(Shell {
-            input: Some(muttrs_mail::mbox::for_commands(&messages)),
-            command: piping.command,
-        });
+        self.then(piping.then, piping.account, &messages);
+    }
+
+    /// Does `then` with `messages`, of `account`, as RFC 5322 writes them.
+    fn then(&mut self, then: Then, account: usize, messages: &[Arc<Vec<u8>>]) {
+        match then {
+            Then::Pipe(command) => {
+                let raw: Vec<&[u8]> = messages.iter().map(|message| message.as_slice()).collect();
+                self.shell = Some(Shell {
+                    command,
+                    input: Some(muttrs_mail::mbox::for_commands(&raw)),
+                });
+            }
+            Then::Bounce(to) => {
+                let Some(state) = self.accounts.get_mut(account) else {
+                    return;
+                };
+                let Some(from) = state.sender.primary().cloned() else {
+                    return;
+                };
+                let whom = to
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for message in messages {
+                    let id = muttrs_mail::compose::message_id(&from.email);
+                    let built = muttrs_mail::compose::bounced(message, &from, &to, &id);
+                    let task = state.ask_as(
+                        client::Request::Bounce {
+                            built: Box::new(built),
+                        },
+                        Some(format!("Bouncing a Message to {whom}")),
+                    );
+                    self.bouncing.push((account, task, whom.clone()));
+                }
+            }
+        }
     }
 
     /// Runs `command` with the terminal; the shell itself (`$SHELL`) if it's empty.
@@ -2391,6 +2508,12 @@ impl App {
             "select" => self.select_by(true, argument),
             "limit" => self.limit_to(argument),
             "search" if !argument.is_empty() => self.search_all(argument),
+            "junk" => self.junk(),
+            "bounce" => self.bounce(argument),
+            "forward-attached" => self.write(Writing::ForwardAttached),
+            "create" if !argument.is_empty() => self.create_mailbox(argument),
+            "rename" if !argument.is_empty() => self.rename_mailbox(argument),
+            "delete-mailbox" if !argument.is_empty() => self.delete_mailbox(argument),
             "unselect" => self.select_by(false, argument),
             _ => self.say(&format!("Not a command: {command}"), true),
         }
@@ -2446,23 +2569,110 @@ impl App {
     /// Opens the Mailbox called `wanted` (by its name for people, or on the server), of the Account shown first.
     fn change_mailbox(&mut self, wanted: &str) {
         let account = self.index.as_ref().map_or(0, |index| index.account);
-        let found = self.accounts.get(account).and_then(|state| {
-            state
-                .mailboxes
-                .iter()
-                .find(|mailbox| {
-                    mailbox.label().eq_ignore_ascii_case(wanted)
-                        || mailbox.name.eq_ignore_ascii_case(wanted)
-                        || mailbox.path.join("/").eq_ignore_ascii_case(wanted)
-                })
-                .map(|mailbox| mailbox.name.clone())
-        });
+        let found = self
+            .mailbox_called(account, wanted)
+            .map(|mailbox| mailbox.name.clone());
         match found {
             Some(name) => {
                 self.close_pager();
                 self.open_mailbox(account, &name);
             }
             None => self.say(&format!("No Mailbox called {wanted}"), true),
+        }
+    }
+
+    /// The Mailbox of `account` called `wanted`: by its name for people, its path, or its name on the server.
+    fn mailbox_called(&self, account: usize, wanted: &str) -> Option<&muttrs_mail::Mailbox> {
+        self.accounts
+            .get(account)?
+            .mailboxes
+            .iter()
+            .find(|mailbox| {
+                mailbox.label().eq_ignore_ascii_case(wanted)
+                    || mailbox.name.eq_ignore_ascii_case(wanted)
+                    || mailbox.path.join("/").eq_ignore_ascii_case(wanted)
+            })
+    }
+
+    /// Creates a Mailbox, called `path` (`Work/Reports`), of the Account shown.
+    fn create_mailbox(&mut self, path: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        if self.mailbox_called(account, path).is_some() {
+            self.say(&format!("There's a Mailbox called {path} already"), true);
+            return;
+        }
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::CreateMailbox(path.to_owned()));
+        }
+    }
+
+    /// Renames the open Mailbox `to` (`Work/Reports`), unless it has a Role.
+    fn rename_mailbox(&mut self, to: &str) {
+        let Some(index) = &self.index else {
+            self.say("No Mailbox is open", true);
+            return;
+        };
+        let (account, mailbox) = (index.account, index.mailbox.clone());
+        let role = self
+            .accounts
+            .get(account)
+            .and_then(|state| state.mailbox(&mailbox))
+            .and_then(|mailbox| mailbox.role);
+        if let Some(role) = role {
+            self.say(
+                &format!(
+                    "{} keeps its name, as the Account's {}",
+                    role_name(role),
+                    role_name(role)
+                ),
+                true,
+            );
+            return;
+        }
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::RenameMailbox {
+                mailbox,
+                to: to.to_owned(),
+            });
+            self.renamed = Some((account, to.to_owned()));
+        }
+    }
+
+    /// Deletes the Mailbox called `wanted`, and its Messages, unless it has a Role; the Inbox opened in its place
+    /// if it was open.
+    fn delete_mailbox(&mut self, wanted: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        let Some(mailbox) = self.mailbox_called(account, wanted).cloned() else {
+            self.say(&format!("No Mailbox called {wanted}"), true);
+            return;
+        };
+        if let Some(role) = mailbox.role {
+            self.say(
+                &format!(
+                    "{} is the Account's {}: it isn't to be deleted",
+                    mailbox.label(),
+                    role_name(role)
+                ),
+                true,
+            );
+            return;
+        }
+        let open = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.account == account && index.mailbox == mailbox.name);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::DeleteMailbox(mailbox.name));
+        }
+        if open
+            && let Some(inbox) = self
+                .accounts
+                .get(account)
+                .and_then(|state| state.with_role(Role::Inbox))
+                .map(|inbox| inbox.name.clone())
+        {
+            self.close_pager();
+            self.open_mailbox(account, &inbox);
         }
     }
 
@@ -2762,6 +2972,10 @@ impl App {
                     ("Tab h l", "the sidebar, the Index"),
                     ("\\", "show or hide the sidebar"),
                     (":cd NAME", "open a Mailbox by name"),
+                    (":junk", "move to Junk, as spam: the selected, or this"),
+                    (":create NAME", "create a Mailbox (Work/Reports)"),
+                    (":rename NAME", "rename the open Mailbox"),
+                    (":delete-mailbox NAME", "delete a Mailbox, and its Messages"),
                     (
                         ":select F",
                         "select what filter F picks: from:ann is:unread label:work …",
@@ -2775,6 +2989,8 @@ impl App {
                 &[
                     ("m", "a new Message"),
                     ("r R f", "reply, reply to all, forward"),
+                    (":forward-attached", "forward the Message as an Attachment"),
+                    (":bounce TO", "send the Message on to TO, as it is"),
                     ("L", "reply to the mailing list"),
                     (":unsubscribe", "from the mailing list of the Message shown"),
                     ("y e", "with a Draft: send, edit again"),
@@ -3224,6 +3440,20 @@ impl App {
     }
 }
 
+/// A Role, as people name it.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Inbox => "Inbox",
+        Role::Drafts => "Drafts",
+        Role::Sent => "Sent",
+        Role::Archive => "Archive",
+        Role::All => "All Mail",
+        Role::Flagged => "Flagged",
+        Role::Junk => "Junk",
+        Role::Trash => "Trash",
+    }
+}
+
 /// The status line's spinner, while the Accounts have Tasks, and how long each of its frames shows.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPIN: Duration = Duration::from_millis(80);
@@ -3511,7 +3741,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 11] = [
+const COMMANDS: [&str; 17] = [
     "select ",
     "unselect ",
     "limit ",
@@ -3521,6 +3751,12 @@ const COMMANDS: [&str; 11] = [
     "search ",
     "unsubscribe",
     "source",
+    "junk",
+    "bounce ",
+    "forward-attached",
+    "create ",
+    "rename ",
+    "delete-mailbox ",
     "help",
     "quit",
 ];

@@ -85,6 +85,10 @@ impl Tasks {
                 | Request::Search { .. }
                 | Request::SearchAll { .. }
                 | Request::Send { .. }
+                | Request::Bounce { .. }
+                | Request::CreateMailbox(_)
+                | Request::RenameMailbox { .. }
+                | Request::DeleteMailbox(_)
         );
         let task = client.send(request);
         self.queued.push(Queued {
@@ -234,6 +238,10 @@ fn effect(request: &Request, labels: &[Label]) -> Effect {
         | Request::SearchAll { .. }
         | Request::Body { .. }
         | Request::MoveBack { .. }
+        | Request::CreateMailbox(_)
+        | Request::RenameMailbox { .. }
+        | Request::DeleteMailbox(_)
+        | Request::Bounce { .. }
         | Request::Append { .. }
         | Request::Send { .. } => Effect::None,
     }
@@ -313,6 +321,10 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
             role => format!("Saving to {}", with_role(*role)),
         },
         Request::Send { .. } => "Sending".to_owned(),
+        Request::Bounce { .. } => "Bouncing a Message".to_owned(),
+        Request::CreateMailbox(path) => format!("Creating {path}"),
+        Request::RenameMailbox { mailbox, to } => format!("Renaming {} {to}", named(mailbox)),
+        Request::DeleteMailbox(mailbox) => format!("Deleting {}", named(mailbox)),
     }
 }
 

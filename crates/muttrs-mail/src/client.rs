@@ -151,6 +151,22 @@ pub enum Request {
         /// Whether it's a Draft, to be flagged Draft as well as Seen.
         draft: bool,
     },
+    /// Create a Mailbox, named for people as `Work/Reports`.
+    CreateMailbox(String),
+    /// Rename a Mailbox.
+    RenameMailbox {
+        /// The Mailbox, by its name on the server.
+        mailbox: String,
+        /// Its new name, for people, as `Work/Reports`.
+        to: String,
+    },
+    /// Delete a Mailbox, and its Messages with it.
+    DeleteMailbox(String),
+    /// Send a Message on as it is (mutt's bounce): through the Account's SMTP server, without a copy in Sent.
+    Bounce {
+        /// The Message, with its `Resent-` headers.
+        built: Box<Built>,
+    },
     /// Send a Message through the Account's SMTP server, then keep a copy in Sent (unless the server does) and
     /// flag what it answers as answered.
     Send {
@@ -170,6 +186,8 @@ pub enum Went {
     Trash,
     /// Where archiving moves them: the Archive Mailbox, or on Gmail All Mail.
     Archived,
+    /// Junk, as taking them for spam moves them.
+    Junk,
 }
 
 impl Request {
@@ -191,6 +209,10 @@ impl Request {
             | Self::SearchAll { .. }
             | Self::Body { .. }
             | Self::MoveBack { .. }
+            | Self::CreateMailbox(_)
+            | Self::RenameMailbox { .. }
+            | Self::DeleteMailbox(_)
+            | Self::Bounce { .. }
             | Self::Append { .. }
             | Self::Send { .. } => None,
         }
@@ -735,7 +757,7 @@ impl Worker {
             return self.move_back_task(session, task, request, 0).await;
         }
         (self.notify)(Update::Started(task));
-        let sending = matches!(request, Request::Send { .. });
+        let sending = matches!(request, Request::Send { .. } | Request::Bounce { .. });
         let changes = request.changes().map(str::to_owned);
         let handled = self.handle(session, task, request, counts_due).await;
         if !sending {
@@ -828,7 +850,30 @@ impl Worker {
             }
             // Done by `move_back_task`, which tries it again.
             Request::MoveBack { .. } => {}
-            Request::Send { built, answers } => self.send(task, *built, answers),
+            Request::Send { built, answers } => self.send(task, *built, answers, true),
+            Request::Bounce { built } => self.send(task, *built, None, false),
+            Request::CreateMailbox(path) => {
+                let name = session.mailbox_named(&path);
+                let done = session.create(&name).await;
+                self.changed_mailboxes(session, done, format!("Created {path}"))
+                    .await?;
+            }
+            Request::RenameMailbox { mailbox, to } => {
+                let name = session.mailbox_named(&to);
+                let from = self.named(&mailbox);
+                let done = session.rename(&mailbox, &name).await;
+                self.changed_mailboxes(session, done, format!("Renamed {from} {to}"))
+                    .await?;
+            }
+            Request::DeleteMailbox(mailbox) => {
+                let from = self.named(&mailbox);
+                if self.selected.as_deref() == Some(mailbox.as_str()) {
+                    self.selected = None;
+                }
+                let done = session.delete(&mailbox).await;
+                self.changed_mailboxes(session, done, format!("Deleted {from}"))
+                    .await?;
+            }
             Request::Append {
                 role,
                 message,
@@ -854,9 +899,25 @@ impl Worker {
         Ok(())
     }
 
+    /// Tells `done`, a Mailbox created, renamed or deleted, as `said`, or why it wasn't; and lists the Mailboxes
+    /// again.
+    async fn changed_mailboxes(
+        &mut self,
+        session: &mut Session,
+        done: Result<(), imap::Error>,
+        said: String,
+    ) -> Result<(), imap::Error> {
+        match done {
+            Ok(()) => (self.notify)(Update::Done(said)),
+            Err(error) if error.is_fatal() => return Err(error),
+            Err(error) => (self.notify)(Update::Failed(format!("Not done: {error}"))),
+        }
+        self.list(session).await
+    }
+
     /// Sends `built`, Task `task`, in the background, so that reading goes on meanwhile; then asks for the copy in
-    /// Sent and the answered flag.
-    fn send(&self, task: Task, built: Built, answers: Option<(String, u32)>) {
+    /// Sent, if it's `kept` and the Account keeps one, and the answered flag.
+    fn send(&self, task: Task, built: Built, answers: Option<(String, u32)>, kept: bool) {
         let (account, credentials, notify, own) = (
             Arc::clone(&self.account),
             Arc::clone(&self.credentials),
@@ -872,7 +933,7 @@ impl Worker {
             }
             .await;
             if sent.is_ok() {
-                if account.copy_to_sent {
+                if kept && account.copy_to_sent {
                     own.send(Request::Append {
                         role: Role::Sent,
                         message: built.kept,
@@ -1594,6 +1655,7 @@ impl Worker {
             Went::Mailbox(name) => Some(name.clone()),
             Went::Trash => self.with_role(Role::Trash),
             Went::Archived => self.with_role(self.archive_role()),
+            Went::Junk => self.with_role(Role::Junk),
         };
         let Some(from) = from else {
             return Ok(MovedBack::Refused("Nowhere to move them back from".into()));

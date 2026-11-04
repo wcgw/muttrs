@@ -315,6 +315,34 @@ impl Draft {
         }
     }
 
+    /// A forward of `original` as an Attachment of its own (`message/rfc822`), as it came, rather than quoted.
+    #[must_use]
+    pub fn forward_attached(original: &Message, sender: &Sender) -> Self {
+        let named: String = original
+            .subject
+            .chars()
+            .map(|character| {
+                if character.is_alphanumeric() || " -_.".contains(character) {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let named = named.trim();
+        Self {
+            from: sender.primary().cloned(),
+            subject: prefixed("Fwd:", &original.subject),
+            body: format!("\n\n{}", spaced(&sender.signed()).trim_end()),
+            attachments: vec![Attachment {
+                name: format!("{}.eml", if named.is_empty() { "message" } else { named }),
+                mime_type: "message/rfc822".into(),
+                source: Source::Bytes(Arc::new(original.raw().to_vec())),
+            }],
+            ..Self::default()
+        }
+    }
+
     /// The Draft as text for `$EDITOR`: its headers, a blank line, its body. Attachments from files are `Attach:`
     /// lines; others aren't in the text.
     #[must_use]
@@ -500,6 +528,30 @@ impl Draft {
                 .map(|address| address.email.clone())
                 .collect(),
         })
+    }
+}
+
+/// `original`, a Message as RFC 5322 writes it, sent on as it is to `to`, from `from` (mutt's bounce): its own
+/// headers and body, under `Resent-` headers saying who sent it on, to whom and when (RFC 5322's 3.6.6), and its
+/// `Resent-Message-ID`, `message_id`.
+#[must_use]
+pub fn bounced(original: &[u8], from: &Address, to: &[Address], message_id: &str) -> Built {
+    let now = jiff::Zoned::now()
+        .strftime("%a, %-d %b %Y %H:%M:%S %z")
+        .to_string();
+    let recipients: Vec<String> = to.iter().map(|address| address.email.clone()).collect();
+    let mut message = format!(
+        "Resent-From: {}\r\nResent-To: {}\r\nResent-Date: {now}\r\nResent-Message-ID: {message_id}\r\n",
+        from.email,
+        recipients.join(", ")
+    )
+    .into_bytes();
+    message.extend_from_slice(original);
+    Built {
+        kept: message.clone(),
+        message,
+        from: from.email.clone(),
+        recipients,
     }
 }
 
@@ -964,5 +1016,46 @@ mod tests {
         assert_eq!(draft.cc, Vec::<Address>::new());
         assert_eq!(draft.subject, "Re: Patches");
         assert_eq!(draft.in_reply_to.as_deref(), Some("p@example.com"));
+    }
+
+    #[test]
+    fn a_bounce_is_the_message_as_it_came_under_resent_headers() {
+        let original = b"From: Ann <ann@example.com>\r\nSubject: Patches\r\n\r\nHi\r\n";
+        let from = address("Alex", "alex@example.com");
+        let built = bounced(
+            original,
+            &from,
+            &[address("Bob", "bob@example.com")],
+            "<b@example.com>",
+        );
+        let text = String::from_utf8(built.message.clone()).unwrap();
+        assert!(
+            text.starts_with(
+                "Resent-From: alex@example.com\r\nResent-To: bob@example.com\r\nResent-Date: "
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\r\nResent-Message-ID: <b@example.com>\r\nFrom: Ann <ann@example.com>\r\n"
+            )
+        );
+        assert!(text.ends_with("\r\n\r\nHi\r\n"));
+        assert_eq!(built.recipients, ["bob@example.com"]);
+        assert_eq!(built.from, "alex@example.com");
+    }
+
+    #[test]
+    fn a_forward_attached_is_the_message_as_an_attachment_of_its_own() {
+        let raw = b"From: Ann <ann@example.com>\r\nSubject: Re: a/b?\r\n\r\nHi\r\n".to_vec();
+        let original = Message::parse(raw.clone()).unwrap();
+        let draft = Draft::forward_attached(&original, &Sender::default());
+        assert_eq!(draft.subject, "Fwd: Re: a/b?");
+        assert_eq!(draft.attachments.len(), 1);
+        let attachment = &draft.attachments[0];
+        assert_eq!(attachment.mime_type, "message/rfc822");
+        assert_eq!(attachment.name, "Re_ a_b_.eml");
+        assert_eq!(attachment.source, Source::Bytes(Arc::new(raw)));
+        assert_eq!(draft.to, Vec::<Address>::new());
     }
 }

@@ -112,11 +112,11 @@ They work as in mutt and vim. `?` shows the ones that apply.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` run a command, or the shell · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` run a command, or the shell · `:cd NAME` open a Mailbox · `:create NAME` `:rename NAME` `:delete-mailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `o` `O` sort, or the other way · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `|` pipe to a command · `Esc` unselect · `Tab` `h` the sidebar |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `o` `O` sort, or the other way · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `:junk` move to Junk · `|` pipe to a command · `Esc` unselect · `Tab` `h` the sidebar |
 | Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `h` every header, as written · `:source` the Message as it came · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` `|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
-| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `L` reply to the mailing list · `f` forward |
+| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `L` reply to the mailing list · `f` forward · `:forward-attached` forward as an Attachment · `:bounce TO` send it on as it is |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
@@ -168,6 +168,12 @@ Messages listed (by the address, or a word of the name), their Labels (in double
 values that would pick some of them. `o`, then a letter, sorts the Index as mutt's does: by `d`ate (newest first), `f`rom (whom to, in Sent), `s`ubject,
 si`z`e (largest first), or in `t`hreads; `O` sorts the other way. Sorted otherwise than by date or in threads, it's
 out of threads.
+
+`:junk` moves the Messages an action is for to Junk, as `d` does to Trash (`u` undoes it). `:bounce TO` sends them on
+as they are, under `Resent-` headers, without a copy in Sent, as mutt's `b` does; `:forward-attached` forwards one
+as an Attachment of its own (`message/rfc822`) rather than quoted. `:create Work/Reports` makes a Mailbox,
+`:rename NAME` renames the open one, and `:delete-mailbox NAME` deletes one, its Messages with it; those with a Role
+(the Inbox, Trash and the like) keep their names, and stay.
 
 `|` pipes Messages to a command, which has the terminal until `Enter` brings muttrs back: the one the Pager shows,
 as it came, or those selected (else the one at the cursor, a folded thread whole), several as an mbox, the oldest

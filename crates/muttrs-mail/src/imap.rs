@@ -141,6 +141,8 @@ pub struct Session {
     can_idle: bool,
     /// Whether the server has Gmail's extensions (X-GM-EXT-1), so says which Thread each Message is in.
     gmail: bool,
+    /// What the server's Mailboxes' names are delimited by, as it last listed them.
+    delimiter: Option<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -203,6 +205,7 @@ impl Session {
             can_uid_expunge: false,
             can_idle: false,
             gmail: false,
+            delimiter: None,
         };
         let capabilities = session.session.capabilities().await?;
         session.can_move = capabilities.has_str("MOVE");
@@ -236,6 +239,9 @@ impl Session {
             .await?
             .try_collect()
             .await?;
+        if let Some(delimiter) = names.iter().find_map(|name| name.delimiter()) {
+            self.delimiter = Some(delimiter.to_owned());
+        }
         Ok(names
             .iter()
             .map(|name| {
@@ -749,6 +755,34 @@ impl Session {
         Ok(())
     }
 
+    /// Renames `mailbox` to `to`.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command (there's one called `to` already, say), or the connection.
+    pub async fn rename(&mut self, mailbox: &str, to: &str) -> Result<(), Error> {
+        self.session.rename(mailbox, to).await?;
+        Ok(())
+    }
+
+    /// Deletes `mailbox`, and its Messages with it.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn delete(&mut self, mailbox: &str) -> Result<(), Error> {
+        self.session.delete(mailbox).await?;
+        Ok(())
+    }
+
+    /// The name on the server of the Mailbox `path` names for people, as `Work/Reports`: its parts delimited as
+    /// the server delimits them, in modified UTF-7.
+    #[must_use]
+    pub fn mailbox_named(&self, path: &str) -> String {
+        let delimiter = self.delimiter.as_deref().unwrap_or("/");
+        crate::mailbox::encode(&path.split('/').collect::<Vec<_>>().join(delimiter))
+    }
+
     /// Adds `message` to `mailbox`, with `flags` (as `(\Seen)`).
     ///
     /// # Errors
@@ -778,6 +812,7 @@ impl Session {
             can_uid_expunge,
             can_idle,
             gmail,
+            delimiter,
         } = self;
         let mut handle = session.idle();
         handle.init().await?;
@@ -794,6 +829,7 @@ impl Session {
                 can_uid_expunge,
                 can_idle,
                 gmail,
+                delimiter,
             },
             changed,
         ))

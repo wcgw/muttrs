@@ -177,8 +177,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       in each; one chosen, what's found there
 - [x] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), asked aside
       as `Tab` completes; CardDAV (`[account.carddav]`), its cards read when muttrs starts
-- [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
-      Attachment
+- [x] Marking as Junk (`:junk`); creating, renaming and deleting Mailboxes (`:create`, `:rename`,
+      `:delete-mailbox`); bouncing (`:bounce`, as mutt's `b`); forwarding as an Attachment (`:forward-attached`)
 
 ### Later
 
