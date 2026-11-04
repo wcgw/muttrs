@@ -125,6 +125,9 @@ pub struct Selected {
     pub uid_validity: u32,
     /// The lowest UID a Message added to it can get (UIDNEXT), if the server says.
     pub uid_next: Option<u32>,
+    /// The highest mod-sequence of its Messages (HIGHESTMODSEQ, CONDSTORE's), if the server keeps them: what's
+    /// changed since one can be asked for.
+    pub highest_modseq: Option<u64>,
 }
 
 /// A session with an Account's IMAP server, signed in, and what the server can do.
@@ -138,6 +141,8 @@ pub struct Session {
     can_move: bool,
     /// Whether the server has UIDPLUS (RFC 4315), for UID EXPUNGE.
     can_uid_expunge: bool,
+    /// Whether the server has CONDSTORE (RFC 7162), so says what's changed since a mod-sequence.
+    can_condstore: bool,
     can_idle: bool,
     /// Whether the server has Gmail's extensions (X-GM-EXT-1), so says which Thread each Message is in.
     gmail: bool,
@@ -203,6 +208,7 @@ impl Session {
             session,
             can_move: false,
             can_uid_expunge: false,
+            can_condstore: false,
             can_idle: false,
             gmail: false,
             delimiter: None,
@@ -211,6 +217,8 @@ impl Session {
         session.can_move = capabilities.has_str("MOVE");
         session.can_uid_expunge = capabilities.has_str("UIDPLUS");
         session.can_idle = capabilities.has_str("IDLE");
+        session.can_condstore =
+            capabilities.has_str("CONDSTORE") || capabilities.has_str("QRESYNC");
         session.gmail = capabilities.has_str("X-GM-EXT-1");
         Ok(session)
     }
@@ -297,6 +305,8 @@ impl Session {
             exists: status.exists,
             uid_validity: status.uid_validity.unwrap_or(0),
             uid_next: status.uid_next,
+            // Not asked: what's changed is known by what's there, for STATUS.
+            highest_modseq: None,
         })
     }
 
@@ -340,7 +350,11 @@ impl Session {
     ///
     /// If the server fails the command, or the connection.
     pub async fn select(&mut self, mailbox: &str) -> Result<Selected, Error> {
-        let selected = self.session.select(mailbox).await?;
+        let selected = if self.can_condstore {
+            self.session.select_condstore(mailbox).await?
+        } else {
+            self.session.select(mailbox).await?
+        };
         Ok(Self::selected(mailbox, &selected))
     }
 
@@ -364,6 +378,7 @@ impl Session {
                 0
             }),
             uid_next: selected.uid_next,
+            highest_modseq: selected.highest_modseq,
         }
     }
 
@@ -666,6 +681,49 @@ impl Session {
             .collect())
     }
 
+    /// The Flags of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set, that changed since
+    /// mod-sequence `since` (CONDSTORE's `CHANGEDSINCE`), by UID.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, as one without CONDSTORE does, or the connection.
+    pub async fn changed_flags(
+        &mut self,
+        uids: &str,
+        since: u64,
+    ) -> Result<Vec<(u32, Flags)>, Error> {
+        let fetches: Vec<Fetch> = self
+            .session
+            .uid_fetch(uids, format!("(UID FLAGS) (CHANGEDSINCE {since})"))
+            .await?
+            .try_collect()
+            .await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|fetch| Some((fetch.uid?, flags_of(fetch))))
+            .collect())
+    }
+
+    /// The UIDs in `uids`, a UID set, of the Messages the open Mailbox still has.
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn uids_in(&mut self, uids: &str) -> Result<Vec<u32>, Error> {
+        Ok(self
+            .session
+            .uid_search(format!("UID {uids}"))
+            .await?
+            .into_iter()
+            .collect())
+    }
+
+    /// Whether the server says what's changed since a mod-sequence (CONDSTORE).
+    #[must_use]
+    pub fn can_condstore(&self) -> bool {
+        self.can_condstore
+    }
+
     /// The whole of Message `uid` of the open Mailbox, without marking it Seen.
     ///
     /// # Errors
@@ -810,6 +868,7 @@ impl Session {
             session,
             can_move,
             can_uid_expunge,
+            can_condstore,
             can_idle,
             gmail,
             delimiter,
@@ -827,6 +886,7 @@ impl Session {
                 session,
                 can_move,
                 can_uid_expunge,
+                can_condstore,
                 can_idle,
                 gmail,
                 delimiter,

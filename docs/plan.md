@@ -127,7 +127,9 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
 - [x] An Envelope cache: the Mailboxes and each Mailbox's Envelopes kept, shown at once (before the server says) and
       brought up to date rather than fetched again; offline, what's cached can be listed and read
-- [ ] CONDSTORE/QRESYNC, to bring the cache up to date by what changed rather than by every listed Message's Flags
+- [x] CONDSTORE, to bring the cache up to date by what changed rather than by every listed Message's Flags:
+      `CHANGEDSINCE` the mod-sequence it was last brought up to date to (kept with it), and what's gone by one
+      `UID SEARCH`; QRESYNC's `VANISHED` would save that search, where servers have it
 - [x] Moving to a Mailbox by name (`s`, narrowed as it's typed), and Selections (`Space`) to act on several
       Messages; a folded thread is acted on whole
 - [x] Address completion from the Envelopes and Messages seen: `m` asks To (`Tab` completes) and Subject before the

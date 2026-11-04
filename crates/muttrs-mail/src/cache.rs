@@ -18,6 +18,9 @@ pub struct Listed {
     pub exists: u32,
     /// The Envelopes listed, oldest first.
     pub envelopes: Vec<Envelope>,
+    /// The Mailbox's highest mod-sequence (CONDSTORE's) when they were brought up to date, if it has one.
+    #[serde(default)]
+    pub highest_modseq: Option<u64>,
 }
 
 /// The bodies of one Account's Messages.
@@ -197,6 +200,7 @@ mod tests {
                 10,
                 b"Subject: hi\r\nFrom: Ann <ann@example.com>\r\nDate: Mon, 2 Nov 2026 10:00:00 +0000\r\n\r\n",
             )],
+            highest_modseq: Some(7),
         };
         cache.keep_envelopes("INBOX", &listed);
         assert_eq!(cache.envelopes("INBOX"), Some(listed));

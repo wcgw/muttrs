@@ -366,6 +366,7 @@ impl Client {
             windows: HashMap::new(),
             open: None,
             selected: None,
+            selected_modseq: None,
             queue: VecDeque::new(),
             again: Vec::new(),
         };
@@ -537,6 +538,9 @@ struct Window {
     uid_validity: u32,
     exists: u32,
     envelopes: BTreeMap<u32, Envelope>,
+    /// The Mailbox's highest mod-sequence (CONDSTORE's) when they were brought up to date: what's changed since is
+    /// what's asked, rather than every one's Flags.
+    highest_modseq: Option<u64>,
 }
 
 struct Worker {
@@ -558,6 +562,8 @@ struct Worker {
     open: Option<String>,
     /// The Mailbox the session has selected.
     selected: Option<String>,
+    /// Its highest mod-sequence when it was, as the server said.
+    selected_modseq: Option<u64>,
     /// What's asked and not started yet, in the order asked: kept while offline, and across connections.
     queue: VecDeque<(Task, Request)>,
     /// What's tried again once it's due, as moving back Messages not found where they went yet: when, the Task,
@@ -1025,6 +1031,7 @@ impl Worker {
         }
         let examined = session.examine(mailbox).await?;
         self.selected = Some(mailbox.to_owned());
+        self.selected_modseq = examined.highest_modseq;
         let uids = session.uids().await?;
         let members = self.members.entry(mailbox.to_owned()).or_default();
         let lacking = members.keep(examined.uid_validity, &uids);
@@ -1209,6 +1216,7 @@ impl Worker {
     ) -> Result<imap::Selected, imap::Error> {
         let selected = session.select(mailbox).await?;
         self.selected = Some(mailbox.to_owned());
+        self.selected_modseq = selected.highest_modseq;
         Ok(selected)
     }
 
@@ -1236,6 +1244,7 @@ impl Worker {
             *window = Window {
                 uid_validity: selected.uid_validity,
                 exists: selected.exists,
+                highest_modseq: selected.highest_modseq,
                 envelopes: session
                     .newest(selected.exists, WINDOW)
                     .await?
@@ -1245,7 +1254,7 @@ impl Worker {
             };
         } else {
             window.exists = selected.exists;
-            Self::update_window(session, window).await?;
+            Self::update_window(session, window, selected.highest_modseq).await?;
         }
         self.label_window(mailbox);
         self.tell_window(mailbox);
@@ -1326,7 +1335,14 @@ impl Worker {
     }
 
     /// The Envelopes of what's new in `window`'s Mailbox, which is selected, and the Flags of what it has.
-    async fn update_window(session: &mut Session, window: &mut Window) -> Result<(), imap::Error> {
+    /// Brings `window` up to date with its Mailbox, selected, whose highest mod-sequence when it was is `now`, if
+    /// the server keeps them: what's new, and what's changed since it was last brought up to date (only that, by
+    /// CONDSTORE, when both mod-sequences are known), and what's gone.
+    async fn update_window(
+        session: &mut Session,
+        window: &mut Window,
+        now: Option<u64>,
+    ) -> Result<(), imap::Error> {
         let Some((&first, _)) = window.envelopes.first_key_value() else {
             return Ok(());
         };
@@ -1340,26 +1356,53 @@ impl Worker {
                 window.envelopes.insert(envelope.uid, envelope);
             }
         }
-        let flags: HashMap<u32, Flags> = session
-            .flags(&format!("{first}:{last}"))
-            .await?
-            .into_iter()
-            .collect();
-        // What's no longer there was expunged.
-        window
-            .envelopes
-            .retain(|uid, _| *uid > last || flags.contains_key(uid));
-        for (uid, envelope) in &mut window.envelopes {
-            if let Some(flags) = flags.get(uid) {
-                envelope.flags = *flags;
+        let listed = format!("{first}:{last}");
+        let changed: Option<HashSet<u32>> = match (window.highest_modseq, now) {
+            // What's still there, and the Flags of what changed since: not every one's.
+            (Some(since), Some(_)) if session.can_condstore() => {
+                let there: HashSet<u32> = session.uids_in(&listed).await?.into_iter().collect();
+                window
+                    .envelopes
+                    .retain(|uid, _| *uid > last || there.contains(uid));
+                let flags = session.changed_flags(&listed, since).await?;
+                for (uid, flags) in &flags {
+                    if let Some(envelope) = window.envelopes.get_mut(uid) {
+                        envelope.flags = *flags;
+                    }
+                }
+                Some(flags.into_iter().map(|(uid, _)| uid).collect())
             }
+            _ => {
+                let flags: HashMap<u32, Flags> =
+                    session.flags(&listed).await?.into_iter().collect();
+                // What's no longer there was expunged.
+                window
+                    .envelopes
+                    .retain(|uid, _| *uid > last || flags.contains_key(uid));
+                for (uid, envelope) in &mut window.envelopes {
+                    if let Some(flags) = flags.get(uid) {
+                        envelope.flags = *flags;
+                    }
+                }
+                None
+            }
+        };
+        // Taken from a SELECT, before what was asked since: what changed meanwhile is asked again, never missed.
+        if now.is_some() {
+            window.highest_modseq = now;
         }
         // Those listed before Gmail's Threads were asked for, as the cache may keep them.
         session
             .add_gmail_threads(window.envelopes.values_mut())
             .await?;
+        // Gmail changes a Message's mod-sequence with its labels: only what changed is asked again.
         session
-            .refresh_gmail_labels(window.envelopes.values_mut())
+            .refresh_gmail_labels(window.envelopes.values_mut().filter(|envelope| {
+                envelope.uid > last
+                    || changed
+                        .as_ref()
+                        .is_none_or(|changed| changed.contains(&envelope.uid))
+            }))
             .await?;
         Ok(())
     }
@@ -1369,8 +1412,13 @@ impl Worker {
         session: &mut Session,
         mailbox: &str,
     ) -> Result<(), imap::Error> {
+        let now = if self.selected.as_deref() == Some(mailbox) {
+            self.selected_modseq
+        } else {
+            None
+        };
         if let Some(window) = self.windows.get_mut(mailbox) {
-            Self::update_window(session, window).await?;
+            Self::update_window(session, window, now).await?;
             self.label_window(mailbox);
             self.tell_window(mailbox);
         }
@@ -1385,6 +1433,7 @@ impl Worker {
                 uid_validity: window.uid_validity,
                 exists: window.exists,
                 envelopes: window.envelopes.values().cloned().collect(),
+                highest_modseq: window.highest_modseq,
             };
             self.cache.keep_envelopes(mailbox, &listed);
             (self.notify)(Update::Envelopes {
@@ -1417,6 +1466,7 @@ impl Worker {
                 Window {
                     uid_validity: listed.uid_validity,
                     exists: listed.exists,
+                    highest_modseq: listed.highest_modseq,
                     envelopes: listed
                         .envelopes
                         .into_iter()

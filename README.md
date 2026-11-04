@@ -307,7 +307,8 @@ A theme of your own is a file, `~/.config/muttrs/themes/NAME.toml`, that restyle
 muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.cache/muttrs/accounts/`, readable by
 you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline. What's
 listed is brought up to date by what changed (Messages new or gone, Flags, Labels), as a Message's headers never
-change; should it be kept wrong, `:sync!` forgets what's kept of the open Mailbox and lists it anew, as when it was
+change: where the server keeps mod-sequences (CONDSTORE, as Dovecot and Gmail do), only the Flags of the Messages
+that changed since are asked for, else every listed one's; should it be kept wrong, `:sync!` forgets what's kept of the open Mailbox and lists it anew, as when it was
 first opened.
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.

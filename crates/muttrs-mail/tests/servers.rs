@@ -984,6 +984,7 @@ async fn resyncing_lists_anew_what_was_kept_wrong() {
         Listed {
             uid_validity: selected.uid_validity,
             exists: 1,
+            highest_modseq: None,
             envelopes: vec![Envelope::read(
                 1,
                 Flags::default(),
@@ -1366,6 +1367,92 @@ async fn mailboxes_are_created_renamed_and_deleted_and_messages_bounced() {
     .await;
     assert_eq!(sent, Ok(()));
     assert_eq!(delivered(&to).await, ["bounced"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn what_changed_since_is_what_condstore_says() {
+    let username = user("condstore");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["a", "b", "c"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    assert!(session.can_condstore(), "Dovecot keeps mod-sequences");
+    let before = session
+        .select("INBOX")
+        .await
+        .unwrap()
+        .highest_modseq
+        .unwrap();
+    session.set_flag(&[2], "\\Flagged", true).await.unwrap();
+    let changed = session.changed_flags("1:3", before).await.unwrap();
+    assert_eq!(
+        changed.iter().map(|(uid, _)| *uid).collect::<Vec<_>>(),
+        [2],
+        "only what changed"
+    );
+    assert!(changed[0].1.flagged);
+    assert_eq!(session.uids_in("1:3").await.unwrap().len(), 3);
+
+    // The client brings what it listed up to date by that: a Message read elsewhere, another expunged.
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    let open = client.send(Request::Open("INBOX".into()));
+    until(&mut updates, |update| {
+        matches!(update, Update::Finished(task) if *task == open).then_some(())
+    })
+    .await;
+    session.set_flag(&[1], "\\Seen", true).await.unwrap();
+    session.expunge(&[3]).await.unwrap();
+    let refresh = client.send(Request::Refresh);
+    let mut listed = Vec::new();
+    until(&mut updates, |update| match update {
+        Update::Envelopes {
+            mailbox, envelopes, ..
+        } if mailbox == "INBOX" => {
+            listed = envelopes
+                .iter()
+                .map(|e| (e.subject.clone(), e.flags.seen, e.flags.flagged))
+                .collect();
+            None
+        }
+        Update::Finished(task) if *task == refresh => Some(()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        listed,
+        [("a".to_owned(), true, false), ("b".to_owned(), false, true)],
+        "a read, b flagged, c gone"
+    );
 }
 
 /// Waits for what the client says it did, failing if it says it couldn't.
