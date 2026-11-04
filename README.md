@@ -115,8 +115,8 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
 | Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` as in the Index · `q` back |
-| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` as in the Index · `:unsubscribe` from its mailing list · `q` back |
+| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `L` reply to the mailing list · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
@@ -198,6 +198,10 @@ On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
 The addresses muttrs has seen are kept in `~/.cache/muttrs/addresses.txt`, one a line, which vim and Neovim can
 complete from in the Draft's headers too (`Ctrl-X Ctrl-K`), with `autocmd FileType mail setlocal
 dictionary+=~/.cache/muttrs/addresses.txt iskeyword+=@-@,.,-`.
+
+`L` replies to the mailing list a Message came through, to the list alone (its `List-Post`), as mutt's list-reply
+does. `:unsubscribe`, in the Pager, unsubscribes from that list as the Message says to (`List-Unsubscribe`): by a
+POST alone where it says one does (RFC 8058), else by mail, sent at once, else at the list's page, in the browser.
 
 The Account's signature goes in after a `-- ` line, above the quote in a reply. A reply is from the address of the
 Account's (its own, or one of its `identities`) the Message was sent to. Quitting the editor on a new Draft without

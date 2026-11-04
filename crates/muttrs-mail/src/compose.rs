@@ -232,6 +232,20 @@ impl Draft {
         }
     }
 
+    /// A reply to the mailing list `list` (by its address) that `original` came through, quoting `quoted`: to the
+    /// list alone, as mutt's list-reply writes it.
+    #[must_use]
+    pub fn reply_to_list(original: &Message, sender: &Sender, list: &str, quoted: &str) -> Self {
+        Self {
+            to: vec![Address {
+                name: None,
+                email: list.to_owned(),
+            }],
+            cc: Vec::new(),
+            ..Self::reply(original, sender, false, quoted)
+        }
+    }
+
     /// A Postponed Draft, as it was kept: its headers, its body (`text`, its Markdown) and its Attachments.
     #[must_use]
     pub fn resumed(kept: &Message, text: &str) -> Self {
@@ -487,6 +501,68 @@ impl Draft {
                 .collect(),
         })
     }
+}
+
+/// A `mailto:` URL (RFC 6068), read: whom it's to, and the subject and body it gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mailto {
+    /// The address it's to: the first, if it names several.
+    pub to: String,
+    /// The subject it gives a Message to it.
+    pub subject: Option<String>,
+    /// The body it gives a Message to it.
+    pub body: Option<String>,
+}
+
+/// `url` read as a `mailto:` URL; None if it isn't one, or names no address.
+#[must_use]
+pub fn mailto(url: &str) -> Option<Mailto> {
+    let rest = url
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &url[7..])?;
+    let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let to = percent_decoded(to.split(',').next().unwrap_or_default());
+    let to = to.trim();
+    if to.is_empty() || !to.contains('@') {
+        return None;
+    }
+    let mut mailto = Mailto {
+        to: to.to_owned(),
+        subject: None,
+        body: None,
+    };
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = percent_decoded(value);
+        if name.eq_ignore_ascii_case("subject") {
+            mailto.subject = Some(value);
+        } else if name.eq_ignore_ascii_case("body") {
+            mailto.body = Some(value);
+        }
+    }
+    Some(mailto)
+}
+
+/// `text` with its `%XX` escapes decoded, as UTF-8 (what isn't valid stays as it was).
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = (bytes[at] == b'%')
+            .then(|| text.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escaped {
+            decoded.push(byte);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| text.to_owned())
 }
 
 /// A fresh `Message-ID`, angle brackets and all, at the domain of `email`.
@@ -842,5 +918,51 @@ mod tests {
         let id = message_id("me@example.com");
         assert!(id.starts_with('<') && id.ends_with("@example.com>"), "{id}");
         assert_ne!(id, message_id("me@example.com"));
+    }
+
+    #[test]
+    fn mailto_urls_are_read_with_their_subject_and_body() {
+        assert_eq!(
+            mailto("MAILTO:leave%40lists.example.org?Subject=bye%20now&body=please&x=y"),
+            Some(Mailto {
+                to: "leave@lists.example.org".into(),
+                subject: Some("bye now".into()),
+                body: Some("please".into()),
+            })
+        );
+        assert_eq!(
+            mailto("mailto:a@example.org,b@example.org").map(|mailto| mailto.to),
+            Some("a@example.org".into()),
+            "the first of several"
+        );
+        assert_eq!(mailto("https://example.org"), None);
+        assert_eq!(mailto("mailto:?subject=x"), None, "to no one");
+        assert_eq!(
+            mailto("mailto:100%25@example.org").map(|m| m.to),
+            Some("100%@example.org".into())
+        );
+    }
+
+    #[test]
+    fn a_reply_to_the_list_is_to_the_list_alone() {
+        let original = Message::parse(
+            b"From: Ann <ann@example.com>\r\nTo: rust@lists.example.org\r\nCc: bob@example.com\r\n\
+              Subject: Patches\r\nMessage-ID: <p@example.com>\r\n\r\nHi\r\n"
+                .to_vec(),
+        )
+        .unwrap();
+        let sender = Sender::default();
+        let draft = Draft::reply_to_list(&original, &sender, "rust@lists.example.org", "Hi");
+        assert_eq!(
+            draft
+                .to
+                .iter()
+                .map(|a| a.email.as_str())
+                .collect::<Vec<_>>(),
+            ["rust@lists.example.org"]
+        );
+        assert_eq!(draft.cc, Vec::<Address>::new());
+        assert_eq!(draft.subject, "Re: Patches");
+        assert_eq!(draft.in_reply_to.as_deref(), Some("p@example.com"));
     }
 }

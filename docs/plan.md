@@ -159,7 +159,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
 
 - [x] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
       where they went, found there by their `Message-ID`
-- [ ] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`List-Unsubscribe`)
+- [x] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`:unsubscribe`, by
+      `List-Unsubscribe`: one click, RFC 8058, else by mail, else at the list's page)
 - [ ] The Pager's full headers, and the Message's source (mutt's `h`)
 - [ ] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`)
 - [ ] Limiting the Index to what a Filter picks (mutt's `l`), without asking the server as `S` does

@@ -59,6 +59,8 @@ pub(crate) enum Event {
     Read(u64),
     /// How signing in to an Account again goes, by the sign-in's ID.
     SignIn(u64, sign_in::Progress),
+    /// Unsubscribing from a mailing list by its one-click URL went so: what's said of it.
+    Unsubscribed(Result<String, String>),
 }
 
 /// What the UI is set up with.
@@ -145,6 +147,8 @@ enum Writing {
     New,
     Reply,
     ReplyAll,
+    /// A reply to the mailing list the Message came through.
+    ReplyList,
     Forward,
     /// A Postponed Draft, resumed.
     Resume,
@@ -215,6 +219,8 @@ pub(crate) struct App {
     sending: Vec<(Task, Compose)>,
     /// The Drafts that couldn't be sent, shown again once no other is.
     unsent: Vec<Compose>,
+    /// The Messages that unsubscribe from mailing lists, being sent, by their Account and Task: the list's name.
+    unsubscribing: Vec<(usize, Task, String)>,
     /// How many Drafts this run has started, to name their files.
     drafts: u64,
     /// Whether the Draft is to be edited in `$EDITOR`, which the loop does between draws.
@@ -297,6 +303,7 @@ impl App {
             compose: None,
             sending: Vec::new(),
             unsent: Vec::new(),
+            unsubscribing: Vec::new(),
             drafts: 0,
             edit: false,
             write_when_fetched: None,
@@ -538,6 +545,10 @@ impl App {
             Event::Account(account, update) => self.on_account(account, update),
             Event::SignIn(id, progress) => self.signing_in(id, progress),
             Event::Voight(said) => self.voight_said(said),
+            Event::Unsubscribed(said) => match said {
+                Ok(said) => self.say(&said, false),
+                Err(said) => self.say(&said, true),
+            },
             Event::Read(pager) => {
                 if self.reading == Some(pager) {
                     self.reading = None;
@@ -740,6 +751,19 @@ impl App {
                 ),
                 Some((mailbox, uid)),
             ),
+            Writing::ReplyList => {
+                let Some(list) = &message.list_post else {
+                    self.say(
+                        "It didn't come through a mailing list that takes posts (List-Post)",
+                        false,
+                    );
+                    return;
+                };
+                (
+                    muttrs_mail::compose::Draft::reply_to_list(message, &me, list, &text),
+                    Some((mailbox, uid)),
+                )
+            }
             Writing::Forward | Writing::New => (
                 muttrs_mail::compose::Draft::forward(message, &me, &text),
                 None,
@@ -889,6 +913,18 @@ impl App {
 
     /// Takes what came of sending the Draft of `account`'s Task `task`: done with it, or it's shown again.
     fn sent(&mut self, account: usize, task: Task, sent: Result<(), String>) {
+        if let Some(at) = self
+            .unsubscribing
+            .iter()
+            .position(|(of, asked, _)| *of == account && *asked == task)
+        {
+            let (_, _, list) = self.unsubscribing.remove(at);
+            match sent {
+                Ok(()) => self.say(&format!("Asked {list} by mail to unsubscribe you"), false),
+                Err(why) => self.say(&format!("Not unsubscribed from {list}: {why}"), true),
+            }
+            return;
+        }
         let Some(at) = self
             .sending
             .iter()
@@ -1624,6 +1660,7 @@ impl App {
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('L') => self.write(Writing::ReplyList),
             KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
@@ -1658,6 +1695,79 @@ impl App {
 
     fn prompt(&mut self, kind: PromptKind) {
         self.prompt = Some(Prompt::new(kind, String::new()));
+    }
+
+    /// Unsubscribes from the mailing list the Message the Pager shows came through, as it says to: by a POST alone,
+    /// by mail (sent at once), or at its page, in the browser.
+    fn unsubscribe(&mut self) {
+        let (Some(pager), Some(shown)) = (&self.pager, &self.shown) else {
+            self.say(":unsubscribe is for the Message the Pager shows", true);
+            return;
+        };
+        let message = Arc::clone(pager.message());
+        let account = shown.account;
+        let list = message
+            .list
+            .clone()
+            .unwrap_or_else(|| "the mailing list".to_owned());
+        match message.unsubscribe() {
+            None => self.say("It says no way to unsubscribe (List-Unsubscribe)", true),
+            Some(muttrs_mail::message::Unsubscribe::OneClick(url)) => {
+                let Some(fetcher) = self.fetcher.clone() else {
+                    self.say("Not unsubscribed: there's no HTTP client", true);
+                    return;
+                };
+                let events = self.events.clone();
+                let said = list.clone();
+                tokio::spawn(async move {
+                    let unsubscribed = match fetcher.unsubscribe(&url).await {
+                        Ok(()) => Ok(format!("Unsubscribed from {said}")),
+                        Err(error) => Err(format!("Not unsubscribed from {said}: {error:#}")),
+                    };
+                    let _ = events.send(Event::Unsubscribed(unsubscribed));
+                });
+                self.say(&format!("Unsubscribing from {list}…"), false);
+            }
+            Some(muttrs_mail::message::Unsubscribe::Mail(mailto)) => {
+                let Some(state) = self.accounts.get_mut(account) else {
+                    return;
+                };
+                let mut draft = muttrs_mail::compose::Draft::new(&state.sender);
+                draft.from = state.sender.answering(&message).cloned();
+                draft.to = vec![muttrs_mail::Address {
+                    name: None,
+                    email: mailto.to,
+                }];
+                draft.subject = mailto.subject.unwrap_or_else(|| "unsubscribe".to_owned());
+                draft.body = mailto.body.unwrap_or_default();
+                let from = draft
+                    .from
+                    .as_ref()
+                    .or_else(|| state.sender.primary())
+                    .map_or("", |from| from.email.as_str());
+                let id = muttrs_mail::compose::message_id(from);
+                match draft.build(&id) {
+                    Ok(built) => {
+                        let task = state.ask_as(
+                            client::Request::Send {
+                                built: Box::new(built),
+                                answers: None,
+                            },
+                            Some(format!("Unsubscribing from {list}")),
+                        );
+                        self.unsubscribing.push((account, task, list));
+                    }
+                    Err(error) => self.say(&format!("Not unsubscribed: {error}"), true),
+                }
+            }
+            Some(muttrs_mail::message::Unsubscribe::Page(url)) => match open::that_detached(&url) {
+                Ok(()) => self.say(
+                    &format!("{list}'s page to unsubscribe at is open in the browser"),
+                    false,
+                ),
+                Err(error) => self.say(&format!("Couldn't open {url}: {error}"), true),
+            },
+        }
     }
 
     /// Forgets what's kept of the open Mailbox, and lists it anew.
@@ -1740,6 +1850,7 @@ impl App {
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('L') => self.write(Writing::ReplyList),
             KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
@@ -1941,6 +2052,7 @@ impl App {
             "refresh" | "sync" => self.refresh(),
             "refresh!" | "sync!" => self.resync(),
             "login" => self.login(argument),
+            "unsubscribe" => self.unsubscribe(),
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
             "unselect" => self.select_by(false, argument),
@@ -2218,6 +2330,8 @@ impl App {
                     &[
                         ("m", "a new Message"),
                         ("r R f", "reply, reply to all, forward"),
+                        ("L", "reply to the mailing list"),
+                        (":unsubscribe", "from the mailing list of the Message shown"),
                         ("y e", "with a Draft: send, edit again"),
                         ("a D", "attach a file, detach the last"),
                         ("P q q", "postpone to Drafts, discard"),
@@ -2867,12 +2981,13 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "select ",
     "unselect ",
     "cd ",
     "refresh",
     "sync!",
+    "unsubscribe",
     "help",
     "quit",
 ];
