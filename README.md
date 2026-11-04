@@ -147,7 +147,9 @@ each by its Account's name, in the Accounts' order.
 a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name. `u` moves the
 Messages last deleted, archived or moved back where they were, and the ones before them as it's pressed again, found
 where they went by their `Message-ID`; on Gmail, a Message archived goes back to the Inbox as a copy, as taking it
-out of All Mail would delete it. What's deleted from Trash is deleted for good: there's no undoing that.
+out of All Mail would delete it. A server can take a while to show them where they went (Proton's Bridge, archiving):
+muttrs looks again for half a minute, and if they're still not there, `u` tries again later. What's deleted from
+Trash is deleted for good: there's no undoing that.
 
 What muttrs asks of the server, it asks in the background, one Task at a time, in the order asked (a Message to read
 first): what you flag, delete, archive, move or label shows done at once, and stays so while the server catches up.

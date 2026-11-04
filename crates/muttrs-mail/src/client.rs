@@ -27,6 +27,14 @@ const IDLE_RENEWAL: Duration = Duration::from_mins(25);
 const POLL: Duration = Duration::from_mins(5);
 /// The longest wait before connecting again.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// How long moving Messages back waits, each time they aren't found where they went, before looking again: a server
+/// can take a while to show them there (Proton's Bridge, archiving). After the last, it gives up.
+const MOVE_BACK_WAITS: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 
 /// A Request asked of an Account, numbered by its Client: what [`Update::Started`] and [`Update::Finished`] tell of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -216,6 +224,9 @@ pub enum Update {
     /// [`Update::Failed`] says); for one that changes a Mailbox's Messages, the Envelopes told next show them as the
     /// server has them since.
     Finished(Task),
+    /// The Messages a [`Request::MoveBack`] Task was for are back where they were. Finished without it, they
+    /// aren't.
+    MovedBack(Task),
     /// A Message was sent, or couldn't be, for this reason.
     Sent {
         /// The Task that sent it.
@@ -320,6 +331,7 @@ impl Client {
             open: None,
             selected: None,
             queue: VecDeque::new(),
+            again: Vec::new(),
         };
         tokio::spawn(worker.run(received, changes));
         tokio::spawn(watch(account, tls, credentials, inbox_changed));
@@ -512,6 +524,9 @@ struct Worker {
     selected: Option<String>,
     /// What's asked and not started yet, in the order asked: kept while offline, and across connections.
     queue: VecDeque<(Task, Request)>,
+    /// What's tried again once it's due, as moving back Messages not found where they went yet: when, the Task,
+    /// and how many times it was tried.
+    again: Vec<(tokio::time::Instant, Task, Request, usize)>,
 }
 
 impl Worker {
@@ -639,7 +654,13 @@ impl Worker {
             self.tolerate(opened)?;
         }
         loop {
-            // What's asked comes first; counting Mailboxes' Messages fills the gaps between.
+            // What's asked comes first, and what's tried again once it's due; counting Mailboxes' Messages fills the
+            // gaps between.
+            if let Some((task, request, tries)) = self.due_again() {
+                self.move_back_task(&mut session, task, request, tries)
+                    .await?;
+                continue;
+            }
             let (task, request) = if let Some(asked) = self.next_asked(requests) {
                 asked
             } else if let Some(mailbox) = counts_due.pop_front() {
@@ -660,6 +681,7 @@ impl Worker {
                         self.tolerate(seen)?;
                         continue;
                     }
+                    () = Self::until_again(self.again.iter().map(|(due, ..)| *due).min()) => continue,
                     () = tokio::time::sleep(POLL) => {
                         // Keeps the connection alive, and sees what's new in the open Mailbox.
                         if let Some(open) = self.open.clone() {
@@ -695,6 +717,9 @@ impl Worker {
         request: Request,
         counts_due: &mut VecDeque<String>,
     ) -> Result<(), imap::Error> {
+        if matches!(request, Request::MoveBack { .. }) {
+            return self.move_back_task(session, task, request, 0).await;
+        }
         (self.notify)(Update::Started(task));
         let sending = matches!(request, Request::Send { .. });
         let changes = request.changes().map(str::to_owned);
@@ -786,11 +811,8 @@ impl Worker {
                 self.move_to(session, &mailbox, &uids, self.archive_role())
                     .await?;
             }
-            Request::MoveBack {
-                went,
-                to,
-                message_ids,
-            } => self.move_back(session, &went, &to, &message_ids).await?,
+            // Done by `move_back_task`, which tries it again.
+            Request::MoveBack { .. } => {}
             Request::Send { built, answers } => self.send(task, *built, answers),
             Request::Append {
                 role,
@@ -1450,6 +1472,66 @@ impl Worker {
         }
     }
 
+    /// The Task tried again that's due, if one is, and how many times it was tried.
+    fn due_again(&mut self) -> Option<(Task, Request, usize)> {
+        let now = tokio::time::Instant::now();
+        let at = self.again.iter().position(|(due, ..)| *due <= now)?;
+        let (_, task, request, tries) = self.again.remove(at);
+        Some((task, request, tries))
+    }
+
+    /// Waits until `due`, or for ever if nothing is.
+    async fn until_again(due: Option<tokio::time::Instant>) {
+        match due {
+            Some(due) => tokio::time::sleep_until(due).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Does `task`, a [`Request::MoveBack`] tried `tries` times before: if the Messages aren't where they went
+    /// yet, it's tried again once it's waited, until it's waited the last time. Told finished once it's done with,
+    /// moved back (as [`Update::MovedBack`] says) or not.
+    async fn move_back_task(
+        &mut self,
+        session: &mut Session,
+        task: Task,
+        request: Request,
+        tries: usize,
+    ) -> Result<(), imap::Error> {
+        let Request::MoveBack {
+            went,
+            to,
+            message_ids,
+        } = &request
+        else {
+            return Ok(());
+        };
+        if tries == 0 {
+            (self.notify)(Update::Started(task));
+        }
+        let moved = match self.move_back(session, went, to, message_ids).await {
+            Ok(moved) => moved,
+            Err(error) => {
+                (self.notify)(Update::Finished(task));
+                return self.tolerate(Err(error));
+            }
+        };
+        match moved {
+            MovedBack::NotThere(_) if tries < MOVE_BACK_WAITS.len() => {
+                let due = tokio::time::Instant::now() + MOVE_BACK_WAITS[tries];
+                self.again.push((due, task, request, tries + 1));
+                return Ok(());
+            }
+            MovedBack::Moved => (self.notify)(Update::MovedBack(task)),
+            MovedBack::NotThere(from) => (self.notify)(Update::Failed(format!(
+                "Not moved back: they aren't in {from}"
+            ))),
+            MovedBack::Refused(why) => (self.notify)(Update::Failed(why)),
+        }
+        (self.notify)(Update::Finished(task));
+        Ok(())
+    }
+
     /// Moves the Messages with `message_ids` in the Mailbox they `went` to back `to` where they were.
     async fn move_back(
         &mut self,
@@ -1457,24 +1539,21 @@ impl Worker {
         went: &Went,
         to: &str,
         message_ids: &[String],
-    ) -> Result<(), imap::Error> {
+    ) -> Result<MovedBack, imap::Error> {
         let from = match went {
             Went::Mailbox(name) => Some(name.clone()),
             Went::Trash => self.with_role(Role::Trash),
             Went::Archived => self.with_role(self.archive_role()),
         };
         let Some(from) = from else {
-            (self.notify)(Update::Failed("Nowhere to move them back from".into()));
-            return Ok(());
+            return Ok(MovedBack::Refused("Nowhere to move them back from".into()));
         };
+        // Selected again, so that what's come since it was shows.
+        self.selected = None;
         self.select(session, &from).await?;
         let uids = session.with_message_ids(message_ids).await?;
         if uids.is_empty() {
-            (self.notify)(Update::Failed(format!(
-                "Not moved back: they're no longer in {}",
-                self.named(&from)
-            )));
-            return Ok(());
+            return Ok(MovedBack::NotThere(self.named(&from)));
         }
         // Taken out of All Mail, a Gmail Message is deleted: one archived goes back to the Inbox as a copy, which
         // labels it so again.
@@ -1483,14 +1562,18 @@ impl Worker {
         } else {
             session.move_to(&uids, to).await
         };
-        match moved {
-            Ok(()) => (self.notify)(Update::Done(format!(
-                "Moved {} back to {}",
-                count(uids.len()),
-                self.named(to)
-            ))),
-            Err(error) => (self.notify)(Update::Failed(format!("Moving back: {error}"))),
-        }
+        let outcome = match moved {
+            Ok(()) => {
+                (self.notify)(Update::Done(format!(
+                    "Moved {} back to {}",
+                    count(uids.len()),
+                    self.named(to)
+                )));
+                MovedBack::Moved
+            }
+            Err(error) if error.is_fatal() => return Err(error),
+            Err(error) => MovedBack::Refused(format!("Moving back: {error}")),
+        };
         for mailbox in [from.as_str(), to] {
             if self.windows.contains_key(mailbox) {
                 self.select(session, mailbox).await?;
@@ -1498,7 +1581,7 @@ impl Worker {
             }
             self.count(session, mailbox).await?;
         }
-        Ok(())
+        Ok(outcome)
     }
 
     async fn delete(
@@ -1520,6 +1603,15 @@ impl Worker {
         }
         self.refresh_window(session, mailbox).await
     }
+}
+
+/// What came of moving Messages back.
+enum MovedBack {
+    Moved,
+    /// They aren't in the Mailbox they went to, by its name for people: not yet, or no longer.
+    NotThere(String),
+    /// The server wouldn't, for this reason.
+    Refused(String),
 }
 
 /// The next Task to do of those `queue`d: a Message to read before anything else, as reading waits for it, and

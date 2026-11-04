@@ -268,6 +268,8 @@ pub(crate) struct App {
     heatmap: bool,
     /// What `u` undoes, the last done last.
     undo: Vec<Undo>,
+    /// What `u` is undoing, by its Account and Task: kept for `u` again unless it's told moved back.
+    undoing: Vec<(usize, Task, Undo)>,
     /// The command to run with the terminal, which the loop does between draws.
     shell: Option<Shell>,
     /// The Messages being fetched, to pipe to a command once they've all come.
@@ -348,6 +350,7 @@ impl App {
             assessments,
             heatmap: false,
             undo: Vec::new(),
+            undoing: Vec::new(),
             shell: None,
             piping: None,
             started: Instant::now(),
@@ -728,8 +731,12 @@ impl App {
             Update::Started(task) => state.tasks.started(task, Instant::now()),
             Update::Finished(task) => {
                 state.tasks.finished(task);
+                self.not_undone(account, task);
                 self.quit_if_done();
             }
+            Update::MovedBack(task) => self
+                .undoing
+                .retain(|(of, undoing, _)| (*of, *undoing) != (account, task)),
             Update::Sent { task, sent } => self.sent(account, task, sent),
         }
     }
@@ -1243,13 +1250,34 @@ impl App {
             self.say("Nothing to undo", false);
             return;
         };
-        if let Some(state) = self.accounts.get_mut(undo.account) {
-            state.ask(client::Request::MoveBack {
-                went: undo.went,
-                to: undo.from,
-                message_ids: undo.message_ids,
-            });
-        }
+        let Some(state) = self.accounts.get_mut(undo.account) else {
+            return;
+        };
+        let task = state.ask(client::Request::MoveBack {
+            went: undo.went.clone(),
+            to: undo.from.clone(),
+            message_ids: undo.message_ids.clone(),
+        });
+        self.undoing.push((undo.account, task, undo));
+    }
+
+    /// Keeps for `u` again what `account`'s Task `task` was undoing, finished without moving them back: they may be
+    /// where they went later, as a server can take a while to show them there.
+    fn not_undone(&mut self, account: usize, task: Task) {
+        let Some(at) = self
+            .undoing
+            .iter()
+            .position(|(of, undoing, _)| (*of, *undoing) == (account, task))
+        else {
+            return;
+        };
+        let (_, _, undo) = self.undoing.remove(at);
+        self.undo.push(undo);
+        let said = self
+            .notice
+            .as_ref()
+            .map_or_else(|| "Not moved back".to_owned(), |notice| notice.text.clone());
+        self.say(&format!("{said} · u tries again"), true);
     }
 
     /// Takes the Messages `uids` out of the Index, as they've gone elsewhere, going on to the next one in the Pager.

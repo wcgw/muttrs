@@ -160,7 +160,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 Not there yet, roughly in the order a mutt user would reach for them:
 
 - [x] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
-      where they went, found there by their `Message-ID`
+      where they went, found there by their `Message-ID`: looked for again for half a minute, as a server can be slow
+      to show them there, and kept for `u` again if they're not
 - [x] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`:unsubscribe`, by
       `List-Unsubscribe`: one click, RFC 8058, else by mail, else at the list's page)
 - [x] The Pager's full headers (`h`, as mutt's), and the Message's source (`:source`)

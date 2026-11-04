@@ -1148,7 +1148,7 @@ async fn moving_back_undoes_deleting_and_moving() {
     let back = client.send(Request::MoveBack {
         went: Went::Trash,
         to: "INBOX".into(),
-        message_ids: vec![deleted_id.clone()],
+        message_ids: vec![deleted_id],
     });
     assert_eq!(
         said(&mut updates, back).await,
@@ -1162,16 +1162,46 @@ async fn moving_back_undoes_deleting_and_moving() {
         );
     }
 
-    // What's no longer where it went isn't found there.
-    let again = client.send(Request::MoveBack {
+    // Asked before the server shows it where it went, as a slow one (Proton's Bridge, archiving) can: it's looked
+    // for again, and moved back once it's there.
+    let late = client.send(Request::MoveBack {
         went: Went::Trash,
         to: "INBOX".into(),
-        message_ids: vec![deleted_id],
+        message_ids: vec!["late@example.com".into()],
     });
-    assert_eq!(
-        said(&mut updates, again).await,
-        "Not moved back: they're no longer in Trash"
-    );
+    let not_yet = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(Update::Finished(task)) = updates.recv().await
+                && task == late
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(not_yet.is_err(), "not given up at once");
+    session
+        .append("Trash", "()", &message("late"))
+        .await
+        .unwrap();
+    let mut moved_back = false;
+    let mut said = String::new();
+    until(&mut updates, |update| match update {
+        Update::MovedBack(task) if *task == late => {
+            moved_back = true;
+            None
+        }
+        Update::Done(text) | Update::Failed(text) => {
+            said.clone_from(text);
+            None
+        }
+        Update::Finished(task) if *task == late => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(moved_back, "{said}");
+    assert_eq!(said, "Moved a Message back to Inbox");
+    assert_eq!(session.counts("INBOX").await.unwrap().messages, 4);
 }
 
 /// Waits for what the client says it did, failing if it says it couldn't.
