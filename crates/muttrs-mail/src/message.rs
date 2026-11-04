@@ -269,7 +269,7 @@ impl Message {
     /// best it can be).
     #[must_use]
     pub fn source(&self) -> String {
-        String::from_utf8_lossy(self.parsed.raw()).into_owned()
+        String::from_utf8_lossy(self.raw()).into_owned()
     }
 
     /// Its HTML body, if it has one.

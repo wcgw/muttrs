@@ -1,5 +1,6 @@
 //! The terminal UI: what's on screen, the keys, and the loop that draws it as events come.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -116,6 +117,10 @@ enum PromptKind {
     To,
     /// A new Message's subject, after whom it's to.
     Subject,
+    /// A command to pipe the Messages to.
+    Pipe,
+    /// A command to run, with the terminal.
+    Shell,
 }
 
 impl PromptKind {
@@ -124,6 +129,7 @@ impl PromptKind {
         match self {
             Self::Command => Some(history::Kind::Command),
             Self::Search | Self::Server => Some(history::Kind::Search),
+            Self::Pipe | Self::Shell => Some(history::Kind::Shell),
             Self::Attach | Self::To | Self::Subject => None,
         }
     }
@@ -137,6 +143,23 @@ struct Undo {
     from: String,
     /// Theirs: they're found by them where they went, with UIDs of their own there.
     message_ids: Vec<String>,
+}
+
+/// A shell command to run, with the terminal.
+struct Shell {
+    command: String,
+    /// What's piped to it, if anything.
+    input: Option<Vec<u8>>,
+}
+
+/// Messages being fetched, to pipe to a command once they've all come.
+struct Piping {
+    command: String,
+    account: usize,
+    mailbox: String,
+    /// Their UIDs, in the order they're piped: the oldest first.
+    uids: Vec<u32>,
+    got: HashMap<u32, Arc<Vec<u8>>>,
 }
 
 /// How many moves `u` can undo, the last first.
@@ -245,6 +268,10 @@ pub(crate) struct App {
     heatmap: bool,
     /// What `u` undoes, the last done last.
     undo: Vec<Undo>,
+    /// The command to run with the terminal, which the loop does between draws.
+    shell: Option<Shell>,
+    /// The Messages being fetched, to pipe to a command once they've all come.
+    piping: Option<Piping>,
     /// When the UI started: the status line's spinner turns by it.
     started: Instant,
     /// Whether to quit once the Accounts' Tasks are done, as quitting asked; until a key's pressed.
@@ -321,6 +348,8 @@ impl App {
             assessments,
             heatmap: false,
             undo: Vec::new(),
+            shell: None,
+            piping: None,
             started: Instant::now(),
             quitting: false,
             quit: false,
@@ -656,6 +685,7 @@ impl App {
                 self.focus = Focus::Index;
             }
             Update::Body { mailbox, uid, body } => {
+                self.pipe_when_fetched(account, &mailbox, uid, &body);
                 let wanted = Opened {
                     account,
                     mailbox,
@@ -1564,6 +1594,10 @@ impl App {
                 self.help();
                 return;
             }
+            KeyCode::Char('!') => {
+                self.prompt(PromptKind::Shell);
+                return;
+            }
             KeyCode::Char('\\') => {
                 self.sidebar_shown = !self.sidebar_shown;
                 self.focus = if self.sidebar_shown {
@@ -1694,6 +1728,7 @@ impl App {
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
             KeyCode::Char('u') if !control => self.undo(),
+            KeyCode::Char('|') => self.prompt(PromptKind::Pipe),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
@@ -1808,6 +1843,111 @@ impl App {
         }
     }
 
+    /// Pipes the Messages an action is for to `command`: the one the Pager shows, as it came; else those of the
+    /// Index, the oldest first, once they're fetched.
+    fn pipe(&mut self, command: &str) {
+        if command.is_empty() {
+            return;
+        }
+        if let Some(pager) = &self.pager
+            && self.shown.is_some()
+            && self.shown == self.opened
+        {
+            self.shell = Some(Shell {
+                command: command.to_owned(),
+                input: Some(muttrs_mail::mbox::for_commands(&[pager.message().raw()])),
+            });
+            return;
+        }
+        let Some((account, mailbox, mut uids)) = self.targets() else {
+            return;
+        };
+        if let Some(index) = &self.index {
+            uids.sort_by_key(|&uid| (index.find(uid).and_then(|envelope| envelope.date), uid));
+        }
+        let Some(state) = self.accounts.get_mut(account) else {
+            return;
+        };
+        for &uid in &uids {
+            state.ask(client::Request::Body {
+                mailbox: mailbox.clone(),
+                uid,
+            });
+        }
+        self.piping = Some(Piping {
+            command: command.to_owned(),
+            account,
+            mailbox,
+            uids,
+            got: HashMap::new(),
+        });
+    }
+
+    /// Takes Message `uid` of `account`'s `mailbox`, fetched, if it's to be piped; pipes them once they've all come.
+    fn pipe_when_fetched(
+        &mut self,
+        account: usize,
+        mailbox: &str,
+        uid: u32,
+        body: &Result<Arc<Vec<u8>>, String>,
+    ) {
+        let Some(piping) = self.piping.as_mut().filter(|piping| {
+            piping.account == account && piping.mailbox == mailbox && piping.uids.contains(&uid)
+        }) else {
+            return;
+        };
+        match body {
+            Ok(bytes) => {
+                piping.got.insert(uid, Arc::clone(bytes));
+            }
+            Err(why) => {
+                self.piping = None;
+                self.say(
+                    &format!("Not piped: a Message couldn't be fetched: {why}"),
+                    true,
+                );
+                return;
+            }
+        }
+        if piping.got.len() < piping.uids.len() {
+            return;
+        }
+        let Some(piping) = self.piping.take() else {
+            return;
+        };
+        let messages: Vec<&[u8]> = piping
+            .uids
+            .iter()
+            .filter_map(|uid| piping.got.get(uid).map(|bytes| bytes.as_slice()))
+            .collect();
+        self.shell = Some(Shell {
+            input: Some(muttrs_mail::mbox::for_commands(&messages)),
+            command: piping.command,
+        });
+    }
+
+    /// Runs `command` with the terminal; the shell itself (`$SHELL`) if it's empty.
+    fn shell(&mut self, command: &str) {
+        let command = if command.is_empty() {
+            std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned())
+        } else {
+            command.to_owned()
+        };
+        self.shell = Some(Shell {
+            command,
+            input: None,
+        });
+    }
+
+    /// Takes what came of running `command`, as `status` says.
+    fn ran(&mut self, command: &str, status: io::Result<std::process::ExitStatus>) {
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => self.say(&format!("{command} exited with {status}"), true),
+            Err(error) => self.say(&format!("Couldn't run {command}: {error}"), true),
+        }
+    }
+
     /// Forgets what's kept of the open Mailbox, and lists it anew.
     fn resync(&mut self) {
         let Some(index) = &self.index else {
@@ -1868,6 +2008,7 @@ impl App {
             KeyCode::Char('o') => self.links(),
             KeyCode::Char('v') => self.attachments(),
             KeyCode::Char('H') => self.toggle_heatmap(),
+            KeyCode::Char('!') => self.prompt(PromptKind::Shell),
             KeyCode::Char('?') => self.help(),
             KeyCode::Esc => {
                 if !pager.clear_search() {
@@ -1885,6 +2026,7 @@ impl App {
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
             KeyCode::Char('u') if !control => self.undo(),
+            KeyCode::Char('|') => self.prompt(PromptKind::Pipe),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
@@ -1988,6 +2130,8 @@ impl App {
                     PromptKind::Server => self.search_server(text.trim()),
                     PromptKind::To => self.addressed(text),
                     PromptKind::Subject => self.subject(&text),
+                    PromptKind::Pipe => self.pipe(text.trim()),
+                    PromptKind::Shell => self.shell(text.trim()),
                 }
             }
             _ => {}
@@ -2385,6 +2529,7 @@ impl App {
                 "Parts",
                 &[
                     ("o", "Links: open or copy"),
+                    ("|", "pipe the Message, or those selected, to a command"),
                     ("v", "Attachments: open or save"),
                 ],
             ),
@@ -2439,6 +2584,7 @@ impl App {
                         "forget what's kept of the open Mailbox, and list it anew",
                     ),
                     (":login NAME", "sign in to an Account again, in the browser"),
+                    ("!", "run a command, or the shell"),
                     (
                         "↑ ↓",
                         "after : / or S, what was typed before, starting the same",
@@ -2774,6 +2920,8 @@ impl App {
                 PromptKind::Server => "Search the server: ",
                 PromptKind::To => "To: ",
                 PromptKind::Subject => "Subject: ",
+                PromptKind::Pipe => "|",
+                PromptKind::Shell => "!",
             };
             let line = Line::from(vec![Span::raw(lead), Span::raw(prompt.text.clone())]);
             buffer.set_line(area.x, area.y, &line, area.width);
@@ -2848,6 +2996,55 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const SPIN: Duration = Duration::from_millis(80);
 /// How long a Task's taken before the status line says how long.
 const TAKING_A_WHILE: Duration = Duration::from_secs(3);
+
+/// Lets go of the terminal for `run`, which has it, and takes it back after: as an editor, or a shell command, needs.
+fn hand_over<T>(
+    terminal: &mut ratatui::DefaultTerminal,
+    mouse: bool,
+    run: impl FnOnce() -> T,
+) -> anyhow::Result<T> {
+    if mouse {
+        let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
+    }
+    ratatui::restore();
+    let ran = run();
+    *terminal = ratatui::try_init().context("setting up the terminal again")?;
+    // Cleared directly: `Terminal::clear` asks the terminal where its cursor is, an answer the input stream that
+    // just let go can still take, which leaves the question unanswered.
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
+    if mouse {
+        let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
+    }
+    Ok(ran)
+}
+
+/// Runs `shell` through `sh`, piping it its input, if any; then waits for Enter, so that what it wrote can be read.
+fn run_shell(shell: &Shell) -> io::Result<std::process::ExitStatus> {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&shell.command)
+        .stdin(if shell.input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
+        .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (shell.input.clone(), child.stdin.take()) {
+        // Written aside: a command that writes before it's read all of it waits neither on muttrs, nor muttrs on it.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    let status = child.wait();
+    print!("\r\n[muttrs] Enter goes back");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    let _ = io::stdin().read_line(&mut line);
+    status
+}
 
 /// Waits `every`, or for ever when it's None.
 async fn tick(every: Option<Duration>) {
@@ -3034,23 +3231,17 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
             {
                 // The editor takes the terminal: the input stream lets go of it first, so as not to read its keys.
                 drop(input);
-                if mouse {
-                    let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
-                }
-                ratatui::restore();
-                let status = compose::edit(&compose::editor(app.config.editor.as_deref()), &path);
-                terminal = ratatui::try_init().context("setting up the terminal again")?;
-                // Cleared directly: `Terminal::clear` asks the terminal where its cursor is, an answer the
-                // input stream that just let go can still take, which leaves the question unanswered.
-                crossterm::execute!(
-                    io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-                )?;
-                if mouse {
-                    let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
-                }
+                let editor = compose::editor(app.config.editor.as_deref());
+                let status = hand_over(&mut terminal, mouse, || compose::edit(&editor, &path))?;
                 input = EventStream::new();
                 app.edited(status);
+                continue;
+            }
+            if let Some(shell) = app.shell.take() {
+                drop(input);
+                let status = hand_over(&mut terminal, mouse, || run_shell(&shell))?;
+                input = EventStream::new();
+                app.ran(&shell.command, status);
                 continue;
             }
             tokio::select! {

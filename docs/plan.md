@@ -168,7 +168,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       `[keys.index]` and the like map a key to the keys it types
 - [x] Limiting the Index to what a Filter picks (`:limit`, as mutt's `l`, which is muttrs' open), without asking
       the server as `S` does
-- [ ] Piping a Message to a command (`|`), as patches to `git am` or `b4`; a shell (`!`)
+- [x] Piping a Message to a command (`|`), as patches to `git am` or `b4` (several as an mbox, the oldest first);
+      a shell (`!`)
 - [ ] Sorting by sender, subject or size, besides threads and newest first
 - [ ] Searching every Mailbox of an Account, not only the open one
 - [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV

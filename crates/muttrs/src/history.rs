@@ -13,6 +13,8 @@ pub(crate) enum Kind {
     Command,
     /// A search, of what's listed or shown (`/`), or of the server (`S`).
     Search,
+    /// A shell command, run (`!`) or piped to (`|`).
+    Shell,
 }
 
 impl Kind {
@@ -21,6 +23,7 @@ impl Kind {
         match self {
             Self::Command => ':',
             Self::Search => '/',
+            Self::Shell => '!',
         }
     }
 }
@@ -30,6 +33,7 @@ pub(crate) struct History {
     /// Oldest first, each once.
     commands: Vec<String>,
     searches: Vec<String>,
+    shells: Vec<String>,
     /// Where it's kept.
     path: Option<PathBuf>,
 }
@@ -50,6 +54,7 @@ impl History {
         match kind {
             Kind::Command => &self.commands,
             Kind::Search => &self.searches,
+            Kind::Shell => &self.shells,
         }
     }
 
@@ -68,6 +73,7 @@ impl History {
         let entries = match kind {
             Kind::Command => &mut self.commands,
             Kind::Search => &mut self.searches,
+            Kind::Shell => &mut self.shells,
         };
         entries.retain(|kept| *kept != entry);
         entries.push(entry);
@@ -87,11 +93,13 @@ impl History {
         };
         self.commands.clear();
         self.searches.clear();
+        self.shells.clear();
         for line in text.lines() {
             let mut characters = line.chars();
             let kind = match characters.next() {
                 Some(':') => Kind::Command,
                 Some('/') => Kind::Search,
+                Some('!') => Kind::Shell,
                 _ => continue,
             };
             let entry = characters.as_str();
@@ -109,7 +117,7 @@ impl History {
             let _ = std::fs::create_dir_all(directory);
         }
         let mut text = String::new();
-        for kind in [Kind::Command, Kind::Search] {
+        for kind in [Kind::Command, Kind::Search, Kind::Shell] {
             for entry in self.entries(kind) {
                 text.push(kind.lead());
                 text.push_str(entry);

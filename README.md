@@ -112,10 +112,10 @@ They work as in mutt and vim. `?` shows the ones that apply.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` run a command, or the shell · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `h` every header, as written · `:source` the Message as it came · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` as in the Index · `:unsubscribe` from its mailing list · `q` back |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `|` pipe to a command · `Esc` unselect · `Tab` `h` the sidebar |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `h` every header, as written · `:source` the Message as it came · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` `|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
 | Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `L` reply to the mailing list · `f` forward |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
@@ -163,7 +163,12 @@ without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:`
 repeated picks either, as in `from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command
 line, `Tab` and `Shift-Tab` complete the command, then the filter's qualifier, then its value: the addresses of the
 Messages listed (by the address, or a word of the name), their Labels (in double quotes, with spaces), or `is:`'s
-values that would pick some of them. `:limit` lists only the Messages a filter picks, in threads among themselves,
+values that would pick some of them. `|` pipes Messages to a command, which has the terminal until `Enter` brings muttrs back: the one the Pager shows,
+as it came, or those selected (else the one at the cursor, a folded thread whole), several as an mbox, the oldest
+first, as `git am` and `b4 am` take a series of patches: `|git am -3`. `!` runs a command, or the shell; both keep a
+History of their own.
+
+`:limit` lists only the Messages a filter picks, in threads among themselves,
 until `:limit` alone lists them all again; `:select` then picks among those.
 
 After `:`, `/` or `S`, `Up` and `Down` go back through what was typed there before that starts with what's typed, as
