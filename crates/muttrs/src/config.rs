@@ -53,6 +53,9 @@ pub(crate) struct Config {
     /// Where voight assesses the Pager's prose: `"cpu"` (the default, if muttrs was built with voight), `"metal"`,
     /// `"cuda"` or `"wgpu"` in a muttrs built for them, or `"off"`.
     pub(crate) voight: Voight,
+    /// Keys of one's own, by where they're pressed: `[keys.index]`, `[keys.sidebar]`, `[keys.pager]`,
+    /// `[keys.draft]` (see [`crate::keys`]).
+    pub(crate) keys: crate::keys::Keymap,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -77,6 +80,7 @@ impl Default for Config {
             hide_thread_subjects: false,
             mouse: true,
             voight: Voight::default(),
+            keys: crate::keys::Keymap::default(),
             accounts: Vec::new(),
         }
     }

@@ -30,6 +30,7 @@ use crate::filter::{self, Filter};
 use crate::history::{self, History, Recall};
 use crate::icons::Icons;
 use crate::index::{self, Index};
+use crate::keys;
 use crate::login;
 use crate::overlay::{self, Outcome, Overlay, Verb};
 use crate::pager::{self, Pager, Request};
@@ -1479,6 +1480,39 @@ impl App {
         self.notice = None;
         // A key stays: quitting once the Tasks are done is asked again, if it's to be.
         self.quitting = false;
+        // A key of one's own types its keys in turn, as typed, not mapped again.
+        // Copied: handling each takes the App, the configuration too.
+        if let Some(typed) = self
+            .key_context()
+            .and_then(|context| self.config.keys.typed(context, &key))
+            .map(<[KeyEvent]>::to_vec)
+        {
+            for key in typed {
+                self.handle_key(key);
+            }
+            return;
+        }
+        self.handle_key(key);
+    }
+
+    /// Where a key pressed now goes, for the keys of one's own: None while something's typed or chosen, as in a
+    /// prompt or a list, where keys are as they are.
+    fn key_context(&self) -> Option<keys::Context> {
+        if self.sign_in.is_some() || self.prompt.is_some() || self.overlay.is_some() {
+            None
+        } else if self.compose.is_some() {
+            Some(keys::Context::Draft)
+        } else if self.pager.is_some() {
+            Some(keys::Context::Pager)
+        } else if self.focus == Focus::Sidebar && self.sidebar_shown {
+            Some(keys::Context::Sidebar)
+        } else {
+            Some(keys::Context::Index)
+        }
+    }
+
+    /// Does what `key` does where it's pressed.
+    fn handle_key(&mut self, key: KeyEvent) {
         if self.sign_in.is_some() {
             self.sign_in_key(key);
             return;
@@ -2286,93 +2320,114 @@ impl App {
     }
 
     fn help(&mut self) {
-        self.overlay = Some(overlay::help(
-            &self.theme,
-            &[
-                (
-                    "Reading",
-                    &[
-                        ("j k ↓ ↑", "scroll a line"),
-                        ("Space b", "a page down, up"),
-                        ("Ctrl-d Ctrl-u", "half a page down, up"),
-                        ("g G", "top, bottom"),
-                        ("/ n N", "search, next match, previous"),
-                        ("T", "HTML or plain text"),
-                        ("h", "every header, as written, or those read"),
-                        (":source", "the Message as it came, or as read"),
-                        ("I", "load Remote Content"),
-                        ("H", "voight's Heatmap of the prose"),
-                    ],
-                ),
-                (
-                    "Parts",
-                    &[
-                        ("o", "Links: open or copy"),
-                        ("v", "Attachments: open or save"),
-                    ],
-                ),
-                (
-                    "Mailboxes",
-                    &[
-                        ("j k g G", "move"),
-                        ("Enter", "open"),
-                        ("/ n N", "search senders and subjects"),
-                        ("S", "search the server (Gmail's syntax on Gmail)"),
-                        ("T", "threads, or newest first"),
-                        ("za zM zR", "fold the thread, all, none"),
-                        ("J K", "in the Pager: the next Message, the previous"),
-                        ("Space", "select, or not, and move down"),
-                        ("F U", "flag, mark Unread or read: the selected, or this"),
-                        ("Y", "add or take off Labels: the selected, or this"),
-                        ("d a s", "delete (to Trash), archive, move to a Mailbox"),
-                        ("u", "undo the last of those: move them back"),
-                        ("Tab h l", "the sidebar, the Index"),
-                        ("\\", "show or hide the sidebar"),
-                        (":cd NAME", "open a Mailbox by name"),
-                        (
-                            ":select F",
-                            "select what filter F picks: from:ann is:unread label:work …",
-                        ),
-                        (":unselect F", "unselect what F picks; without F, all"),
-                    ],
-                ),
-                (
-                    "Writing",
-                    &[
-                        ("m", "a new Message"),
-                        ("r R f", "reply, reply to all, forward"),
-                        ("L", "reply to the mailing list"),
-                        (":unsubscribe", "from the mailing list of the Message shown"),
-                        ("y e", "with a Draft: send, edit again"),
-                        ("a D", "attach a file, detach the last"),
-                        ("P q q", "postpone to Drafts, discard"),
-                        ("e", "in Drafts: resume a Postponed Draft"),
-                    ],
-                ),
-                (
-                    "Anywhere",
-                    &[
-                        ("?", "these keys"),
-                        (":q q", "quit once what's asked is done, or close the Pager"),
-                        (":q!", "quit now"),
-                        ("$ :refresh", "ask for what's new"),
-                        (
-                            ":sync!",
-                            "forget what's kept of the open Mailbox, and list it anew",
-                        ),
-                        (":login NAME", "sign in to an Account again, in the browser"),
-                        (
-                            "↑ ↓",
-                            "after : / or S, what was typed before, starting the same",
-                        ),
-                        (
-                            "Ctrl-p Ctrl-n",
-                            "after : / or S, what was typed before, all of it",
-                        ),
-                    ],
-                ),
-            ],
-        ));
+        // The keys of one's own, where they're pressed: what each types.
+        let yours: Vec<(String, String)> = [
+            (keys::Context::Index, "in the Index"),
+            (keys::Context::Sidebar, "in the sidebar"),
+            (keys::Context::Pager, "in the Pager"),
+            (keys::Context::Draft, "with a Draft"),
+        ]
+        .into_iter()
+        .flat_map(|(context, where_)| {
+            self.config
+                .keys
+                .written(context)
+                .into_iter()
+                .map(move |(key, typed)| (key.to_owned(), format!("types {typed}, {where_}")))
+        })
+        .collect();
+        let yours: Vec<(&str, &str)> = yours
+            .iter()
+            .map(|(key, typed)| (key.as_str(), typed.as_str()))
+            .collect();
+        let mut sections: Vec<(&str, &[(&str, &str)])> = vec![
+            (
+                "Reading",
+                &[
+                    ("j k ↓ ↑", "scroll a line"),
+                    ("Space b", "a page down, up"),
+                    ("Ctrl-d Ctrl-u", "half a page down, up"),
+                    ("g G", "top, bottom"),
+                    ("/ n N", "search, next match, previous"),
+                    ("T", "HTML or plain text"),
+                    ("h", "every header, as written, or those read"),
+                    (":source", "the Message as it came, or as read"),
+                    ("I", "load Remote Content"),
+                    ("H", "voight's Heatmap of the prose"),
+                ],
+            ),
+            (
+                "Parts",
+                &[
+                    ("o", "Links: open or copy"),
+                    ("v", "Attachments: open or save"),
+                ],
+            ),
+            (
+                "Mailboxes",
+                &[
+                    ("j k g G", "move"),
+                    ("Enter", "open"),
+                    ("/ n N", "search senders and subjects"),
+                    ("S", "search the server (Gmail's syntax on Gmail)"),
+                    ("T", "threads, or newest first"),
+                    ("za zM zR", "fold the thread, all, none"),
+                    ("J K", "in the Pager: the next Message, the previous"),
+                    ("Space", "select, or not, and move down"),
+                    ("F U", "flag, mark Unread or read: the selected, or this"),
+                    ("Y", "add or take off Labels: the selected, or this"),
+                    ("d a s", "delete (to Trash), archive, move to a Mailbox"),
+                    ("u", "undo the last of those: move them back"),
+                    ("Tab h l", "the sidebar, the Index"),
+                    ("\\", "show or hide the sidebar"),
+                    (":cd NAME", "open a Mailbox by name"),
+                    (
+                        ":select F",
+                        "select what filter F picks: from:ann is:unread label:work …",
+                    ),
+                    (":unselect F", "unselect what F picks; without F, all"),
+                ],
+            ),
+            (
+                "Writing",
+                &[
+                    ("m", "a new Message"),
+                    ("r R f", "reply, reply to all, forward"),
+                    ("L", "reply to the mailing list"),
+                    (":unsubscribe", "from the mailing list of the Message shown"),
+                    ("y e", "with a Draft: send, edit again"),
+                    ("a D", "attach a file, detach the last"),
+                    ("P q q", "postpone to Drafts, discard"),
+                    ("e", "in Drafts: resume a Postponed Draft"),
+                ],
+            ),
+            (
+                "Anywhere",
+                &[
+                    ("?", "these keys"),
+                    (":q q", "quit once what's asked is done, or close the Pager"),
+                    (":q!", "quit now"),
+                    ("$ :refresh", "ask for what's new"),
+                    (
+                        ":sync!",
+                        "forget what's kept of the open Mailbox, and list it anew",
+                    ),
+                    (":login NAME", "sign in to an Account again, in the browser"),
+                    (
+                        "↑ ↓",
+                        "after : / or S, what was typed before, starting the same",
+                    ),
+                    (
+                        "Ctrl-p Ctrl-n",
+                        "after : / or S, what was typed before, all of it",
+                    ),
+                ],
+            ),
+        ];
+        if !yours.is_empty() {
+            sections.push(("Yours", &yours));
+        }
+        self.overlay = Some(overlay::help(&self.theme, &sections));
     }
 
     fn chosen(&mut self, kind: overlay::Kind, index: usize, verb: Verb) {

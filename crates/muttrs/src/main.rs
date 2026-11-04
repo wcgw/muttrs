@@ -9,6 +9,7 @@ mod heatmap;
 mod history;
 mod icons;
 mod index;
+mod keys;
 mod login;
 mod overlay;
 mod pager;

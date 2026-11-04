@@ -120,6 +120,26 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
+### Keys of your own
+
+`[keys.index]`, `[keys.sidebar]`, `[keys.pager]` and `[keys.draft]` in the configuration map a key to the keys it
+types in its place, as vim's `noremap` does: one, to give a key muttrs has another key (mutt's `bind`); or several,
+typed in turn, as a macro (mutt's `macro`). What a key maps to isn't mapped again, and `?` lists yours.
+
+```toml
+[keys.index]
+x = "a"                           # x archives too
+"<C-a>" = ":cd Archive<Enter>"    # Control-a opens the Archive
+
+[keys.pager]
+"<Space>" = "J"                   # Space goes on to the next Message
+```
+
+Keys are written as vim writes them: a character as itself, and `<Enter>`, `<Esc>`, `<Tab>`, `<S-Tab>`, `<Space>`,
+`<BS>`, `<Del>`, `<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<F1>` to `<F12>`,
+`<lt>` (for `<`); with Control as `<C-x>` and Alt as `<M-x>`. A key of your own is one key, as muttrs' pairs (`za`,
+`q q`) would get in the way of more.
+
 The sidebar lists each Account and its Mailboxes. With several Accounts, their Inboxes come first, under `Inboxes`,
 each by its Account's name, in the Accounts' order.
 
