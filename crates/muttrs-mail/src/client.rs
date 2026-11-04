@@ -93,14 +93,15 @@ pub enum Request {
         /// Whether to add it, rather than take it off.
         on: bool,
     },
-    /// Move Messages to the Mailbox with a Role.
-    MoveTo {
+    /// Tell the server whether Messages are spam, as its spam filter learns: mark them so, and move them, to Junk or
+    /// out of it to the Inbox.
+    Judge {
         /// The Mailbox they're in, by its name on the server.
         mailbox: String,
         /// Their UIDs there.
         uids: Vec<u32>,
-        /// The Role of the Mailbox to move them to.
-        role: Role,
+        /// Whether they're spam.
+        verdict: Verdict,
     },
     /// Move Messages to another Mailbox, by its name.
     Move {
@@ -186,8 +187,46 @@ pub enum Went {
     Trash,
     /// Where archiving moves them: the Archive Mailbox, or on Gmail All Mail.
     Archived,
-    /// Junk, as taking them for spam moves them.
+    /// Where judging them moved them, as their verdict says: to Junk, or out of it to the Inbox; marked so.
+    Judged(Verdict),
+}
+
+/// Whether Messages are spam, as the server's spam filter is told: by moving them to Junk, or out of it to the Inbox,
+/// as filters that learn from moves do (Dovecot's, by IMAPSieve); and by marking them with the keyword `$Junk` or
+/// `$NotJunk` (IANA's registry of IMAP keywords), as filters that learn from keywords do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Spam: to Junk, marked `$Junk`.
     Junk,
+    /// Not spam: out of Junk to the Inbox, marked `$NotJunk`.
+    NotJunk,
+}
+
+impl Verdict {
+    /// The Role of the Mailbox it moves Messages to.
+    #[must_use]
+    pub fn role(self) -> Role {
+        match self {
+            Self::Junk => Role::Junk,
+            Self::NotJunk => Role::Inbox,
+        }
+    }
+
+    /// The keyword it marks Messages with.
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Junk => "$Junk",
+            Self::NotJunk => "$NotJunk",
+        }
+    }
+
+    /// The other verdict, whose keyword it takes off.
+    fn other(self) -> Self {
+        match self {
+            Self::Junk => Self::NotJunk,
+            Self::NotJunk => Self::Junk,
+        }
+    }
 }
 
 impl Request {
@@ -196,7 +235,7 @@ impl Request {
         match self {
             Self::Flag { mailbox, .. }
             | Self::Label { mailbox, .. }
-            | Self::MoveTo { mailbox, .. }
+            | Self::Judge { mailbox, .. }
             | Self::Move { mailbox, .. }
             | Self::Expunge { mailbox, .. }
             | Self::Delete { mailbox, .. }
@@ -829,13 +868,11 @@ impl Worker {
                 label,
                 on,
             } => self.label(session, &mailbox, &uids, &label, on).await?,
-            Request::MoveTo {
+            Request::Judge {
                 mailbox,
                 uids,
-                role,
-            } => {
-                self.move_to(session, &mailbox, &uids, role).await?;
-            }
+                verdict,
+            } => self.judge(session, &mailbox, &uids, verdict).await?,
             Request::Move { mailbox, uids, to } => {
                 self.move_named(session, &mailbox, &uids, &to).await?;
             }
@@ -975,6 +1012,8 @@ impl Worker {
 
     async fn list(&mut self, session: &mut Session) -> Result<(), imap::Error> {
         self.mailboxes = session.mailboxes().await?;
+        // As the configuration names them, the UI shows the Roles the worker goes by.
+        self.account.roles.apply(&mut self.mailboxes);
         self.cache.keep_mailboxes(&self.mailboxes);
         (self.notify)(Update::Mailboxes(self.mailboxes.clone()));
         self.gmail = session.is_gmail();
@@ -1540,14 +1579,42 @@ impl Worker {
         role: Role,
     ) -> Result<(), imap::Error> {
         let Some(target) = self.with_role(role) else {
-            (self.notify)(Update::Failed(format!(
-                "There's no {role:?} Mailbox: set it under [account.mailboxes]"
-            )));
-            // What the UI took out before asking comes back.
-            self.tell_window(mailbox);
+            self.no_role(mailbox, role);
             return Ok(());
         };
         self.move_named(session, mailbox, uids, &target).await
+    }
+
+    /// Says there's no Mailbox with `role` to move `mailbox`'s Messages to.
+    fn no_role(&self, mailbox: &str, role: Role) {
+        (self.notify)(Update::Failed(format!(
+            "There's no {role:?} Mailbox: set it under [account.mailboxes]"
+        )));
+        // What the UI took out before asking comes back.
+        self.tell_window(mailbox);
+    }
+
+    /// Marks the Messages `uids` of `mailbox` with `verdict`'s keyword, taking the other's off, then moves them where
+    /// it says: marked before they're moved, a filter that learns as they move sees the keyword too.
+    async fn judge(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        uids: &[u32],
+        verdict: Verdict,
+    ) -> Result<(), imap::Error> {
+        let Some(target) = self.with_role(verdict.role()) else {
+            self.no_role(mailbox, verdict.role());
+            return Ok(());
+        };
+        if target == mailbox {
+            self.tell_window(mailbox);
+            return Ok(());
+        }
+        self.select(session, mailbox).await?;
+        set_keyword(session, uids, verdict.keyword(), true).await?;
+        set_keyword(session, uids, verdict.other().keyword(), false).await?;
+        self.move_selected(session, mailbox, uids, &target).await
     }
 
     /// Moves the Messages `uids` of `mailbox` to the Mailbox named `target` on the server.
@@ -1563,9 +1630,24 @@ impl Worker {
             return Ok(());
         }
         self.select(session, mailbox).await?;
+        self.move_selected(session, mailbox, uids, target).await
+    }
+
+    /// Moves the Messages `uids` of `mailbox`, selected, to the Mailbox named `target` on the server.
+    async fn move_selected(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        uids: &[u32],
+        target: &str,
+    ) -> Result<(), imap::Error> {
         match session.move_to(uids, target).await {
             Ok(()) => {
-                let label = crate::mailbox::decode(target);
+                let label = if self.with_role(Role::Inbox).as_deref() == Some(target) {
+                    "Inbox".to_owned()
+                } else {
+                    crate::mailbox::decode(target)
+                };
                 (self.notify)(Update::Done(format!(
                     "Moved {} to {label}",
                     count(uids.len())
@@ -1705,7 +1787,7 @@ impl Worker {
             Went::Mailbox(name) => Some(name.clone()),
             Went::Trash => self.with_role(Role::Trash),
             Went::Archived => self.with_role(self.archive_role()),
-            Went::Junk => self.with_role(Role::Junk),
+            Went::Judged(verdict) => self.with_role(verdict.role()),
         };
         let Some(from) = from else {
             return Ok(MovedBack::Refused("Nowhere to move them back from".into()));
@@ -1716,6 +1798,11 @@ impl Worker {
         let uids = session.with_message_ids(message_ids).await?;
         if uids.is_empty() {
             return Ok(MovedBack::NotThere(self.named(&from)));
+        }
+        // The verdict undone, its keyword's taken off: the other's, taken off judging them, isn't known to have been
+        // there.
+        if let Went::Judged(verdict) = went {
+            set_keyword(session, &uids, verdict.keyword(), false).await?;
         }
         // Taken out of All Mail, a Gmail Message is deleted: one archived goes back to the Inbox as a copy, which
         // labels it so again.
@@ -1764,6 +1851,24 @@ impl Worker {
             Err(error) => (self.notify)(Update::Failed(format!("Deleting: {error}"))),
         }
         self.refresh_window(session, mailbox).await
+    }
+}
+
+/// Sets `keyword` on the open Mailbox's Messages `uids`, or takes it off, as far as the server keeps keywords: one
+/// that refuses them (as some do, where others take them and forget them) is let be, as they're only a hint.
+async fn set_keyword(
+    session: &mut Session,
+    uids: &[u32],
+    keyword: &str,
+    on: bool,
+) -> Result<(), imap::Error> {
+    match session.set_flag(uids, keyword, on).await {
+        Err(error) if error.is_fatal() => Err(error),
+        Err(error) => {
+            tracing::info!(keyword, %error, "the server didn't keep a keyword");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 

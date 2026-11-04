@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use muttrs_mail::client::{Client, Flag, Request, Task};
+use muttrs_mail::client::{Client, Flag, Request, Task, Verdict};
 use muttrs_mail::{Envelope, Flags, Label, Mailbox, Role};
 
 /// How long a Task is waited for before the status line says it: what's done quicker would only flicker there. What
@@ -197,7 +197,7 @@ pub(crate) fn set_label(labels: &mut Vec<String>, name: &str, on: bool) {
 fn effect(request: &Request, labels: &[Label]) -> Effect {
     let set = |uids: &[u32]| uids.iter().copied().collect();
     match request {
-        Request::MoveTo { mailbox, uids, .. }
+        Request::Judge { mailbox, uids, .. }
         | Request::Move { mailbox, uids, .. }
         | Request::Expunge { mailbox, uids }
         | Request::Delete { mailbox, uids }
@@ -295,8 +295,16 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
                 format!("Taking {name} off {}", count(uids.len()))
             }
         }
-        Request::MoveTo { uids, role, .. } => {
-            format!("Moving {} to {}", count(uids.len()), with_role(*role))
+        Request::Judge { uids, verdict, .. } => {
+            let as_what = match verdict {
+                Verdict::Junk => "as spam",
+                Verdict::NotJunk => "as not spam",
+            };
+            format!(
+                "Moving {} to {}, {as_what}",
+                count(uids.len()),
+                with_role(verdict.role())
+            )
         }
         Request::Move { uids, to, .. } => format!("Moving {} to {}", count(uids.len()), named(to)),
         Request::Expunge { uids, .. } => format!("Expunging {}", count(uids.len())),

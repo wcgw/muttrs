@@ -46,6 +46,11 @@ _Avoid_: new (that's mutt's word, and IMAP's Recent)
 A Message the user marked as important; Gmail calls it starred.
 _Avoid_: starred, important
 
+**Verdict**:
+Whether a Message is spam, as the server's spam filter is told: spam, it's moved to Junk and marked with the keyword
+`$Junk`; not, it's moved out of Junk to the Inbox and marked `$NotJunk`. Filters learn by the move or the keyword.
+_Avoid_: report, classify
+
 ### Reading
 
 **Index**:

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use muttrs_mail::account::{Endpoint, Tls};
 use muttrs_mail::cache::{Cache, Listed};
-use muttrs_mail::client::{Client, Connection, Request, Update, Went};
+use muttrs_mail::client::{Client, Connection, Request, Update, Verdict, Went};
 use muttrs_mail::imap::{Credentials, Error, Session};
 use muttrs_mail::tls::Trust;
 use muttrs_mail::{AccountConfig, Envelope, Flags, Message, Role, tls};
@@ -1203,6 +1203,138 @@ async fn moving_back_undoes_deleting_and_moving() {
     assert!(moved_back, "{said}");
     assert_eq!(said, "Moved a Message back to Inbox");
     assert_eq!(session.counts("INBOX").await.unwrap().messages, 4);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn judging_marks_and_moves_and_undoing_takes_the_mark_off() {
+    let username = user("judge");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    // Taken for not spam once, before.
+    session
+        .append("INBOX", "($NotJunk)", &message("judged"))
+        .await
+        .unwrap();
+    session.create("Junk").await.unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\njunk = \"Junk\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 1 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    let (uid, message_id) = (listed[0].uid, listed[0].message_id.clone().unwrap());
+    // What's said once the Task's finished: what it did, or why it didn't.
+    let said = async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>, task| {
+        let mut said = String::new();
+        until(updates, |update| match update {
+            Update::Done(text) | Update::Failed(text) => {
+                said.clone_from(text);
+                None
+            }
+            Update::Finished(finished) if *finished == task => Some(()),
+            _ => None,
+        })
+        .await;
+        said
+    };
+    // The keywords of the Messages of `mailbox`, and their UIDs.
+    let keywords = async |session: &mut Session, mailbox: &str| {
+        session.select(mailbox).await.unwrap();
+        let mut keywords = session.keywords("1:*").await.unwrap();
+        for (_, of) in &mut keywords {
+            of.sort();
+        }
+        keywords
+    };
+
+    // Spam: to Junk, marked so, the other mark taken off.
+    let judged = client.send(Request::Judge {
+        mailbox: "INBOX".into(),
+        uids: vec![uid],
+        verdict: Verdict::Junk,
+    });
+    assert_eq!(said(&mut updates, judged).await, "Moved a Message to Junk");
+    assert_eq!(keywords(&mut session, "INBOX").await, []);
+    let in_junk = keywords(&mut session, "Junk").await;
+    assert_eq!(
+        in_junk.iter().map(|(_, of)| of.clone()).collect::<Vec<_>>(),
+        [["$Junk"]]
+    );
+    // Undone, it's back, the mark taken off.
+    let back = client.send(Request::MoveBack {
+        went: Went::Judged(Verdict::Junk),
+        to: "INBOX".into(),
+        message_ids: vec![message_id.clone()],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Inbox"
+    );
+    let in_inbox = keywords(&mut session, "INBOX").await;
+    assert_eq!(in_inbox.len(), 1);
+    assert!(in_inbox[0].1.is_empty(), "{in_inbox:?}");
+
+    // Not spam: out of Junk, where the server's filter put it marked so, to the Inbox, marked not.
+    session.move_to(&[in_inbox[0].0], "Junk").await.unwrap();
+    let in_junk = keywords(&mut session, "Junk").await;
+    session
+        .set_flag(&[in_junk[0].0], "$Junk", true)
+        .await
+        .unwrap();
+    let judged = client.send(Request::Judge {
+        mailbox: "Junk".into(),
+        uids: vec![in_junk[0].0],
+        verdict: Verdict::NotJunk,
+    });
+    assert_eq!(said(&mut updates, judged).await, "Moved a Message to Inbox");
+    assert_eq!(keywords(&mut session, "Junk").await, []);
+    let in_inbox = keywords(&mut session, "INBOX").await;
+    assert_eq!(
+        in_inbox
+            .iter()
+            .map(|(_, of)| of.clone())
+            .collect::<Vec<_>>(),
+        [["$NotJunk"]]
+    );
+    let back = client.send(Request::MoveBack {
+        went: Went::Judged(Verdict::NotJunk),
+        to: "Junk".into(),
+        message_ids: vec![message_id],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Junk"
+    );
+    let in_junk = keywords(&mut session, "Junk").await;
+    assert_eq!(in_junk.len(), 1);
+    assert!(in_junk[0].1.is_empty(), "{in_junk:?}");
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::compose::Sender;
+use crate::mailbox::{Mailbox, Role};
 use crate::message::Address;
 use crate::tls::Trust;
 
@@ -146,6 +147,31 @@ pub struct RoleNames {
     pub junk: Option<String>,
     /// The name of the Archive Mailbox.
     pub archive: Option<String>,
+}
+
+impl RoleNames {
+    /// Gives the server's `mailboxes` the Roles named here: the Mailbox named for a Role has it, and any other the
+    /// server gave it loses it, as what's named wins.
+    pub(crate) fn apply(&self, mailboxes: &mut [Mailbox]) {
+        let named = [
+            (Role::Sent, &self.sent),
+            (Role::Drafts, &self.drafts),
+            (Role::Trash, &self.trash),
+            (Role::Junk, &self.junk),
+            (Role::Archive, &self.archive),
+        ];
+        for (role, name) in named {
+            let Some(name) = name else { continue };
+            let name = crate::mailbox::encode(name);
+            for mailbox in mailboxes.iter_mut() {
+                if mailbox.name == name {
+                    mailbox.role = Some(role);
+                } else if mailbox.role == Some(role) {
+                    mailbox.role = None;
+                }
+            }
+        }
+    }
 }
 
 /// Where a server is, and how to reach it.
@@ -548,6 +574,24 @@ mod tests {
     fn account(toml_text: &str) -> Result<Account, Invalid> {
         let config: AccountConfig = toml::from_str(toml_text).expect("valid TOML");
         config.resolve()
+    }
+
+    #[test]
+    fn mailboxes_named_for_a_role_have_it_over_the_servers() {
+        let roles: RoleNames = toml::from_str("junk = \"Spam\"\ntrash = \"Bin\"").unwrap();
+        let mut mailboxes = [
+            Mailbox::listed("INBOX", Some("/"), &[]),
+            Mailbox::listed("Spam", Some("/"), &[]),
+            Mailbox::listed("Junk", Some("/"), &["\\Junk"]),
+            Mailbox::listed("Sent", Some("/"), &["\\Sent"]),
+        ];
+        roles.apply(&mut mailboxes);
+        let roles: Vec<Option<Role>> = mailboxes.iter().map(|mailbox| mailbox.role).collect();
+        assert_eq!(
+            roles,
+            [Some(Role::Inbox), Some(Role::Junk), None, Some(Role::Sent)],
+            "Bin isn't there: Trash is no Mailbox's"
+        );
     }
 
     #[test]

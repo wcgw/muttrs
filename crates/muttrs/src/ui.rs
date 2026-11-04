@@ -14,7 +14,7 @@ use crossterm::event::{
 };
 use futures_util::StreamExt as _;
 use muttrs_gfx::{CellSize, Prepared, Protocol};
-use muttrs_mail::client::{self, Client, Connection, Flag, Task, Update};
+use muttrs_mail::client::{self, Client, Connection, Flag, Task, Update, Verdict};
 use muttrs_mail::{Account, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -1296,18 +1296,35 @@ impl App {
         });
     }
 
-    /// Moves the Messages an action is for to Junk, as spam, going on to the next one.
-    fn junk(&mut self) {
+    /// Tells the server whether the Messages an action is for are spam, as its filter learns, going on to the next
+    /// one: spam, they're moved to Junk, marked `$Junk`; not, those in Junk are moved to the Inbox, marked `$NotJunk`.
+    fn judge(&mut self, verdict: Verdict) {
         let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
-        self.remember_undo(account, &mailbox, &uids, client::Went::Junk);
+        let in_junk = self.accounts.get(account).is_some_and(|state| {
+            state
+                .mailbox(&mailbox)
+                .is_some_and(|known| known.role == Some(Role::Junk))
+        });
+        match verdict {
+            Verdict::Junk if in_junk => {
+                self.say("They're in Junk already", true);
+                return;
+            }
+            Verdict::NotJunk if !in_junk => {
+                self.say(":not-junk is for Messages in Junk", true);
+                return;
+            }
+            Verdict::Junk | Verdict::NotJunk => {}
+        }
+        self.remember_undo(account, &mailbox, &uids, client::Went::Judged(verdict));
         self.taken_out(&uids);
         if let Some(state) = self.accounts.get_mut(account) {
-            state.ask(client::Request::MoveTo {
+            state.ask(client::Request::Judge {
                 mailbox,
                 uids,
-                role: Role::Junk,
+                verdict,
             });
         }
     }
@@ -2508,7 +2525,8 @@ impl App {
             "select" => self.select_by(true, argument),
             "limit" => self.limit_to(argument),
             "search" if !argument.is_empty() => self.search_all(argument),
-            "junk" => self.junk(),
+            "junk" => self.judge(Verdict::Junk),
+            "not-junk" => self.judge(Verdict::NotJunk),
             "bounce" => self.bounce(argument),
             "forward-attached" => self.write(Writing::ForwardAttached),
             "create" if !argument.is_empty() => self.create_mailbox(argument),
@@ -2973,6 +2991,7 @@ impl App {
                     ("\\", "show or hide the sidebar"),
                     (":cd NAME", "open a Mailbox by name"),
                     (":junk", "move to Junk, as spam: the selected, or this"),
+                    (":not-junk", "move out of Junk to the Inbox, as not spam"),
                     (":create NAME", "create a Mailbox (Work/Reports)"),
                     (":rename NAME", "rename the open Mailbox"),
                     (":delete-mailbox NAME", "delete a Mailbox, and its Messages"),
@@ -3741,7 +3760,7 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 17] = [
+const COMMANDS: [&str; 18] = [
     "select ",
     "unselect ",
     "limit ",
@@ -3752,6 +3771,7 @@ const COMMANDS: [&str; 17] = [
     "unsubscribe",
     "source",
     "junk",
+    "not-junk",
     "bounce ",
     "forward-attached",
     "create ",
