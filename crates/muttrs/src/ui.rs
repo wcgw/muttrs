@@ -1457,7 +1457,7 @@ impl App {
                 self.sidebar.move_by(&self.accounts, lines);
             } else if let Some(row) = self.sidebar.click(&self.accounts, offset(sidebar)) {
                 self.focus = Focus::Sidebar;
-                if let Row::Mailbox(account, name) = row {
+                if let Some((account, name)) = row.opens(&self.accounts) {
                     self.open_mailbox(account, &name);
                 }
             }
@@ -1577,14 +1577,18 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.sidebar.move_by(&self.accounts, 1),
             KeyCode::Char('k') | KeyCode::Up => self.sidebar.move_by(&self.accounts, -1),
-            KeyCode::Char('g') | KeyCode::Home => self.sidebar.top(),
+            KeyCode::Char('g') | KeyCode::Home => self.sidebar.top(&self.accounts),
             KeyCode::Char('G') | KeyCode::End => self.sidebar.bottom(&self.accounts),
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Esc => self.focus = Focus::Index,
             KeyCode::Enter => match self.sidebar.current(&self.accounts) {
-                Some(Row::Mailbox(account, name)) => self.open_mailbox(account, &name),
                 Some(Row::Account(account)) => {
                     if let Some(state) = self.accounts.get_mut(account) {
                         state.ask(client::Request::Refresh);
+                    }
+                }
+                Some(row) => {
+                    if let Some((account, name)) = row.opens(&self.accounts) {
+                        self.open_mailbox(account, &name);
                     }
                 }
                 None => {}

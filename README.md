@@ -120,6 +120,9 @@ They work as in mutt and vim. `?` shows the ones that apply.
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
+The sidebar lists each Account and its Mailboxes. With several Accounts, their Inboxes come first, under `Inboxes`,
+each by its Account's name, in the Accounts' order.
+
 `F`, `U`, `Y`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on
 a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name. `u` moves the
 Messages last deleted, archived or moved back where they were, and the ones before them as it's pressed again, found

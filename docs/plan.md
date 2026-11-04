@@ -150,6 +150,8 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       it's finished (quick successive actions no longer show what they took out again); a Message to read goes first;
       sending in the background, the Draft back if it fails; the status line's spinner, the Task being done and how
       many more; quitting waits for them (`:q!` doesn't)
+- [x] With several Accounts, their Inboxes first in the sidebar, under `Inboxes` (a heading, not chosen), each by
+      its Account's name
 - [x] `:sync!`: the open Mailbox listed anew, what's kept of it (the cache's too) and of the Labels forgotten; `$`
       in the Pager too
 

@@ -65,8 +65,35 @@ impl AccountState {
 /// A row of the sidebar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
+    /// The heading of the Accounts' Inboxes, listed first when there are several Accounts: it's not chosen.
+    Inboxes,
+    /// An Account's Inbox, under `Inboxes`, by the Account's name.
+    Inbox(usize),
     Account(usize),
     Mailbox(usize, String),
+}
+
+impl Row {
+    /// The Mailbox it opens, by its Account and its name on the server.
+    pub(crate) fn opens(&self, accounts: &[AccountState]) -> Option<(usize, String)> {
+        match self {
+            Self::Mailbox(account, name) => Some((*account, name.clone())),
+            Self::Inbox(account) => Some((*account, inbox_of(accounts.get(*account)?))),
+            Self::Inboxes | Self::Account(_) => None,
+        }
+    }
+
+    /// Whether the cursor can be on it: all but the heading.
+    fn is_chosen(&self) -> bool {
+        !matches!(self, Self::Inboxes)
+    }
+}
+
+/// The name on the server of `account`'s Inbox: `INBOX`, as IMAP names it, until the server lists it.
+fn inbox_of(account: &AccountState) -> String {
+    account
+        .with_role(Role::Inbox)
+        .map_or_else(|| "INBOX".to_owned(), |inbox| inbox.name.clone())
 }
 
 /// The order Roles are listed in.
@@ -83,15 +110,24 @@ fn role_order(role: Role) -> u8 {
     }
 }
 
-/// The rows the sidebar lists: each Account, its Mailboxes with a Role, then the others in their hierarchy.
+/// The rows the sidebar lists: with several Accounts, their Inboxes first; then each Account, its Mailboxes with a
+/// Role, then the others in their hierarchy.
 pub(crate) fn rows(accounts: &[AccountState]) -> Vec<Row> {
-    rows_of(accounts.iter().map(|account| account.mailboxes.as_slice()))
+    let mailboxes: Vec<&[Mailbox]> = accounts
+        .iter()
+        .map(|account| account.mailboxes.as_slice())
+        .collect();
+    rows_of(&mailboxes)
 }
 
 /// The rows of Accounts that have these Mailboxes.
-fn rows_of<'a>(accounts: impl Iterator<Item = &'a [Mailbox]>) -> Vec<Row> {
+fn rows_of(accounts: &[&[Mailbox]]) -> Vec<Row> {
     let mut rows = Vec::new();
-    for (index, mailboxes) in accounts.enumerate() {
+    if accounts.len() > 1 {
+        rows.push(Row::Inboxes);
+        rows.extend((0..accounts.len()).map(Row::Inbox));
+    }
+    for (index, mailboxes) in accounts.iter().copied().enumerate() {
         rows.push(Row::Account(index));
         let mut roles: Vec<&Mailbox> = mailboxes.iter().filter(|m| m.role.is_some()).collect();
         roles.sort_by_key(|mailbox| mailbox.role.map(role_order));
@@ -154,43 +190,55 @@ pub(crate) struct Draw<'a> {
 impl Sidebar {
     /// The row under the cursor.
     pub(crate) fn current(&self, accounts: &[AccountState]) -> Option<Row> {
-        rows(accounts).into_iter().nth(self.cursor)
+        let rows = rows(accounts);
+        rows.get(settled(&rows, self.cursor)).cloned()
     }
 
     pub(crate) fn move_by(&mut self, accounts: &[AccountState], by: isize) {
-        let count = rows(accounts).len();
-        self.cursor = self
-            .cursor
-            .saturating_add_signed(by)
-            .min(count.saturating_sub(1));
+        self.cursor = moved(&rows(accounts), self.cursor, by);
     }
 
-    pub(crate) fn top(&mut self) {
-        self.cursor = 0;
+    pub(crate) fn top(&mut self, accounts: &[AccountState]) {
+        self.cursor = settled(&rows(accounts), 0);
     }
 
     pub(crate) fn bottom(&mut self, accounts: &[AccountState]) {
-        self.cursor = rows(accounts).len().saturating_sub(1);
+        let rows = rows(accounts);
+        self.cursor = settled(&rows, rows.len().saturating_sub(1));
     }
 
-    /// The row drawn `offset` rows down from the top of the sidebar, the cursor put on it.
+    /// The row drawn `offset` rows down from the top of the sidebar, the cursor put on it; None for the heading,
+    /// which isn't chosen.
     pub(crate) fn click(&mut self, accounts: &[AccountState], offset: usize) -> Option<Row> {
         let row = self.top + offset;
         let found = rows(accounts).into_iter().nth(row)?;
+        if !found.is_chosen() {
+            return None;
+        }
         self.cursor = row;
         Some(found)
     }
 
-    /// Puts the cursor on `row`, if it's listed.
+    /// Puts the cursor on `row`, if it's listed; unless it's on a row that opens the same Mailbox already, as an
+    /// Account's under the Inboxes does its Inbox.
     pub(crate) fn select(&mut self, accounts: &[AccountState], row: &Row) {
-        if let Some(at) = rows(accounts).iter().position(|listed| listed == row) {
+        let rows = rows(accounts);
+        let opens = row.opens(accounts);
+        if opens.is_some()
+            && rows
+                .get(settled(&rows, self.cursor))
+                .is_some_and(|current| current.opens(accounts) == opens)
+        {
+            return;
+        }
+        if let Some(at) = rows.iter().position(|listed| listed == row) {
             self.cursor = at;
         }
     }
 
     pub(crate) fn draw(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
         let rows = rows(cx.accounts);
-        self.cursor = self.cursor.min(rows.len().saturating_sub(1));
+        self.cursor = settled(&rows, self.cursor);
         let height = usize::from(area.height);
         if self.cursor < self.top {
             self.top = self.cursor;
@@ -201,6 +249,23 @@ impl Sidebar {
         for (index, row) in rows.iter().enumerate().skip(self.top).take(height) {
             let y = area.y + u16::try_from(index - self.top).unwrap_or(0);
             let (line, open) = match row {
+                Row::Inboxes => (
+                    Line::from(Span::styled(
+                        format!("{}Inboxes", cx.icons.inbox),
+                        cx.theme.accent,
+                    )),
+                    false,
+                ),
+                Row::Inbox(account) => {
+                    let state = &cx.accounts[*account];
+                    let inbox = inbox_of(state);
+                    let open = cx.open == Some((*account, inbox.as_str()));
+                    let unread = state.counts.get(&inbox).map_or(0, |counts| counts.unread);
+                    (
+                        entry_line(1, cx.icons.account, &state.name, true, unread, width, cx),
+                        open,
+                    )
+                }
                 Row::Account(account) => (Self::account_line(&cx.accounts[*account], cx), false),
                 Row::Mailbox(account, name) => {
                     let state = &cx.accounts[*account];
@@ -257,8 +322,28 @@ fn mailbox_line(
     } else {
         1 + mailbox.depth() * 2
     };
-    let unread = counts.map_or(0, |counts| counts.unread);
-    let style = if !mailbox.selectable {
+    entry_line(
+        indent,
+        icon(cx.icons, mailbox.role),
+        mailbox.label(),
+        mailbox.selectable,
+        counts.map_or(0, |counts| counts.unread),
+        width,
+        cx,
+    )
+}
+
+/// A row of a Mailbox, `indent`ed, `width` cells wide: its icon and `label`, then how many are `unread`, if any.
+fn entry_line(
+    indent: usize,
+    icon: &str,
+    label: &str,
+    selectable: bool,
+    unread: u32,
+    width: usize,
+    cx: &Draw<'_>,
+) -> Line<'static> {
+    let style = if !selectable {
         cx.theme.dim
     } else if unread > 0 {
         cx.theme.unread
@@ -270,7 +355,7 @@ fn mailbox_line(
     } else {
         String::new()
     };
-    let name = format!("{}{}", icon(cx.icons, mailbox.role), mailbox.label());
+    let name = format!("{icon}{label}");
     let room = width.saturating_sub(indent + count.width());
     let name = truncate(&name, room);
     let padding = width.saturating_sub(indent + name.width() + count.width());
@@ -287,6 +372,27 @@ fn mailbox_line(
             },
         ),
     ])
+}
+
+/// Where the cursor at `cursor` among `rows` settles: on it, unless it's the heading, then on the row after (or
+/// before, at the end).
+fn settled(rows: &[Row], cursor: usize) -> usize {
+    let cursor = cursor.min(rows.len().saturating_sub(1));
+    (cursor..rows.len())
+        .chain((0..cursor).rev())
+        .find(|&at| rows[at].is_chosen())
+        .unwrap_or(cursor)
+}
+
+/// Where the cursor at `cursor` among `rows` goes, moved `by` rows of those it can be on.
+fn moved(rows: &[Row], cursor: usize, by: isize) -> usize {
+    let chosen: Vec<usize> = (0..rows.len()).filter(|&at| rows[at].is_chosen()).collect();
+    let Some(now) = chosen.iter().position(|&at| at >= settled(rows, cursor)) else {
+        return cursor;
+    };
+    chosen[now
+        .saturating_add_signed(by)
+        .min(chosen.len().saturating_sub(1))]
 }
 
 #[cfg(test)]
@@ -312,11 +418,12 @@ mod tests {
             ("[Gmail]/Trash", &["\\Trash"]),
             ("Archive", &[]),
         ]);
-        let listed: Vec<String> = rows_of(std::iter::once(gmail.as_slice()))
+        let listed: Vec<String> = rows_of(&[gmail.as_slice()])
             .into_iter()
             .map(|row| match row {
                 Row::Account(_) => "account".to_owned(),
                 Row::Mailbox(_, name) => name,
+                Row::Inboxes | Row::Inbox(_) => unreachable!("one Account only"),
             })
             .collect();
         assert_eq!(
@@ -331,6 +438,26 @@ mod tests {
                 "Work",
                 "Work/Reports"
             ]
+        );
+    }
+
+    #[test]
+    fn several_accounts_inboxes_come_first_under_a_heading_the_cursor_passes_over() {
+        let home = listed(&[("INBOX", &[]), ("Archive", &[])]);
+        let work = listed(&[("INBOX", &[])]);
+        let rows = rows_of(&[home.as_slice(), work.as_slice()]);
+        assert_eq!(
+            rows[..4],
+            [Row::Inboxes, Row::Inbox(0), Row::Inbox(1), Row::Account(0)]
+        );
+        assert_eq!(settled(&rows, 0), 1, "not on the heading");
+        assert_eq!(moved(&rows, 1, -1), 1, "nor up onto it");
+        assert_eq!(moved(&rows, 0, 1), 2);
+        assert_eq!(moved(&rows, 2, 1), 3, "then the Accounts, as before");
+        assert_eq!(moved(&rows, 1, 100), rows.len() - 1);
+        assert!(
+            !rows_of(&[home.as_slice()]).contains(&Row::Inboxes),
+            "one Account: no Inboxes"
         );
     }
 }
