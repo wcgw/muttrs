@@ -681,6 +681,34 @@ impl Session {
             .collect())
     }
 
+    /// The keywords of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set, by UID: the flags a
+    /// client or the server names itself (`$Junk`, `$Forwarded`, …), as written, without IMAP's own (`\Seen`, …).
+    ///
+    /// # Errors
+    ///
+    /// If the server fails the command, or the connection.
+    pub async fn keywords(&mut self, uids: &str) -> Result<Vec<(u32, Vec<String>)>, Error> {
+        let fetches: Vec<Fetch> = self
+            .session
+            .uid_fetch(uids, "(UID FLAGS)")
+            .await?
+            .try_collect()
+            .await?;
+        Ok(fetches
+            .iter()
+            .filter_map(|fetch| {
+                let keywords = fetch
+                    .flags()
+                    .filter_map(|flag| match flag {
+                        async_imap::types::Flag::Custom(name) => Some(name.into_owned()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((fetch.uid?, keywords))
+            })
+            .collect())
+    }
+
     /// The Flags of the Messages of the open Mailbox whose UIDs are in `uids`, a UID set, that changed since
     /// mod-sequence `since` (CONDSTORE's `CHANGEDSINCE`), by UID.
     ///

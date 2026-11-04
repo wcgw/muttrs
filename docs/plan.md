@@ -181,6 +181,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       as `Tab` completes; CardDAV (`[account.carddav]`), its cards read when muttrs starts
 - [x] Marking as Junk (`:junk`); creating, renaming and deleting Mailboxes (`:create`, `:rename`,
       `:delete-mailbox`); bouncing (`:bounce`, as mutt's `b`); forwarding as an Attachment (`:forward-attached`)
+- [x] Marking as not Junk (`:not-junk`): out of Junk to the Inbox; both marked `$Junk` or `$NotJunk`, as spam
+      filters learn by the move or the keyword
 
 ### Later
 
