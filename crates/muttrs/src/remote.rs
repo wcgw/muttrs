@@ -32,6 +32,22 @@ impl Fetcher {
         Ok(Self { client })
     }
 
+    /// Unsubscribes from a mailing list by its one-click URL `url`: a POST of `List-Unsubscribe=One-Click` (RFC
+    /// 8058).
+    ///
+    /// # Errors
+    ///
+    /// If it can't be reached, or says it failed.
+    pub(crate) async fn unsubscribe(&self, url: &str) -> anyhow::Result<()> {
+        self.client
+            .post(url)
+            .form(&[("List-Unsubscribe", "One-Click")])
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// The bytes of the image at `url`.
     ///
     /// # Errors
@@ -67,5 +83,53 @@ impl Fetcher {
             }
         }
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod unsubscribing {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn one_click_unsubscribing_posts_what_rfc_8058_says() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            // The headers, then the body.
+            while !String::from_utf8_lossy(&request).contains("One-Click") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "the request ended early");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let fetcher = Fetcher::new().unwrap();
+        fetcher
+            .unsubscribe(&format!("http://127.0.0.1:{port}/u/abc?id=1"))
+            .await
+            .unwrap();
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(
+            request.starts_with("post /u/abc?id=1 http/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains("content-type: application/x-www-form-urlencoded"),
+            "{request}"
+        );
+        assert!(
+            request.ends_with("\r\n\r\nlist-unsubscribe=one-click"),
+            "{request}"
+        );
     }
 }

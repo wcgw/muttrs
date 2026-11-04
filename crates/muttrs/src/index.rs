@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::filter::Filter;
 use crate::icons::Icons;
 use crate::theme::Theme;
 use crate::ui::truncate;
@@ -48,6 +49,19 @@ struct Row {
     repeated: bool,
 }
 
+/// What the Index's rows are ordered by when they aren't in threads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sort {
+    /// Newest first.
+    Date,
+    /// By the name, else the address, of whom they're from (to, in Sent).
+    Sender,
+    /// By subject, without its `Re:`.
+    Subject,
+    /// Largest first.
+    Size,
+}
+
 // Each bool says something of its own of the Index: what it lists, how, and whether it has come.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Index {
@@ -78,6 +92,11 @@ pub(crate) struct Index {
     more: More,
     /// What a search on the server found, if that's what this lists: its query, and how many it found.
     pub(crate) found: Option<(String, usize)>,
+    /// The Filter the rows are limited to, as written and read: only the Messages it picks show.
+    limit: Option<(String, Filter)>,
+    /// What the rows are ordered by when they aren't in threads, and whether the other way.
+    sort: Sort,
+    reverse: bool,
     cursor: usize,
     top: usize,
     height: usize,
@@ -115,6 +134,9 @@ impl Index {
             loaded: false,
             more: More::Idle,
             found: None,
+            limit: None,
+            sort: Sort::Date,
+            reverse: false,
             cursor: 0,
             top: 0,
             height: 0,
@@ -165,10 +187,17 @@ impl Index {
     /// Lays the rows out again, the cursor on Message `at` if it still shows.
     fn arrange(&mut self, at: Option<u32>) {
         let row = self.cursor;
+        let mut shown: Vec<usize> = (0..self.envelopes.len())
+            .filter(|&envelope| self.within_limit(&self.envelopes[envelope]))
+            .collect();
+        if !self.threaded {
+            self.order(&mut shown);
+        }
         self.rows = if self.threaded {
-            self.threads()
+            self.threads(&shown)
         } else {
-            (0..self.envelopes.len())
+            shown
+                .into_iter()
                 .map(|envelope| Row {
                     envelope,
                     tree: String::new(),
@@ -189,14 +218,24 @@ impl Index {
         }
     }
 
-    fn threads(&self) -> Vec<Row> {
-        let threaded = thread::threads(&self.envelopes);
+    /// The rows of the Envelopes `shown`, by their place, in threads among themselves.
+    fn threads(&self, shown: &[usize]) -> Vec<Row> {
+        let listed: Vec<Envelope>;
+        let (envelopes, shown): (&[Envelope], Option<&[usize]>) =
+            if shown.len() == self.envelopes.len() {
+                (&self.envelopes, None)
+            } else {
+                listed = shown.iter().map(|&at| self.envelopes[at].clone()).collect();
+                (&listed, Some(shown))
+            };
+        let place = |envelope: usize| shown.map_or(envelope, |shown| shown[envelope]);
+        let threaded = thread::threads(envelopes);
         let mut rows: Vec<Row> = Vec::with_capacity(threaded.len());
         let mut head = 0;
         // The subjects of the row's ancestors, by depth: its parent's last.
         let mut ancestors: Vec<&str> = Vec::new();
         for (at, message) in threaded.iter().enumerate() {
-            let envelope = &self.envelopes[message.envelope];
+            let envelope = &envelopes[message.envelope];
             ancestors.truncate(message.depth);
             let subject = base_subject(&envelope.subject);
             let repeated = self.hide_subjects
@@ -212,16 +251,16 @@ impl Index {
                 let folded_unread = folded
                     && replies
                         .iter()
-                        .any(|reply| !self.envelopes[reply.envelope].flags.seen);
+                        .any(|reply| !envelopes[reply.envelope].flags.seen);
                 rows.push(Row {
-                    envelope: message.envelope,
+                    envelope: place(message.envelope),
                     tree: String::new(),
                     head,
                     folded: if folded { message.replies } else { 0 },
                     folded_uids: if folded {
                         replies
                             .iter()
-                            .map(|reply| self.envelopes[reply.envelope].uid)
+                            .map(|reply| envelopes[reply.envelope].uid)
                             .collect()
                     } else {
                         Vec::new()
@@ -241,7 +280,7 @@ impl Index {
                     })
                     .collect();
                 rows.push(Row {
-                    envelope: message.envelope,
+                    envelope: place(message.envelope),
                     tree,
                     head,
                     folded: 0,
@@ -259,6 +298,70 @@ impl Index {
         self.rows
             .iter()
             .position(|row| self.envelopes[row.envelope].uid == uid)
+    }
+
+    /// Orders the Envelopes `shown`, by their place (newest first), by the sort: ties stay newest first.
+    fn order(&self, shown: &mut [usize]) {
+        let sender = |envelope: &Envelope| {
+            let whom = if self.sent {
+                envelope.to.first()
+            } else {
+                envelope.from.first()
+            };
+            whom.map_or_else(String::new, |address| {
+                address
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&address.email)
+                    .trim_matches(['"', '\''])
+                    .to_lowercase()
+            })
+        };
+        let envelopes = &self.envelopes;
+        match self.sort {
+            // As they're kept.
+            Sort::Date => {}
+            Sort::Sender => shown.sort_by_cached_key(|&at| sender(&envelopes[at])),
+            Sort::Subject => {
+                shown.sort_by_cached_key(|&at| base_subject(&envelopes[at].subject).to_lowercase());
+            }
+            Sort::Size => shown.sort_by_key(|&at| std::cmp::Reverse(envelopes[at].size)),
+        }
+        if self.reverse {
+            shown.reverse();
+        }
+    }
+
+    /// Orders the rows by `sort` (the other way if `reverse`), out of threads; or in threads, if it's None.
+    pub(crate) fn sort(&mut self, sort: Option<Sort>, reverse: bool) {
+        let at = self.current().map(|envelope| envelope.uid);
+        match sort {
+            Some(sort) => {
+                self.sort = sort;
+                self.reverse = reverse;
+                self.threaded = false;
+            }
+            None => self.threaded = true,
+        }
+        self.arrange(at);
+    }
+
+    /// What the rows are ordered by, when they aren't in threads, nor newest first, for people.
+    pub(crate) fn sorted(&self) -> Option<&'static str> {
+        if self.threaded {
+            return None;
+        }
+        Some(match (self.sort, self.reverse) {
+            (Sort::Date, false) => return None,
+            (Sort::Date, true) => "oldest first",
+            (Sort::Sender, false) => "by sender",
+            (Sort::Sender, true) => "by sender, Z to A",
+            (Sort::Subject, false) => "by subject",
+            (Sort::Subject, true) => "by subject, Z to A",
+            (Sort::Size, false) => "largest first",
+            (Sort::Size, true) => "smallest first",
+        })
     }
 
     /// Shows rows in threads, or not.
@@ -321,7 +424,12 @@ impl Index {
         picks: impl Fn(&Envelope) -> bool,
     ) -> (usize, usize) {
         let (mut picked, mut changed) = (0, 0);
-        for envelope in self.envelopes.iter().filter(|envelope| picks(envelope)) {
+        let shown: Vec<&Envelope> = self
+            .envelopes
+            .iter()
+            .filter(|envelope| self.within_limit(envelope) && picks(envelope))
+            .collect();
+        for envelope in shown {
             picked += 1;
             let did = if on {
                 self.selected.insert(envelope.uid)
@@ -331,6 +439,29 @@ impl Index {
             changed += usize::from(did);
         }
         (picked, changed)
+    }
+
+    /// Limits the rows to the Messages `limit` picks, as written and read; or not, if it's None. How many show.
+    pub(crate) fn limit(&mut self, limit: Option<(String, Filter)>) -> usize {
+        let at = self.current().map(|envelope| envelope.uid);
+        self.limit = limit;
+        self.arrange(at);
+        self.envelopes
+            .iter()
+            .filter(|envelope| self.within_limit(envelope))
+            .count()
+    }
+
+    /// The Filter the rows are limited to, as written, if they are.
+    pub(crate) fn limited(&self) -> Option<&str> {
+        self.limit.as_ref().map(|(written, _)| written.as_str())
+    }
+
+    /// Whether `envelope` shows, within the limit, if there's one.
+    fn within_limit(&self, envelope: &Envelope) -> bool {
+        self.limit
+            .as_ref()
+            .is_none_or(|(_, filter)| filter.matches(envelope))
     }
 
     /// The Envelopes listed, in no particular order.
@@ -1064,6 +1195,89 @@ mod tests {
             "not selected now"
         );
         assert_eq!(index.select_where(true, |_| false), (0, 0));
+    }
+
+    #[test]
+    fn limited_only_what_the_filter_picks_shows_in_threads_of_its_own() {
+        let mut index = index(true);
+        index.set(
+            vec![
+                envelope(1, 1, "Lunch", "Ann"),
+                reply(2, 2, &[1]),
+                reply(3, 3, &[2]),
+                envelope(4, 4, "Report", "Ann"),
+            ],
+            4,
+        );
+        let rows = |index: &Index| -> Vec<(u32, String)> {
+            index
+                .rows
+                .iter()
+                .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
+                .collect()
+        };
+        let shown = index.limit(Some(("from:bob".into(), "from:bob".parse().unwrap())));
+        assert_eq!(shown, 2);
+        assert_eq!(
+            rows(&index),
+            [(2, String::new()), (3, "└─".to_owned())],
+            "Bob's replies, a thread among themselves"
+        );
+        assert_eq!(index.limited(), Some("from:bob"));
+        assert_eq!(
+            index.select_where(true, |_| true),
+            (2, 2),
+            "only what shows"
+        );
+        assert_eq!(index.limit(None), 4);
+        assert_eq!(rows(&index).len(), 4);
+        assert_eq!(index.limited(), None);
+    }
+
+    #[test]
+    fn sorted_by_sender_subject_or_size_out_of_threads_or_the_other_way() {
+        let mut index = index(true);
+        let sized = |uid, day, subject: &str, from: &str, size| Envelope {
+            size,
+            ..envelope(uid, day, subject, from)
+        };
+        index.set(
+            vec![
+                sized(1, 1, "Re: banana", "carol", 30),
+                sized(2, 2, "apple", "Bob", 10),
+                sized(3, 3, "Cherry", "ann", 20),
+                sized(4, 4, "apple", "Ann", 5),
+            ],
+            4,
+        );
+        let uids = |index: &Index| -> Vec<u32> {
+            index
+                .rows
+                .iter()
+                .map(|row| index.envelopes[row.envelope].uid)
+                .collect()
+        };
+        index.sort(Some(Sort::Sender), false);
+        assert_eq!(
+            uids(&index),
+            [4, 3, 2, 1],
+            "ann before Bob, whatever the case; ties newest first"
+        );
+        assert_eq!(index.sorted(), Some("by sender"));
+        index.sort(Some(Sort::Subject), false);
+        assert_eq!(uids(&index), [4, 2, 1, 3], "without Re:");
+        index.sort(Some(Sort::Size), false);
+        assert_eq!(uids(&index), [1, 3, 2, 4]);
+        index.sort(Some(Sort::Size), true);
+        assert_eq!(uids(&index), [4, 2, 3, 1]);
+        assert_eq!(index.sorted(), Some("smallest first"));
+        index.sort(Some(Sort::Date), true);
+        assert_eq!(uids(&index), [1, 2, 3, 4], "oldest first");
+        index.sort(Some(Sort::Date), false);
+        assert_eq!(index.sorted(), None, "as listed");
+        index.sort(None, false);
+        assert!(index.threaded);
+        assert_eq!(index.sorted(), None);
     }
 
     #[test]

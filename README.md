@@ -112,16 +112,44 @@ They work as in mutt and vim. `?` shows the ones that apply.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:cd NAME` open a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
+| Anywhere | `?` keys · `:q` `q` quit (or close the Pager), once what's asked is done · `:q!` quit now · `$` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` run a command, or the shell · `:cd NAME` open a Mailbox · `:create NAME` `:rename NAME` `:delete-mailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser · after `:`, `/` or `S`, `Up` `Down` `Ctrl-p` `Ctrl-n` what was typed before |
 | Sidebar | `j` `k` `g` `G` move · `Enter` open · `Tab` `l` the Index · `\` show or hide |
-| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `Esc` unselect · `Tab` `h` the sidebar |
-| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` as in the Index · `q` back |
-| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `f` forward |
+| Index | `j` `k` `g` `G` `Ctrl-d` `Ctrl-u` move · `Enter` read · `/` `n` `N` search senders and subjects · `S` search the server · `T` threads or newest first · `o` `O` sort, or the other way · `za` `zM` `zR` fold the thread, all, none · `Space` select · `F` flag · `U` Unread or read · `Y` Labels · `d` delete (to Trash) · `a` archive · `s` move to a Mailbox · `u` undo that · `:junk` move to Junk · `|` pipe to a command · `Esc` unselect · `Tab` `h` the sidebar |
+| Pager | `j` `k` `Space` `b` `Ctrl-d` `Ctrl-u` `g` `G` scroll · `J` `K` the next Message, the previous · `/` `n` `N` search · `T` HTML or plain text · `h` every header, as written · `:source` the Message as it came · `I` load Remote Content · `H` voight's Heatmap · `o` Links · `v` Attachments · `F` `U` `Y` `d` `a` `s` `u` `|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
+| Writing, in the Index or the Pager | `m` a new Message · `r` reply · `R` reply to all · `L` reply to the mailing list · `f` forward · `:forward-attached` forward as an Attachment · `:bounce TO` send it on as it is |
 | A Draft | `y` send · `e` edit again · `a` attach a file · `D` detach the last · `P` postpone to Drafts · `q` `q` discard |
 | In Drafts | `e` resume a Postponed Draft |
 
+### Keys of your own
+
+`[keys.index]`, `[keys.sidebar]`, `[keys.pager]` and `[keys.draft]` in the configuration map a key to the keys it
+types in its place, as vim's `noremap` does: one, to give a key muttrs has another key (mutt's `bind`); or several,
+typed in turn, as a macro (mutt's `macro`). What a key maps to isn't mapped again, and `?` lists yours.
+
+```toml
+[keys.index]
+x = "a"                           # x archives too
+"<C-a>" = ":cd Archive<Enter>"    # Control-a opens the Archive
+
+[keys.pager]
+"<Space>" = "J"                   # Space goes on to the next Message
+```
+
+Keys are written as vim writes them: a character as itself, and `<Enter>`, `<Esc>`, `<Tab>`, `<S-Tab>`, `<Space>`,
+`<BS>`, `<Del>`, `<Up>`, `<Down>`, `<Left>`, `<Right>`, `<Home>`, `<End>`, `<PageUp>`, `<PageDown>`, `<F1>` to `<F12>`,
+`<lt>` (for `<`); with Control as `<C-x>` and Alt as `<M-x>`. A key of your own is one key, as muttrs' pairs (`za`,
+`q q`) would get in the way of more.
+
+The sidebar lists each Account and its Mailboxes. With several Accounts, their Inboxes come first, under `Inboxes`,
+each by its Account's name, in the Accounts' order.
+
 `F`, `U`, `Y`, `d`, `a` and `s` act on the Messages selected with `Space`, if any, or else on the one at the cursor; on
-a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name.
+a folded thread, on all of it. `s` lists the Account's Mailboxes, narrowed as you type their name. `u` moves the
+Messages last deleted, archived or moved back where they were, and the ones before them as it's pressed again, found
+where they went by their `Message-ID`; on Gmail, a Message archived goes back to the Inbox as a copy, as taking it
+out of All Mail would delete it. A server can take a while to show them where they went (Proton's Bridge, archiving):
+muttrs looks again for half a minute, and if they're still not there, `u` tries again later. What's deleted from
+Trash is deleted for good: there's no undoing that.
 
 What muttrs asks of the server, it asks in the background, one Task at a time, in the order asked (a Message to read
 first): what you flag, delete, archive, move or label shows done at once, and stays so while the server catches up.
@@ -137,7 +165,23 @@ without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:`
 repeated picks either, as in `from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command
 line, `Tab` and `Shift-Tab` complete the command, then the filter's qualifier, then its value: the addresses of the
 Messages listed (by the address, or a word of the name), their Labels (in double quotes, with spaces), or `is:`'s
-values that would pick some of them.
+values that would pick some of them. `o`, then a letter, sorts the Index as mutt's does: by `d`ate (newest first), `f`rom (whom to, in Sent), `s`ubject,
+si`z`e (largest first), or in `t`hreads; `O` sorts the other way. Sorted otherwise than by date or in threads, it's
+out of threads.
+
+`:junk` moves the Messages an action is for to Junk, as `d` does to Trash (`u` undoes it). `:bounce TO` sends them on
+as they are, under `Resent-` headers, without a copy in Sent, as mutt's `b` does; `:forward-attached` forwards one
+as an Attachment of its own (`message/rfc822`) rather than quoted. `:create Work/Reports` makes a Mailbox,
+`:rename NAME` renames the open one, and `:delete-mailbox NAME` deletes one, its Messages with it; those with a Role
+(the Inbox, Trash and the like) keep their names, and stay.
+
+`|` pipes Messages to a command, which has the terminal until `Enter` brings muttrs back: the one the Pager shows,
+as it came, or those selected (else the one at the cursor, a folded thread whole), several as an mbox, the oldest
+first, as `git am` and `b4 am` take a series of patches: `|git am -3`. `!` runs a command, or the shell; both keep a
+History of their own.
+
+`:limit` lists only the Messages a filter picks, in threads among themselves,
+until `:limit` alone lists them all again; `:select` then picks among those.
 
 After `:`, `/` or `S`, `Up` and `Down` go back through what was typed there before that starts with what's typed, as
 in vim; `Ctrl-p` and `Ctrl-n` through all of it. Commands have a History of their own, searches (`/` and `S`) share
@@ -170,7 +214,9 @@ never evidence of authorship.
 
 `/` searches what the Index lists, by sender and subject, as you'd search in vim. `S` searches the whole Mailbox on
 the server, for text anywhere in its Messages, and lists the newest 300 it finds as an Index of their own until
-`Esc`. On Gmail, `S` takes Gmail's own syntax: `from:ann has:attachment after:2026/10/01`.
+`Esc`. On Gmail, `S` takes Gmail's own syntax: `from:ann has:attachment after:2026/10/01`. `:search QUERY` searches
+every Mailbox of the Account, and lists those it found Messages in, how many in each; choosing one lists what it
+found there, as `S` does.
 
 ## Writing
 
@@ -192,9 +238,25 @@ On Mon 2 Nov 2026 at 09:30, Ann <ann@example.com> wrote:
 > Lunch on Thursday?
 ```
 
+Addresses complete from those muttrs has seen; from a command, as mutt's `query_command` (`query_command = "khard
+email --parsable %s"`, or `"abook --mutt-query %s"`: `%s` is what's typed, and it prints a line of its own, then one
+an address, `address<TAB>name`), whose addresses come first once it answers; and from an Account's address book on a
+CardDAV server, read when muttrs starts:
+
+```toml
+[account.carddav]
+url = "https://dav.example.com/addressbooks/alex/contacts/" # the address book's collection
+# username = "alex"                                         # the Account's, by default
+# password_command = "pass show dav"                        # the Account's password, by default
+```
+
 The addresses muttrs has seen are kept in `~/.cache/muttrs/addresses.txt`, one a line, which vim and Neovim can
 complete from in the Draft's headers too (`Ctrl-X Ctrl-K`), with `autocmd FileType mail setlocal
 dictionary+=~/.cache/muttrs/addresses.txt iskeyword+=@-@,.,-`.
+
+`L` replies to the mailing list a Message came through, to the list alone (its `List-Post`), as mutt's list-reply
+does. `:unsubscribe`, in the Pager, unsubscribes from that list as the Message says to (`List-Unsubscribe`): by a
+POST alone where it says one does (RFC 8058), else by mail, sent at once, else at the list's page, in the browser.
 
 The Account's signature goes in after a `-- ` line, above the quote in a reply. A reply is from the address of the
 Account's (its own, or one of its `identities`) the Message was sent to. Quitting the editor on a new Draft without
@@ -243,7 +305,11 @@ A theme of your own is a file, `~/.config/muttrs/themes/NAME.toml`, that restyle
 [`themes/catppuccin-mocha.toml`](themes/catppuccin-mocha.toml) shows every style there is, and how they're written.
 
 muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.cache/muttrs/accounts/`, readable by
-you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline.
+you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline. What's
+listed is brought up to date by what changed (Messages new or gone, Flags, Labels), as a Message's headers never
+change: where the server keeps mod-sequences (CONDSTORE, as Dovecot and Gmail do), only the Flags of the Messages
+that changed since are asked for, else every listed one's; should it be kept wrong, `:sync!` forgets what's kept of the open Mailbox and lists it anew, as when it was
+first opened.
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.
 

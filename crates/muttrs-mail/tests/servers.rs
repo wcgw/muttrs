@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use muttrs_mail::account::{Endpoint, Tls};
-use muttrs_mail::cache::Cache;
-use muttrs_mail::client::{Client, Connection, Request, Update};
+use muttrs_mail::cache::{Cache, Listed};
+use muttrs_mail::client::{Client, Connection, Request, Update, Went};
 use muttrs_mail::imap::{Credentials, Error, Session};
 use muttrs_mail::tls::Trust;
-use muttrs_mail::{AccountConfig, Message, Role, tls};
+use muttrs_mail::{AccountConfig, Envelope, Flags, Message, Role, tls};
 
 fn ca() -> std::path::PathBuf {
     std::env::var_os("MUTTRS_TEST_CA")
@@ -225,7 +225,7 @@ async fn without_the_ca_the_certificate_is_refused() {
 /// Waits for the first update `wanted` takes, failing after a while.
 async fn until<T>(
     updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>,
-    wanted: impl Fn(&Update) -> Option<T>,
+    mut wanted: impl FnMut(&Update) -> Option<T>,
 ) -> T {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -957,6 +957,502 @@ async fn tasks_are_told_started_and_finished_and_what_they_changed_after() {
         "deleted, as listed since"
     );
     assert_eq!(after("finished archive"), "listed b c", "refused: b stays");
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn resyncing_lists_anew_what_was_kept_wrong() {
+    let username = user("resync");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session
+        .append("INBOX", "()", &message("as it is"))
+        .await
+        .unwrap();
+    let selected = session.select("INBOX").await.unwrap();
+    // The cache keeps it under another subject, as a fault would leave it: what's listed is brought up to date by
+    // its Flags, and a Message's headers never change, so opening and refreshing keep it so.
+    let root = std::env::temp_dir().join(format!("muttrs-resync-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let kept = |subject: &str| {
+        let header = format!("Subject: {subject}\r\n\r\n");
+        Listed {
+            uid_validity: selected.uid_validity,
+            exists: 1,
+            highest_modseq: None,
+            envelopes: vec![Envelope::read(
+                1,
+                Flags::default(),
+                None,
+                0,
+                header.as_bytes(),
+            )],
+        }
+    };
+    Cache::new(Some(root.clone())).keep_envelopes("INBOX", &kept("kept wrong"));
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(Some(root.clone())),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    // What's listed when the asked is finished: the Inbox's subjects, as last told.
+    let listed_once_finished =
+        async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>, task| {
+            let mut subjects = Vec::new();
+            until(updates, |update| match update {
+                Update::Envelopes {
+                    mailbox, envelopes, ..
+                } if mailbox == "INBOX" => {
+                    subjects = envelopes.iter().map(|e| e.subject.clone()).collect();
+                    None
+                }
+                Update::Finished(finished) if *finished == task => Some(()),
+                Update::Failed(failed) => panic!("{failed}"),
+                _ => None,
+            })
+            .await;
+            subjects
+        };
+    let open = client.send(Request::Open("INBOX".into()));
+    assert_eq!(
+        listed_once_finished(&mut updates, open).await,
+        ["kept wrong"]
+    );
+    let refresh = client.send(Request::Refresh);
+    assert_eq!(
+        listed_once_finished(&mut updates, refresh).await,
+        ["kept wrong"]
+    );
+
+    let resync = client.send(Request::Resync("INBOX".into()));
+    assert_eq!(
+        listed_once_finished(&mut updates, resync).await,
+        ["as it is"]
+    );
+    let kept = Cache::new(Some(root.clone())).envelopes("INBOX").unwrap();
+    assert_eq!(kept.envelopes[0].subject, "as it is", "kept anew");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn moving_back_undoes_deleting_and_moving() {
+    let username = user("undo");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["kept", "deleted", "moved"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    session.create("Trash").await.unwrap();
+    session.create("Work").await.unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\ntrash = \"Trash\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 3 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    let of = |subject: &str| {
+        let envelope = listed.iter().find(|e| e.subject == subject).unwrap();
+        (envelope.uid, envelope.message_id.clone().unwrap())
+    };
+    let ((deleted, deleted_id), (moved, moved_id)) = (of("deleted"), of("moved"));
+    // What's said once the Task's finished: what it did, or why it didn't.
+    let said = async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>, task| {
+        let mut said = String::new();
+        until(updates, |update| match update {
+            Update::Done(text) | Update::Failed(text) => {
+                said.clone_from(text);
+                None
+            }
+            Update::Finished(finished) if *finished == task => Some(()),
+            _ => None,
+        })
+        .await;
+        said
+    };
+    let delete = client.send(Request::Delete {
+        mailbox: "INBOX".into(),
+        uids: vec![deleted],
+    });
+    assert_eq!(said(&mut updates, delete).await, "Moved a Message to Trash");
+    let elsewhere = client.send(Request::Move {
+        mailbox: "INBOX".into(),
+        uids: vec![moved],
+        to: "Work".into(),
+    });
+    assert_eq!(
+        said(&mut updates, elsewhere).await,
+        "Moved a Message to Work"
+    );
+    assert_eq!(session.counts("INBOX").await.unwrap().messages, 1);
+
+    // Undone, the last first.
+    let back = client.send(Request::MoveBack {
+        went: Went::Mailbox("Work".into()),
+        to: "INBOX".into(),
+        message_ids: vec![moved_id],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Inbox"
+    );
+    let back = client.send(Request::MoveBack {
+        went: Went::Trash,
+        to: "INBOX".into(),
+        message_ids: vec![deleted_id],
+    });
+    assert_eq!(
+        said(&mut updates, back).await,
+        "Moved a Message back to Inbox"
+    );
+    for (mailbox, messages) in [("INBOX", 3), ("Trash", 0), ("Work", 0)] {
+        assert_eq!(
+            session.counts(mailbox).await.unwrap().messages,
+            messages,
+            "{mailbox}"
+        );
+    }
+
+    // Asked before the server shows it where it went, as a slow one (Proton's Bridge, archiving) can: it's looked
+    // for again, and moved back once it's there.
+    let late = client.send(Request::MoveBack {
+        went: Went::Trash,
+        to: "INBOX".into(),
+        message_ids: vec!["late@example.com".into()],
+    });
+    let not_yet = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(Update::Finished(task)) = updates.recv().await
+                && task == late
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(not_yet.is_err(), "not given up at once");
+    session
+        .append("Trash", "()", &message("late"))
+        .await
+        .unwrap();
+    let mut moved_back = false;
+    let mut said = String::new();
+    until(&mut updates, |update| match update {
+        Update::MovedBack(task) if *task == late => {
+            moved_back = true;
+            None
+        }
+        Update::Done(text) | Update::Failed(text) => {
+            said.clone_from(text);
+            None
+        }
+        Update::Finished(task) if *task == late => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(moved_back, "{said}");
+    assert_eq!(said, "Moved a Message back to Inbox");
+    assert_eq!(session.counts("INBOX").await.unwrap().messages, 4);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn searching_every_mailbox_says_where_it_found_messages() {
+    let username = user("everywhere");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session.create("Work").await.unwrap();
+    session.create("Trash").await.unwrap();
+    for (mailbox, subject) in [
+        ("INBOX", "budget"),
+        ("INBOX", "lunch"),
+        ("Work", "budget"),
+        ("Work", "budget-2027"),
+    ] {
+        session
+            .append(mailbox, "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\ntrash = \"Trash\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 2 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    client.send(Request::SearchAll {
+        query: "budget".into(),
+    });
+    let mut found = until(&mut updates, |update| match update {
+        Update::FoundIn { found, .. } => Some(found.clone()),
+        _ => None,
+    })
+    .await;
+    found.sort();
+    assert_eq!(found, [("INBOX".to_owned(), 1), ("Work".to_owned(), 2)]);
+
+    // Searched only to read: the Inbox's Messages change as before.
+    let lunch = listed.iter().find(|e| e.subject == "lunch").unwrap().uid;
+    client.send(Request::Delete {
+        mailbox: "INBOX".into(),
+        uids: vec![lunch],
+    });
+    assert_eq!(done(&mut updates).await, "Moved a Message to Trash");
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn mailboxes_are_created_renamed_and_deleted_and_messages_bounced() {
+    let username = user("boxes");
+    let to = user("bounced-to");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session
+        .append("INBOX", "()", &message("bounced"))
+        .await
+        .unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 31587, tls = \"starttls\" }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    let listed = async |updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>| {
+        let mut names = until(updates, |update| match update {
+            Update::Mailboxes(mailboxes) => Some(
+                mailboxes
+                    .iter()
+                    .map(|mailbox| mailbox.path.join("/"))
+                    .filter(|path| path.starts_with("Work"))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .await;
+        names.sort();
+        names
+    };
+    client.send(Request::CreateMailbox("Work/Reports".into()));
+    assert_eq!(done(&mut updates).await, "Created Work/Reports");
+    assert_eq!(listed(&mut updates).await, ["Work", "Work/Reports"]);
+    client.send(Request::RenameMailbox {
+        mailbox: "Work/Reports".into(),
+        to: "Work/Été".into(),
+    });
+    assert_eq!(done(&mut updates).await, "Renamed Reports Work/Été");
+    assert_eq!(listed(&mut updates).await, ["Work", "Work/Été"]);
+    client.send(Request::DeleteMailbox("Work/&AMk-t&AOk-".into()));
+    assert_eq!(done(&mut updates).await, "Deleted Été");
+    // `Work`, only ever its parent, may go with it, as Dovecot's does.
+    assert!(!listed(&mut updates).await.contains(&"Work/Été".to_owned()));
+
+    // Sent on as it is, under Resent- headers.
+    let original = message("bounced");
+    let from = muttrs_mail::Address {
+        name: None,
+        email: username.clone(),
+    };
+    let built = muttrs_mail::compose::bounced(
+        &original,
+        &from,
+        &[muttrs_mail::Address {
+            name: None,
+            email: to.clone(),
+        }],
+        "<resent@example.com>",
+    );
+    client.send(Request::Bounce {
+        built: Box::new(built),
+    });
+    let sent = until(&mut updates, |update| match update {
+        Update::Sent { sent, .. } => Some(sent.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(sent, Ok(()));
+    assert_eq!(delivered(&to).await, ["bounced"]);
+}
+
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn what_changed_since_is_what_condstore_says() {
+    let username = user("condstore");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    for subject in ["a", "b", "c"] {
+        session
+            .append("INBOX", "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    assert!(session.can_condstore(), "Dovecot keeps mod-sequences");
+    let before = session
+        .select("INBOX")
+        .await
+        .unwrap()
+        .highest_modseq
+        .unwrap();
+    session.set_flag(&[2], "\\Flagged", true).await.unwrap();
+    let changed = session.changed_flags("1:3", before).await.unwrap();
+    assert_eq!(
+        changed.iter().map(|(uid, _)| *uid).collect::<Vec<_>>(),
+        [2],
+        "only what changed"
+    );
+    assert!(changed[0].1.flagged);
+    assert_eq!(session.uids_in("1:3").await.unwrap().len(), 3);
+
+    // The client brings what it listed up to date by that: a Message read elsewhere, another expunged.
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    let open = client.send(Request::Open("INBOX".into()));
+    until(&mut updates, |update| {
+        matches!(update, Update::Finished(task) if *task == open).then_some(())
+    })
+    .await;
+    session.set_flag(&[1], "\\Seen", true).await.unwrap();
+    session.expunge(&[3]).await.unwrap();
+    let refresh = client.send(Request::Refresh);
+    let mut listed = Vec::new();
+    until(&mut updates, |update| match update {
+        Update::Envelopes {
+            mailbox, envelopes, ..
+        } if mailbox == "INBOX" => {
+            listed = envelopes
+                .iter()
+                .map(|e| (e.subject.clone(), e.flags.seen, e.flags.flagged))
+                .collect();
+            None
+        }
+        Update::Finished(task) if *task == refresh => Some(()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        listed,
+        [("a".to_owned(), true, false), ("b".to_owned(), false, true)],
+        "a read, b flagged, c gone"
+    );
 }
 
 /// Waits for what the client says it did, failing if it says it couldn't.

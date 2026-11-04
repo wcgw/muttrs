@@ -127,7 +127,9 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
 - [x] More of a Mailbox than its newest 300 Envelopes, 300 at a time as the Index's cursor nears the end
 - [x] An Envelope cache: the Mailboxes and each Mailbox's Envelopes kept, shown at once (before the server says) and
       brought up to date rather than fetched again; offline, what's cached can be listed and read
-- [ ] CONDSTORE/QRESYNC, to bring the cache up to date by what changed rather than by every listed Message's Flags
+- [x] CONDSTORE, to bring the cache up to date by what changed rather than by every listed Message's Flags:
+      `CHANGEDSINCE` the mod-sequence it was last brought up to date to (kept with it), and what's gone by one
+      `UID SEARCH`; QRESYNC's `VANISHED` would save that search, where servers have it
 - [x] Moving to a Mailbox by name (`s`, narrowed as it's typed), and Selections (`Space`) to act on several
       Messages; a folded thread is acted on whole
 - [x] Address completion from the Envelopes and Messages seen: `m` asks To (`Tab` completes) and Subject before the
@@ -150,23 +152,35 @@ and `muttrs trust NAME` shows and keeps what the servers present. Tested in-proc
       it's finished (quick successive actions no longer show what they took out again); a Message to read goes first;
       sending in the background, the Draft back if it fails; the status line's spinner, the Task being done and how
       many more; quitting waits for them (`:q!` doesn't)
+- [x] With several Accounts, their Inboxes first in the sidebar, under `Inboxes` (a heading, not chosen), each by
+      its Account's name
+- [x] `:sync!`: the open Mailbox listed anew, what's kept of it (the cache's too) and of the Labels forgotten; `$`
+      in the Pager too
 
 ### 8. What mutt users would miss
 
 Not there yet, roughly in the order a mutt user would reach for them:
 
-- [ ] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
-      where they went
-- [ ] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`List-Unsubscribe`)
-- [ ] The Pager's full headers, and the Message's source (mutt's `h`)
-- [ ] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`)
-- [ ] Limiting the Index to what a Filter picks (mutt's `l`), without asking the server as `S` does
-- [ ] Piping a Message to a command (`|`), as patches to `git am` or `b4`; a shell (`!`)
-- [ ] Sorting by sender, subject or size, besides threads and newest first
-- [ ] Searching every Mailbox of an Account, not only the open one
-- [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV
-- [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
-      Attachment
+- [x] Undo (`u`) of deleting, archiving and moving, which act on the server at once: the Messages moved back from
+      where they went, found there by their `Message-ID`: looked for again for half a minute, as a server can be slow
+      to show them there, and kept for `u` again if they're not
+- [x] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`:unsubscribe`, by
+      `List-Unsubscribe`: one click, RFC 8058, else by mail, else at the list's page)
+- [x] The Pager's full headers (`h`, as mutt's), and the Message's source (`:source`)
+- [x] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`), as vim's `noremap`:
+      `[keys.index]` and the like map a key to the keys it types
+- [x] Limiting the Index to what a Filter picks (`:limit`, as mutt's `l`, which is muttrs' open), without asking
+      the server as `S` does
+- [x] Piping a Message to a command (`|`), as patches to `git am` or `b4` (several as an mbox, the oldest first);
+      a shell (`!`)
+- [x] Sorting by sender, subject or size, besides threads and newest first: `o`, or `O` the other way, then a
+      letter, as mutt's
+- [x] Searching every Mailbox of an Account, not only the open one (`:search`): where it found Messages, how many
+      in each; one chosen, what's found there
+- [x] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), asked aside
+      as `Tab` completes; CardDAV (`[account.carddav]`), its cards read when muttrs starts
+- [x] Marking as Junk (`:junk`); creating, renaming and deleting Mailboxes (`:create`, `:rename`,
+      `:delete-mailbox`); bouncing (`:bounce`, as mutt's `b`); forwarding as an Attachment (`:forward-attached`)
 
 ### Later
 

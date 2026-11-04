@@ -2,12 +2,14 @@
 
 pub mod account;
 pub mod cache;
+pub mod carddav;
 pub mod client;
 pub mod compose;
 pub mod envelope;
 pub mod imap;
 pub mod label;
 pub mod mailbox;
+pub mod mbox;
 pub mod message;
 pub mod oauth2;
 pub mod secret;

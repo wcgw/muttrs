@@ -20,6 +20,8 @@ pub(crate) struct AddressBook {
     path: Option<PathBuf>,
     /// Whether it learnt anything since it was kept.
     changed: bool,
+    /// The addresses of the Accounts' address books (CardDAV), by address in lower case: offered too, never kept.
+    contacts: HashMap<String, Address>,
 }
 
 impl AddressBook {
@@ -84,9 +86,17 @@ impl AddressBook {
         if fragment.is_empty() {
             return Vec::new();
         }
+        // Contacts never seen are offered after those that were, as seen never.
+        let contacts = self
+            .contacts
+            .iter()
+            .filter(|(email, _)| !self.known.contains_key(*email))
+            .map(|(_, address)| (address, 0));
         let mut found: Vec<(bool, u32, String)> = self
             .known
             .values()
+            .map(|(address, seen)| (address, *seen))
+            .chain(contacts)
             .filter_map(|(address, seen)| {
                 let written = address.to_string();
                 let lower = written.to_lowercase();
@@ -96,7 +106,7 @@ impl AddressBook {
                         || lower
                             .split_whitespace()
                             .any(|word| word.trim_start_matches(['"', '<']).starts_with(&fragment));
-                    (starts, *seen, written)
+                    (starts, seen, written)
                 })
             })
             .collect();
@@ -106,6 +116,14 @@ impl AddressBook {
             .take(OFFERED)
             .map(|(_, _, written)| written)
             .collect()
+    }
+
+    /// Offers the addresses of an address book's `contacts` too, under their names there.
+    pub(crate) fn add_contacts(&mut self, contacts: Vec<Address>) {
+        for contact in contacts {
+            self.contacts
+                .insert(contact.email.to_ascii_lowercase(), contact);
+        }
     }
 
     /// Keeps the addresses in the file, the most often seen first, if anything was learnt.
@@ -131,6 +149,48 @@ impl AddressBook {
             self.changed = false;
         }
     }
+}
+
+/// The addresses `command` finds for `fragment`, as mutt's `query_command` gives them: `%s` in it is `fragment`,
+/// quoted for the shell (else it goes at the end); it prints a line of its own first, then one an address,
+/// `address<TAB>name<TAB>anything else`. Waits for it: to be run aside.
+pub(crate) fn query(command: &str, fragment: &str) -> Vec<Address> {
+    let quoted = format!("'{}'", fragment.replace('\'', "'\\''"));
+    let command = if command.contains("%s") {
+        command.replace("%s", &quoted)
+    } else {
+        format!("{command} {quoted}")
+    };
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => queried(&String::from_utf8_lossy(&output.stdout)),
+        Err(error) => {
+            tracing::warn!(command, %error, "the query command couldn't run");
+            Vec::new()
+        }
+    }
+}
+
+/// The addresses a query command printed, after its first line.
+fn queried(output: &str) -> Vec<Address> {
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let email = fields.next()?.trim();
+            let name = fields.next().map(str::trim).filter(|name| !name.is_empty());
+            email.contains('@').then(|| Address {
+                name: name.map(str::to_owned),
+                email: email.to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -197,5 +257,48 @@ mod tests {
             ]
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn contacts_are_offered_after_what_was_seen_and_never_kept() {
+        let path = std::env::temp_dir().join(format!("muttrs-contacts-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut book = AddressBook::load(Some(path.clone()));
+        book.learn(&[address(Some("Ann Seen"), "ann@example.com")]);
+        book.add_contacts(vec![
+            address(Some("Ann Contact"), "ann@example.com"),
+            address(Some("Anna Book"), "anna@example.com"),
+        ]);
+        assert_eq!(
+            book.complete("ann"),
+            ["Ann Seen <ann@example.com>", "Anna Book <anna@example.com>"]
+        );
+        book.save();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "Ann Seen <ann@example.com>\n"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_query_command_is_read_as_mutt_reads_it() {
+        assert_eq!(
+            queried(
+                "Searching...\nann@example.com\tAnn Example\twork\nbob@example.com\t\nnot an address\n"
+            ),
+            [
+                address(Some("Ann Example"), "ann@example.com"),
+                address(None, "bob@example.com")
+            ]
+        );
+        assert_eq!(
+            query("echo first; echo %s@example.com", "o'neil")
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["o'neil@example.com"],
+            "the fragment quoted for the shell"
+        );
     }
 }

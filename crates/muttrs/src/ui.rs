@@ -1,5 +1,6 @@
 //! The terminal UI: what's on screen, the keys, and the loop that draws it as events come.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::filter::{self, Filter};
 use crate::history::{self, History, Recall};
 use crate::icons::Icons;
 use crate::index::{self, Index};
+use crate::keys;
 use crate::login;
 use crate::overlay::{self, Outcome, Overlay, Verb};
 use crate::pager::{self, Pager, Request};
@@ -59,6 +61,12 @@ pub(crate) enum Event {
     Read(u64),
     /// How signing in to an Account again goes, by the sign-in's ID.
     SignIn(u64, sign_in::Progress),
+    /// Unsubscribing from a mailing list by its one-click URL went so: what's said of it.
+    Unsubscribed(Result<String, String>),
+    /// What the query command found for what was typed.
+    Queried(String, Vec<muttrs_mail::Address>),
+    /// An Account's address book's contacts, by the Account's name, or why they couldn't be had.
+    Contacts(String, Result<Vec<muttrs_mail::Address>, String>),
 }
 
 /// What the UI is set up with.
@@ -96,6 +104,8 @@ impl Prompt {
 struct Completing {
     /// What's before it: the addresses typed already.
     before: String,
+    /// What was typed, that it completes.
+    typed: String,
     candidates: Vec<String>,
     /// The one shown.
     at: usize,
@@ -113,6 +123,10 @@ enum PromptKind {
     To,
     /// A new Message's subject, after whom it's to.
     Subject,
+    /// A command to pipe the Messages to.
+    Pipe,
+    /// A command to run, with the terminal.
+    Shell,
 }
 
 impl PromptKind {
@@ -121,10 +135,49 @@ impl PromptKind {
         match self {
             Self::Command => Some(history::Kind::Command),
             Self::Search | Self::Server => Some(history::Kind::Search),
+            Self::Pipe | Self::Shell => Some(history::Kind::Shell),
             Self::Attach | Self::To | Self::Subject => None,
         }
     }
 }
+
+/// What `u` undoes: Messages moved, archived or deleted to Trash, moved back from where they went.
+struct Undo {
+    account: usize,
+    went: client::Went,
+    /// Where they were, by its name on the server.
+    from: String,
+    /// Theirs: they're found by them where they went, with UIDs of their own there.
+    message_ids: Vec<String>,
+}
+
+/// A shell command to run, with the terminal.
+struct Shell {
+    command: String,
+    /// What's piped to it, if anything.
+    input: Option<Vec<u8>>,
+}
+
+/// What's done with Messages once they're fetched.
+enum Then {
+    /// They're piped to this command.
+    Pipe(String),
+    /// They're sent on as they are to these (mutt's bounce).
+    Bounce(Vec<muttrs_mail::Address>),
+}
+
+/// Messages being fetched, to do something with once they've all come.
+struct Piping {
+    then: Then,
+    account: usize,
+    mailbox: String,
+    /// Their UIDs, in the order they're piped: the oldest first.
+    uids: Vec<u32>,
+    got: HashMap<u32, Arc<Vec<u8>>>,
+}
+
+/// How many moves `u` can undo, the last first.
+const UNDOES: usize = 100;
 
 /// What's being written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +185,11 @@ enum Writing {
     New,
     Reply,
     ReplyAll,
+    /// A reply to the mailing list the Message came through.
+    ReplyList,
     Forward,
+    /// A forward with the Message as an Attachment of its own.
+    ForwardAttached,
     /// A Postponed Draft, resumed.
     Resume,
 }
@@ -184,6 +241,8 @@ pub(crate) struct App {
     pager: Option<Pager>,
     /// The Message the Pager shows, or is waiting for.
     opened: Option<Opened>,
+    /// The Message the Pager shows: the one opened, once it's come. Until then, it shows the one before.
+    shown: Option<Opened>,
     /// The Pager, by its ID, whose Message is marked read once it's shown for `pager_read_delay`.
     reading: Option<u64>,
     overlay: Option<Overlay>,
@@ -200,6 +259,8 @@ pub(crate) struct App {
     sending: Vec<(Task, Compose)>,
     /// The Drafts that couldn't be sent, shown again once no other is.
     unsent: Vec<Compose>,
+    /// The Messages that unsubscribe from mailing lists, being sent, by their Account and Task: the list's name.
+    unsubscribing: Vec<(usize, Task, String)>,
     /// How many Drafts this run has started, to name their files.
     drafts: u64,
     /// Whether the Draft is to be edited in `$EDITOR`, which the loop does between draws.
@@ -212,6 +273,10 @@ pub(crate) struct App {
     writing_to: Option<Vec<muttrs_mail::Address>>,
     /// The addresses seen, to complete with.
     addresses: AddressBook,
+    /// What the query command found, and for what that was typed.
+    queried: Option<(String, Vec<muttrs_mail::Address>)>,
+    /// What the query command is asked for, while it is.
+    querying: Option<String>,
     /// What was typed at the prompt before.
     history: History,
     /// Where the sidebar and the Index were last drawn, for the mouse.
@@ -221,6 +286,21 @@ pub(crate) struct App {
     assessments: Option<Assessments>,
     /// Whether the Pager shows its prose as the Heatmap of its Assessment.
     heatmap: bool,
+    /// What `u` undoes, the last done last.
+    undo: Vec<Undo>,
+    /// What `u` is undoing, by its Account and Task: kept for `u` again unless it's told moved back.
+    undoing: Vec<(usize, Task, Undo)>,
+    /// The command to run with the terminal, which the loop does between draws.
+    shell: Option<Shell>,
+    /// What a search of every Mailbox found, while its list shows: the Account, the query, and the Mailboxes, by
+    /// their names on the server, as listed.
+    found_in: Option<(usize, String, Vec<String>)>,
+    /// The Messages being fetched, to do something with once they've all come.
+    piping: Option<Piping>,
+    /// The Messages being sent on as they are, by their Account and Task: to whom, as written.
+    bouncing: Vec<(usize, Task, String)>,
+    /// The open Mailbox, being renamed: its Account, and its new path (`Work/Reports`), to open it by.
+    renamed: Option<(usize, String)>,
     /// When the UI started: the status line's spinner turns by it.
     started: Instant,
     /// Whether to quit once the Accounts' Tasks are done, as quitting asked; until a key's pressed.
@@ -269,6 +349,7 @@ impl App {
             searched: None,
             pager: None,
             opened: None,
+            shown: None,
             reading: None,
             overlay: None,
             prompt: None,
@@ -279,6 +360,7 @@ impl App {
             compose: None,
             sending: Vec::new(),
             unsent: Vec::new(),
+            unsubscribing: Vec::new(),
             drafts: 0,
             edit: false,
             write_when_fetched: None,
@@ -289,11 +371,20 @@ impl App {
             } else {
                 AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")))
             },
+            queried: None,
+            querying: None,
             history: History::load(xdg::state_dir().map(|state| state.join("history"))),
             drawn: (Rect::default(), Rect::default()),
             assessor,
             assessments,
             heatmap: false,
+            undo: Vec::new(),
+            undoing: Vec::new(),
+            shell: None,
+            found_in: None,
+            piping: None,
+            bouncing: Vec::new(),
+            renamed: None,
             started: Instant::now(),
             quitting: false,
             quit: false,
@@ -415,6 +506,7 @@ impl App {
         );
         let request = pager.remote_to_fetch();
         self.pager = Some(pager);
+        self.shown.clone_from(&self.opened);
         self.read_later(id);
         self.fulfil(request);
     }
@@ -518,6 +610,15 @@ impl App {
             Event::Account(account, update) => self.on_account(account, update),
             Event::SignIn(id, progress) => self.signing_in(id, progress),
             Event::Voight(said) => self.voight_said(said),
+            Event::Queried(asked, found) => self.take_queried(&asked, found),
+            Event::Contacts(account, contacts) => match contacts {
+                Ok(contacts) => self.addresses.add_contacts(contacts),
+                Err(why) => self.say(&format!("{account}'s address book: {why}"), true),
+            },
+            Event::Unsubscribed(said) => match said {
+                Ok(said) => self.say(&said, false),
+                Err(said) => self.say(&said, true),
+            },
             Event::Read(pager) => {
                 if self.reading == Some(pager) {
                     self.reading = None;
@@ -559,16 +660,7 @@ impl App {
                     state.connection = connection;
                 }
             }
-            Update::Mailboxes(mailboxes) => {
-                state.mailboxes = mailboxes;
-                // The first Account's Inbox, to start with.
-                if self.index.is_none()
-                    && let Some(inbox) =
-                        state.with_role(Role::Inbox).map(|inbox| inbox.name.clone())
-                {
-                    self.open_mailbox(account, &inbox);
-                }
-            }
+            Update::Mailboxes(mailboxes) => self.listed(account, mailboxes),
             Update::Labels(labels) => state.labels = labels,
             Update::Counts { mailbox, counts } => {
                 state.counts.insert(mailbox, counts);
@@ -624,6 +716,7 @@ impl App {
                 self.focus = Focus::Index;
             }
             Update::Body { mailbox, uid, body } => {
+                self.pipe_when_fetched(account, &mailbox, uid, &body);
                 let wanted = Opened {
                     account,
                     mailbox,
@@ -637,6 +730,11 @@ impl App {
                         Ok(message) => {
                             let message = Arc::new(message);
                             match self.write_when_fetched.take() {
+                                // Asked from the Pager while it showed the Message before: it shows this one.
+                                Some(writing) if self.pager.is_some() => {
+                                    self.open(Arc::clone(&message));
+                                    self.write_about(writing, account, &message, uid);
+                                }
                                 Some(writing) => {
                                     self.opened = None;
                                     self.write_about(writing, account, &message, uid);
@@ -648,17 +746,26 @@ impl App {
                     },
                     Err(why) => {
                         self.write_when_fetched = None;
+                        // The Message before isn't shown in its place.
+                        if self.pager.is_some() {
+                            self.close_pager();
+                        }
                         self.say(&format!("Couldn't fetch the Message: {why}"), true);
                     }
                 }
             }
+            Update::FoundIn { query, found } => self.found_in(account, query, found),
             Update::Done(done) => self.say(&done, false),
             Update::Failed(failed) => self.say(&failed, true),
             Update::Started(task) => state.tasks.started(task, Instant::now()),
             Update::Finished(task) => {
                 state.tasks.finished(task);
+                self.not_undone(account, task);
                 self.quit_if_done();
             }
+            Update::MovedBack(task) => self
+                .undoing
+                .retain(|(of, undoing, _)| (*of, *undoing) != (account, task)),
             Update::Sent { task, sent } => self.sent(account, task, sent),
         }
     }
@@ -675,8 +782,14 @@ impl App {
             return;
         }
         if let (Some(pager), Some(opened)) = (&self.pager, &self.opened) {
-            let (message, account, uid) = (Arc::clone(pager.message()), opened.account, opened.uid);
-            self.write_about(writing, account, &message, uid);
+            if self.shown.as_ref() == Some(opened) {
+                let (message, account, uid) =
+                    (Arc::clone(pager.message()), opened.account, opened.uid);
+                self.write_about(writing, account, &message, uid);
+            } else {
+                // The Pager still shows the Message before: about the one coming, once it's come.
+                self.write_when_fetched = Some(writing);
+            }
             return;
         }
         // From the Index: once the Message is fetched.
@@ -704,6 +817,23 @@ impl App {
                     &text,
                 ),
                 Some((mailbox, uid)),
+            ),
+            Writing::ReplyList => {
+                let Some(list) = &message.list_post else {
+                    self.say(
+                        "It didn't come through a mailing list that takes posts (List-Post)",
+                        false,
+                    );
+                    return;
+                };
+                (
+                    muttrs_mail::compose::Draft::reply_to_list(message, &me, list, &text),
+                    Some((mailbox, uid)),
+                )
+            }
+            Writing::ForwardAttached => (
+                muttrs_mail::compose::Draft::forward_attached(message, &me),
+                None,
             ),
             Writing::Forward | Writing::New => (
                 muttrs_mail::compose::Draft::forward(message, &me, &text),
@@ -852,8 +982,62 @@ impl App {
         }
     }
 
+    /// Takes `account`'s Mailboxes, as the server lists them: the open one renamed is opened by its new name, and the
+    /// first Account's Inbox, to start with.
+    fn listed(&mut self, account: usize, mailboxes: Vec<muttrs_mail::Mailbox>) {
+        let Some(state) = self.accounts.get_mut(account) else {
+            return;
+        };
+        state.mailboxes = mailboxes;
+        // The open Mailbox renamed: it's opened by its new name, once it's listed so.
+        if let Some((of, path)) = self.renamed.take_if(|(of, _)| *of == account) {
+            match state
+                .mailboxes
+                .iter()
+                .find(|mailbox| mailbox.path.join("/") == path)
+            {
+                Some(renamed) => {
+                    let name = renamed.name.clone();
+                    self.open_mailbox(account, &name);
+                    return;
+                }
+                None => self.renamed = Some((of, path)),
+            }
+        }
+        // The first Account's Inbox, to start with.
+        if self.index.is_none()
+            && let Some(inbox) = state.with_role(Role::Inbox).map(|inbox| inbox.name.clone())
+        {
+            self.open_mailbox(account, &inbox);
+        }
+    }
+
     /// Takes what came of sending the Draft of `account`'s Task `task`: done with it, or it's shown again.
     fn sent(&mut self, account: usize, task: Task, sent: Result<(), String>) {
+        if let Some(at) = self
+            .bouncing
+            .iter()
+            .position(|(of, asked, _)| *of == account && *asked == task)
+        {
+            let (_, _, whom) = self.bouncing.remove(at);
+            match sent {
+                Ok(()) => self.say(&format!("Bounced to {whom}"), false),
+                Err(why) => self.say(&format!("Not bounced: {why}"), true),
+            }
+            return;
+        }
+        if let Some(at) = self
+            .unsubscribing
+            .iter()
+            .position(|(of, asked, _)| *of == account && *asked == task)
+        {
+            let (_, _, list) = self.unsubscribing.remove(at);
+            match sent {
+                Ok(()) => self.say(&format!("Asked {list} by mail to unsubscribe you"), false),
+                Err(why) => self.say(&format!("Not unsubscribed from {list}: {why}"), true),
+            }
+            return;
+        }
         let Some(at) = self
             .sending
             .iter()
@@ -1084,23 +1268,107 @@ impl App {
         let Some((account, mailbox, uids)) = self.targets() else {
             return;
         };
+        // Deleted from Trash, they're deleted for good: there's no undoing that.
+        let in_trash = self.accounts.get(account).is_some_and(|state| {
+            state
+                .mailbox(&mailbox)
+                .is_some_and(|known| known.role == Some(Role::Trash))
+        });
+        if !in_trash {
+            let went = if archive {
+                client::Went::Archived
+            } else {
+                client::Went::Trash
+            };
+            self.remember_undo(account, &mailbox, &uids, went);
+        }
+        // The next Message to read asked first, so that it doesn't wait for them to go.
+        self.taken_out(&uids);
         let Some(state) = self.accounts.get_mut(account) else {
             return;
         };
         // The worker knows where to: the Mailbox with the Role, by the server or the configuration. Without one it
         // says so, and lists the Mailbox again, which brings the Messages back.
         state.ask(if archive {
-            client::Request::Archive {
-                mailbox,
-                uids: uids.clone(),
-            }
+            client::Request::Archive { mailbox, uids }
         } else {
-            client::Request::Delete {
-                mailbox,
-                uids: uids.clone(),
-            }
+            client::Request::Delete { mailbox, uids }
         });
+    }
+
+    /// Moves the Messages an action is for to Junk, as spam, going on to the next one.
+    fn junk(&mut self) {
+        let Some((account, mailbox, uids)) = self.targets() else {
+            return;
+        };
+        self.remember_undo(account, &mailbox, &uids, client::Went::Junk);
         self.taken_out(&uids);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::MoveTo {
+                mailbox,
+                uids,
+                role: Role::Junk,
+            });
+        }
+    }
+
+    /// Keeps, for `u` to undo, that `account`'s Messages `uids` of `mailbox` `went` elsewhere: those with a
+    /// `Message-ID`, which find them there.
+    fn remember_undo(&mut self, account: usize, mailbox: &str, uids: &[u32], went: client::Went) {
+        let message_ids: Vec<String> = self
+            .index
+            .iter()
+            .flat_map(|index| uids.iter().filter_map(|&uid| index.find(uid)))
+            .filter_map(|envelope| envelope.message_id.clone())
+            .collect();
+        if message_ids.is_empty() {
+            return;
+        }
+        if self.undo.len() == UNDOES {
+            self.undo.remove(0);
+        }
+        self.undo.push(Undo {
+            account,
+            went,
+            from: mailbox.to_owned(),
+            message_ids,
+        });
+    }
+
+    /// Moves the Messages last moved, archived or deleted to Trash back where they were.
+    fn undo(&mut self) {
+        let Some(undo) = self.undo.pop() else {
+            self.say("Nothing to undo", false);
+            return;
+        };
+        let Some(state) = self.accounts.get_mut(undo.account) else {
+            return;
+        };
+        let task = state.ask(client::Request::MoveBack {
+            went: undo.went.clone(),
+            to: undo.from.clone(),
+            message_ids: undo.message_ids.clone(),
+        });
+        self.undoing.push((undo.account, task, undo));
+    }
+
+    /// Keeps for `u` again what `account`'s Task `task` was undoing, finished without moving them back: they may be
+    /// where they went later, as a server can take a while to show them there.
+    fn not_undone(&mut self, account: usize, task: Task) {
+        let Some(at) = self
+            .undoing
+            .iter()
+            .position(|(of, undoing, _)| (*of, *undoing) == (account, task))
+        else {
+            return;
+        };
+        let (_, _, undo) = self.undoing.remove(at);
+        self.undo.push(undo);
+        let said = self
+            .notice
+            .as_ref()
+            .map_or_else(|| "Not moved back".to_owned(), |notice| notice.text.clone());
+        self.say(&format!("{said} · u tries again"), true);
     }
 
     /// Takes the Messages `uids` out of the Index, as they've gone elsewhere, going on to the next one in the Pager.
@@ -1109,8 +1377,13 @@ impl App {
             index.remove(uids);
         }
         if self.pager.is_some() {
-            self.close_pager();
-            self.open_current();
+            // Straight to the next one, as `J` goes: the Pager shows what it showed until it comes, rather than the
+            // Index meanwhile. After the last, the Index.
+            if self.index.as_ref().and_then(Index::current).is_some() {
+                self.open_current();
+            } else {
+                self.close_pager();
+            }
         }
     }
 
@@ -1258,14 +1531,21 @@ impl App {
         let Some(target) = self.moving_to(account, &mailbox).into_iter().nth(chosen) else {
             return;
         };
+        self.remember_undo(
+            account,
+            &mailbox,
+            &uids,
+            client::Went::Mailbox(target.name.clone()),
+        );
+        // The next Message to read asked first, so that it doesn't wait for them to go.
+        self.taken_out(&uids);
         if let Some(state) = self.accounts.get_mut(account) {
             state.ask(client::Request::Move {
                 mailbox,
-                uids: uids.clone(),
+                uids,
                 to: target.name,
             });
         }
-        self.taken_out(&uids);
     }
 
     fn on_terminal(&mut self, event: &TerminalEvent) {
@@ -1327,7 +1607,7 @@ impl App {
                 self.sidebar.move_by(&self.accounts, lines);
             } else if let Some(row) = self.sidebar.click(&self.accounts, offset(sidebar)) {
                 self.focus = Focus::Sidebar;
-                if let Row::Mailbox(account, name) = row {
+                if let Some((account, name)) = row.opens(&self.accounts) {
                     self.open_mailbox(account, &name);
                 }
             }
@@ -1349,6 +1629,39 @@ impl App {
         self.notice = None;
         // A key stays: quitting once the Tasks are done is asked again, if it's to be.
         self.quitting = false;
+        // A key of one's own types its keys in turn, as typed, not mapped again.
+        // Copied: handling each takes the App, the configuration too.
+        if let Some(typed) = self
+            .key_context()
+            .and_then(|context| self.config.keys.typed(context, &key))
+            .map(<[KeyEvent]>::to_vec)
+        {
+            for key in typed {
+                self.handle_key(key);
+            }
+            return;
+        }
+        self.handle_key(key);
+    }
+
+    /// Where a key pressed now goes, for the keys of one's own: None while something's typed or chosen, as in a
+    /// prompt or a list, where keys are as they are.
+    fn key_context(&self) -> Option<keys::Context> {
+        if self.sign_in.is_some() || self.prompt.is_some() || self.overlay.is_some() {
+            None
+        } else if self.compose.is_some() {
+            Some(keys::Context::Draft)
+        } else if self.pager.is_some() {
+            Some(keys::Context::Pager)
+        } else if self.focus == Focus::Sidebar && self.sidebar_shown {
+            Some(keys::Context::Sidebar)
+        } else {
+            Some(keys::Context::Index)
+        }
+    }
+
+    /// Does what `key` does where it's pressed.
+    fn handle_key(&mut self, key: KeyEvent) {
         if self.sign_in.is_some() {
             self.sign_in_key(key);
             return;
@@ -1400,6 +1713,10 @@ impl App {
                 self.help();
                 return;
             }
+            KeyCode::Char('!') => {
+                self.prompt(PromptKind::Shell);
+                return;
+            }
             KeyCode::Char('\\') => {
                 self.sidebar_shown = !self.sidebar_shown;
                 self.focus = if self.sidebar_shown {
@@ -1447,14 +1764,18 @@ impl App {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.sidebar.move_by(&self.accounts, 1),
             KeyCode::Char('k') | KeyCode::Up => self.sidebar.move_by(&self.accounts, -1),
-            KeyCode::Char('g') | KeyCode::Home => self.sidebar.top(),
+            KeyCode::Char('g') | KeyCode::Home => self.sidebar.top(&self.accounts),
             KeyCode::Char('G') | KeyCode::End => self.sidebar.bottom(&self.accounts),
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Esc => self.focus = Focus::Index,
             KeyCode::Enter => match self.sidebar.current(&self.accounts) {
-                Some(Row::Mailbox(account, name)) => self.open_mailbox(account, &name),
                 Some(Row::Account(account)) => {
                     if let Some(state) = self.accounts.get_mut(account) {
                         state.ask(client::Request::Refresh);
+                    }
+                }
+                Some(row) => {
+                    if let Some((account, name)) = row.opens(&self.accounts) {
+                        self.open_mailbox(account, &name);
                     }
                 }
                 None => {}
@@ -1470,17 +1791,51 @@ impl App {
             return;
         }
         let Some(index) = &mut self.index else { return };
-        if self.pending.take() == Some('z') {
-            match key.code {
-                KeyCode::Char('a' | 'A' | 'c' | 'o') => index.toggle_fold(),
-                KeyCode::Char('M') => index.fold_all(true),
-                KeyCode::Char('R') => index.fold_all(false),
-                _ => {}
+        match self.pending.take() {
+            Some('z') => {
+                match key.code {
+                    KeyCode::Char('a' | 'A' | 'c' | 'o') => index.toggle_fold(),
+                    KeyCode::Char('M') => index.fold_all(true),
+                    KeyCode::Char('R') => index.fold_all(false),
+                    _ => {}
+                }
+                return;
             }
-            return;
+            Some(sorting @ ('o' | 'O')) => {
+                let sort = match key.code {
+                    KeyCode::Char('d') => Some(index::Sort::Date),
+                    KeyCode::Char('f') => Some(index::Sort::Sender),
+                    KeyCode::Char('s') => Some(index::Sort::Subject),
+                    KeyCode::Char('z') => Some(index::Sort::Size),
+                    KeyCode::Char('t') => None,
+                    _ => return,
+                };
+                index.sort(sort, sorting == 'O');
+                let said = index.sorted().unwrap_or(if sort.is_some() {
+                    "Newest first"
+                } else {
+                    "In threads"
+                });
+                let said = format!("{}{}", said[..1].to_uppercase(), &said[1..]);
+                self.say(&said, false);
+                return;
+            }
+            _ => {}
         }
         match key.code {
             KeyCode::Char('z') => self.pending = Some('z'),
+            KeyCode::Char(sorting @ ('o' | 'O')) => {
+                self.pending = Some(sorting);
+                let way = if sorting == 'O' {
+                    "the other way: "
+                } else {
+                    ""
+                };
+                self.say(
+                    &format!("Sort {way}(d)ate (f)rom (s)ubject si(z)e (t)hreads"),
+                    false,
+                );
+            }
             KeyCode::Char('T') => {
                 let threaded = index.toggle_threads();
                 self.say(
@@ -1525,10 +1880,13 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('u') if !control => self.undo(),
+            KeyCode::Char('|') => self.prompt(PromptKind::Pipe),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('L') => self.write(Writing::ReplyList),
             KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
@@ -1565,6 +1923,244 @@ impl App {
         self.prompt = Some(Prompt::new(kind, String::new()));
     }
 
+    /// Unsubscribes from the mailing list the Message the Pager shows came through, as it says to: by a POST alone,
+    /// by mail (sent at once), or at its page, in the browser.
+    fn unsubscribe(&mut self) {
+        let (Some(pager), Some(shown)) = (&self.pager, &self.shown) else {
+            self.say(":unsubscribe is for the Message the Pager shows", true);
+            return;
+        };
+        let message = Arc::clone(pager.message());
+        let account = shown.account;
+        let list = message
+            .list
+            .clone()
+            .unwrap_or_else(|| "the mailing list".to_owned());
+        match message.unsubscribe() {
+            None => self.say("It says no way to unsubscribe (List-Unsubscribe)", true),
+            Some(muttrs_mail::message::Unsubscribe::OneClick(url)) => {
+                let Some(fetcher) = self.fetcher.clone() else {
+                    self.say("Not unsubscribed: there's no HTTP client", true);
+                    return;
+                };
+                let events = self.events.clone();
+                let said = list.clone();
+                tokio::spawn(async move {
+                    let unsubscribed = match fetcher.unsubscribe(&url).await {
+                        Ok(()) => Ok(format!("Unsubscribed from {said}")),
+                        Err(error) => Err(format!("Not unsubscribed from {said}: {error:#}")),
+                    };
+                    let _ = events.send(Event::Unsubscribed(unsubscribed));
+                });
+                self.say(&format!("Unsubscribing from {list}…"), false);
+            }
+            Some(muttrs_mail::message::Unsubscribe::Mail(mailto)) => {
+                let Some(state) = self.accounts.get_mut(account) else {
+                    return;
+                };
+                let mut draft = muttrs_mail::compose::Draft::new(&state.sender);
+                draft.from = state.sender.answering(&message).cloned();
+                draft.to = vec![muttrs_mail::Address {
+                    name: None,
+                    email: mailto.to,
+                }];
+                draft.subject = mailto.subject.unwrap_or_else(|| "unsubscribe".to_owned());
+                draft.body = mailto.body.unwrap_or_default();
+                let from = draft
+                    .from
+                    .as_ref()
+                    .or_else(|| state.sender.primary())
+                    .map_or("", |from| from.email.as_str());
+                let id = muttrs_mail::compose::message_id(from);
+                match draft.build(&id) {
+                    Ok(built) => {
+                        let task = state.ask_as(
+                            client::Request::Send {
+                                built: Box::new(built),
+                                answers: None,
+                            },
+                            Some(format!("Unsubscribing from {list}")),
+                        );
+                        self.unsubscribing.push((account, task, list));
+                    }
+                    Err(error) => self.say(&format!("Not unsubscribed: {error}"), true),
+                }
+            }
+            Some(muttrs_mail::message::Unsubscribe::Page(url)) => match open::that_detached(&url) {
+                Ok(()) => self.say(
+                    &format!("{list}'s page to unsubscribe at is open in the browser"),
+                    false,
+                ),
+                Err(error) => self.say(&format!("Couldn't open {url}: {error}"), true),
+            },
+        }
+    }
+
+    /// Pipes the Messages an action is for to `command`.
+    fn pipe(&mut self, command: &str) {
+        if !command.is_empty() {
+            self.fetch_then(Then::Pipe(command.to_owned()));
+        }
+    }
+
+    /// Sends the Messages an action is for on, as they are, to the addresses `to` writes (mutt's bounce).
+    fn bounce(&mut self, to: &str) {
+        match muttrs_mail::compose::parse_addresses(to) {
+            Ok(addresses) if !addresses.is_empty() => self.fetch_then(Then::Bounce(addresses)),
+            Ok(_) => self.say(":bounce takes whom to: :bounce ann@example.com", true),
+            Err(error) => self.say(&error.to_string(), true),
+        }
+    }
+
+    /// Does `then` with the Messages an action is for: the one the Pager shows, as it came; else those of the
+    /// Index, the oldest first, once they're fetched.
+    fn fetch_then(&mut self, then: Then) {
+        if let Some(pager) = &self.pager
+            && let Some(shown) = self
+                .shown
+                .as_ref()
+                .filter(|shown| self.opened.as_ref() == Some(shown))
+        {
+            let (account, message) = (shown.account, Arc::new(pager.message().raw().to_vec()));
+            self.then(then, account, &[message]);
+            return;
+        }
+        let Some((account, mailbox, mut uids)) = self.targets() else {
+            return;
+        };
+        if let Some(index) = &self.index {
+            uids.sort_by_key(|&uid| (index.find(uid).and_then(|envelope| envelope.date), uid));
+        }
+        let Some(state) = self.accounts.get_mut(account) else {
+            return;
+        };
+        for &uid in &uids {
+            state.ask(client::Request::Body {
+                mailbox: mailbox.clone(),
+                uid,
+            });
+        }
+        self.piping = Some(Piping {
+            then,
+            account,
+            mailbox,
+            uids,
+            got: HashMap::new(),
+        });
+    }
+
+    /// Takes Message `uid` of `account`'s `mailbox`, fetched, if something's to be done with it; does it once
+    /// they've all come.
+    fn pipe_when_fetched(
+        &mut self,
+        account: usize,
+        mailbox: &str,
+        uid: u32,
+        body: &Result<Arc<Vec<u8>>, String>,
+    ) {
+        let Some(piping) = self.piping.as_mut().filter(|piping| {
+            piping.account == account && piping.mailbox == mailbox && piping.uids.contains(&uid)
+        }) else {
+            return;
+        };
+        match body {
+            Ok(bytes) => {
+                piping.got.insert(uid, Arc::clone(bytes));
+            }
+            Err(why) => {
+                self.piping = None;
+                self.say(
+                    &format!("Not done: a Message couldn't be fetched: {why}"),
+                    true,
+                );
+                return;
+            }
+        }
+        if piping.got.len() < piping.uids.len() {
+            return;
+        }
+        let Some(piping) = self.piping.take() else {
+            return;
+        };
+        let messages: Vec<Arc<Vec<u8>>> = piping
+            .uids
+            .iter()
+            .filter_map(|uid| piping.got.get(uid).cloned())
+            .collect();
+        self.then(piping.then, piping.account, &messages);
+    }
+
+    /// Does `then` with `messages`, of `account`, as RFC 5322 writes them.
+    fn then(&mut self, then: Then, account: usize, messages: &[Arc<Vec<u8>>]) {
+        match then {
+            Then::Pipe(command) => {
+                let raw: Vec<&[u8]> = messages.iter().map(|message| message.as_slice()).collect();
+                self.shell = Some(Shell {
+                    command,
+                    input: Some(muttrs_mail::mbox::for_commands(&raw)),
+                });
+            }
+            Then::Bounce(to) => {
+                let Some(state) = self.accounts.get_mut(account) else {
+                    return;
+                };
+                let Some(from) = state.sender.primary().cloned() else {
+                    return;
+                };
+                let whom = to
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for message in messages {
+                    let id = muttrs_mail::compose::message_id(&from.email);
+                    let built = muttrs_mail::compose::bounced(message, &from, &to, &id);
+                    let task = state.ask_as(
+                        client::Request::Bounce {
+                            built: Box::new(built),
+                        },
+                        Some(format!("Bouncing a Message to {whom}")),
+                    );
+                    self.bouncing.push((account, task, whom.clone()));
+                }
+            }
+        }
+    }
+
+    /// Runs `command` with the terminal; the shell itself (`$SHELL`) if it's empty.
+    fn shell(&mut self, command: &str) {
+        let command = if command.is_empty() {
+            std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned())
+        } else {
+            command.to_owned()
+        };
+        self.shell = Some(Shell {
+            command,
+            input: None,
+        });
+    }
+
+    /// Takes what came of running `command`, as `status` says.
+    fn ran(&mut self, command: &str, status: io::Result<std::process::ExitStatus>) {
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => self.say(&format!("{command} exited with {status}"), true),
+            Err(error) => self.say(&format!("Couldn't run {command}: {error}"), true),
+        }
+    }
+
+    /// Forgets what's kept of the open Mailbox, and lists it anew.
+    fn resync(&mut self) {
+        let Some(index) = &self.index else {
+            self.say("No Mailbox is open", true);
+            return;
+        };
+        let mailbox = index.mailbox.clone();
+        if let Some(state) = self.accounts.get_mut(index.account) {
+            state.ask(client::Request::Resync(mailbox));
+        }
+    }
+
     /// Asks every Account what's new, connecting again any that's offline.
     fn refresh(&mut self) {
         for account in &mut self.accounts {
@@ -1590,12 +2186,14 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => pager.bottom(),
             KeyCode::Char('n') => pager.next_match(true),
             KeyCode::Char('N') => pager.next_match(false),
+            KeyCode::Char('$') => self.refresh(),
             KeyCode::Char('/') => {
                 self.prompt = Some(Prompt::new(PromptKind::Search, String::new()));
             }
             KeyCode::Char(':') => {
                 self.prompt = Some(Prompt::new(PromptKind::Command, String::new()));
             }
+            KeyCode::Char('h') => pager.toggle_headers(),
             KeyCode::Char('T') => {
                 if !pager.toggle_body() {
                     self.say("This Message has one body only", false);
@@ -1611,6 +2209,7 @@ impl App {
             KeyCode::Char('o') => self.links(),
             KeyCode::Char('v') => self.attachments(),
             KeyCode::Char('H') => self.toggle_heatmap(),
+            KeyCode::Char('!') => self.prompt(PromptKind::Shell),
             KeyCode::Char('?') => self.help(),
             KeyCode::Esc => {
                 if !pager.clear_search() {
@@ -1627,10 +2226,13 @@ impl App {
             KeyCode::Char('d') => self.remove(false),
             KeyCode::Char('a') => self.remove(true),
             KeyCode::Char('s') => self.choose_mailbox(),
+            KeyCode::Char('u') if !control => self.undo(),
+            KeyCode::Char('|') => self.prompt(PromptKind::Pipe),
             KeyCode::Char('e') => self.resume(),
             KeyCode::Char('m') => self.write(Writing::New),
             KeyCode::Char('r') => self.write(Writing::Reply),
             KeyCode::Char('R') => self.write(Writing::ReplyAll),
+            KeyCode::Char('L') => self.write(Writing::ReplyList),
             KeyCode::Char('f') => self.write(Writing::Forward),
             _ => {}
         }
@@ -1657,6 +2259,7 @@ impl App {
     fn close_pager(&mut self) {
         self.pager = None;
         self.opened = None;
+        self.shown = None;
         self.reading = None;
         self.pictures.keep(None, |_| false);
         // Standing alone, as `muttrs view` opens it, the Pager is all there is.
@@ -1728,6 +2331,8 @@ impl App {
                     PromptKind::Server => self.search_server(text.trim()),
                     PromptKind::To => self.addressed(text),
                     PromptKind::Subject => self.subject(&text),
+                    PromptKind::Pipe => self.pipe(text.trim()),
+                    PromptKind::Shell => self.shell(text.trim()),
                 }
             }
             _ => {}
@@ -1771,24 +2376,87 @@ impl App {
             );
             return;
         }
-        let (before, candidates) = if prompt.kind == PromptKind::To {
-            match prompt.text.rsplit_once(',') {
-                Some((before, fragment)) => {
-                    (format!("{before}, "), self.addresses.complete(fragment))
+        let (before, typed, candidates) = if prompt.kind == PromptKind::To {
+            let (before, typed) = match prompt.text.rsplit_once(',') {
+                Some((before, typed)) => (format!("{before}, "), typed.trim().to_owned()),
+                None => (String::new(), prompt.text.trim().to_owned()),
+            };
+            // What the query command found first, once it has; then what's been seen.
+            let mut candidates: Vec<String> = match &self.queried {
+                Some((asked, found)) if *asked == typed => {
+                    found.iter().map(ToString::to_string).collect()
                 }
-                None => (String::new(), self.addresses.complete(&prompt.text)),
+                _ => Vec::new(),
+            };
+            for seen in self.addresses.complete(&typed) {
+                if !candidates.contains(&seen) {
+                    candidates.push(seen);
+                }
             }
+            if let Some(command) = &self.config.query_command
+                && !typed.is_empty()
+                && self
+                    .queried
+                    .as_ref()
+                    .is_none_or(|(asked, _)| *asked != typed)
+                && self.querying.as_ref() != Some(&typed)
+            {
+                self.querying = Some(typed.clone());
+                let (command, asked, events) =
+                    (command.clone(), typed.clone(), self.events.clone());
+                tokio::task::spawn_blocking(move || {
+                    let found = crate::addresses::query(&command, &asked);
+                    let _ = events.send(Event::Queried(asked, found));
+                });
+            }
+            (before, typed, candidates)
         } else {
             let listed = self.index.as_ref().map_or(&[][..], Index::envelopes);
-            (String::new(), command_completions(&prompt.text, listed))
+            let typed = prompt.text.clone();
+            (
+                String::new(),
+                typed,
+                command_completions(&prompt.text, listed),
+            )
         };
         if let Some(first) = candidates.first() {
             prompt.text = format!("{before}{first}");
             prompt.completing = Some(Completing {
                 before,
+                typed,
                 candidates,
                 at: 0,
             });
+        }
+    }
+
+    /// Takes what the query command found for `asked`: offered first, once Tab completes it again; at once, if it's
+    /// what's being completed.
+    fn take_queried(&mut self, asked: &str, found: Vec<muttrs_mail::Address>) {
+        if self.querying.as_deref() == Some(asked) {
+            self.querying = None;
+        }
+        self.queried = Some((asked.to_owned(), found));
+        let Some(prompt) = self
+            .prompt
+            .as_mut()
+            .filter(|prompt| prompt.kind == PromptKind::To)
+        else {
+            return;
+        };
+        let completing = match &prompt.completing {
+            Some(completing) if completing.typed == asked => Some(completing.before.clone()),
+            Some(_) => None,
+            None => match prompt.text.rsplit_once(',') {
+                Some((before, typed)) if typed.trim() == asked => Some(format!("{before}, ")),
+                None if prompt.text.trim() == asked => Some(String::new()),
+                _ => None,
+            },
+        };
+        if let Some(before) = completing {
+            prompt.text = format!("{before}{asked}");
+            prompt.completing = None;
+            self.complete(true);
         }
     }
 
@@ -1829,12 +2497,50 @@ impl App {
             "q!" | "qa!" => self.quit = true,
             "help" | "h" => self.help(),
             "refresh" | "sync" => self.refresh(),
+            "refresh!" | "sync!" => self.resync(),
             "login" => self.login(argument),
+            "unsubscribe" => self.unsubscribe(),
+            "source" => match &mut self.pager {
+                Some(pager) => pager.toggle_source(),
+                None => self.say(":source is for the Message the Pager shows", true),
+            },
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
+            "limit" => self.limit_to(argument),
+            "search" if !argument.is_empty() => self.search_all(argument),
+            "junk" => self.junk(),
+            "bounce" => self.bounce(argument),
+            "forward-attached" => self.write(Writing::ForwardAttached),
+            "create" if !argument.is_empty() => self.create_mailbox(argument),
+            "rename" if !argument.is_empty() => self.rename_mailbox(argument),
+            "delete-mailbox" if !argument.is_empty() => self.delete_mailbox(argument),
             "unselect" => self.select_by(false, argument),
             _ => self.say(&format!("Not a command: {command}"), true),
         }
+    }
+
+    /// Limits the Index to the Messages `filter` picks; to none, all show again, if it's empty.
+    fn limit_to(&mut self, filter: &str) {
+        let parsed = if filter.is_empty() {
+            None
+        } else {
+            match filter.parse::<Filter>() {
+                Ok(parsed) => Some((filter.to_owned(), parsed)),
+                Err(error) => {
+                    self.say(&error.to_string(), true);
+                    return;
+                }
+            }
+        };
+        let Some(index) = &mut self.index else { return };
+        let shown = index.limit(parsed);
+        let text = match (filter, shown) {
+            ("", _) => "All show again".to_owned(),
+            (_, 0) => format!("None listed matches {filter}"),
+            (_, 1) => format!("1 Message matches {filter}"),
+            (_, shown) => format!("{shown} Messages match {filter}"),
+        };
+        self.say(&text, false);
     }
 
     /// Selects, or unselects, the Messages the Index lists that `filter` picks: all of them, without one.
@@ -1863,23 +2569,165 @@ impl App {
     /// Opens the Mailbox called `wanted` (by its name for people, or on the server), of the Account shown first.
     fn change_mailbox(&mut self, wanted: &str) {
         let account = self.index.as_ref().map_or(0, |index| index.account);
-        let found = self.accounts.get(account).and_then(|state| {
-            state
-                .mailboxes
-                .iter()
-                .find(|mailbox| {
-                    mailbox.label().eq_ignore_ascii_case(wanted)
-                        || mailbox.name.eq_ignore_ascii_case(wanted)
-                        || mailbox.path.join("/").eq_ignore_ascii_case(wanted)
-                })
-                .map(|mailbox| mailbox.name.clone())
-        });
+        let found = self
+            .mailbox_called(account, wanted)
+            .map(|mailbox| mailbox.name.clone());
         match found {
             Some(name) => {
                 self.close_pager();
                 self.open_mailbox(account, &name);
             }
             None => self.say(&format!("No Mailbox called {wanted}"), true),
+        }
+    }
+
+    /// The Mailbox of `account` called `wanted`: by its name for people, its path, or its name on the server.
+    fn mailbox_called(&self, account: usize, wanted: &str) -> Option<&muttrs_mail::Mailbox> {
+        self.accounts
+            .get(account)?
+            .mailboxes
+            .iter()
+            .find(|mailbox| {
+                mailbox.label().eq_ignore_ascii_case(wanted)
+                    || mailbox.name.eq_ignore_ascii_case(wanted)
+                    || mailbox.path.join("/").eq_ignore_ascii_case(wanted)
+            })
+    }
+
+    /// Creates a Mailbox, called `path` (`Work/Reports`), of the Account shown.
+    fn create_mailbox(&mut self, path: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        if self.mailbox_called(account, path).is_some() {
+            self.say(&format!("There's a Mailbox called {path} already"), true);
+            return;
+        }
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::CreateMailbox(path.to_owned()));
+        }
+    }
+
+    /// Renames the open Mailbox `to` (`Work/Reports`), unless it has a Role.
+    fn rename_mailbox(&mut self, to: &str) {
+        let Some(index) = &self.index else {
+            self.say("No Mailbox is open", true);
+            return;
+        };
+        let (account, mailbox) = (index.account, index.mailbox.clone());
+        let role = self
+            .accounts
+            .get(account)
+            .and_then(|state| state.mailbox(&mailbox))
+            .and_then(|mailbox| mailbox.role);
+        if let Some(role) = role {
+            self.say(
+                &format!(
+                    "{} keeps its name, as the Account's {}",
+                    role_name(role),
+                    role_name(role)
+                ),
+                true,
+            );
+            return;
+        }
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::RenameMailbox {
+                mailbox,
+                to: to.to_owned(),
+            });
+            self.renamed = Some((account, to.to_owned()));
+        }
+    }
+
+    /// Deletes the Mailbox called `wanted`, and its Messages, unless it has a Role; the Inbox opened in its place
+    /// if it was open.
+    fn delete_mailbox(&mut self, wanted: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        let Some(mailbox) = self.mailbox_called(account, wanted).cloned() else {
+            self.say(&format!("No Mailbox called {wanted}"), true);
+            return;
+        };
+        if let Some(role) = mailbox.role {
+            self.say(
+                &format!(
+                    "{} is the Account's {}: it isn't to be deleted",
+                    mailbox.label(),
+                    role_name(role)
+                ),
+                true,
+            );
+            return;
+        }
+        let open = self
+            .index
+            .as_ref()
+            .is_some_and(|index| index.account == account && index.mailbox == mailbox.name);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::DeleteMailbox(mailbox.name));
+        }
+        if open
+            && let Some(inbox) = self
+                .accounts
+                .get(account)
+                .and_then(|state| state.with_role(Role::Inbox))
+                .map(|inbox| inbox.name.clone())
+        {
+            self.close_pager();
+            self.open_mailbox(account, &inbox);
+        }
+    }
+
+    /// Lists the Mailboxes of `account` a search of them all for `query` `found` Messages in, how many in each, to
+    /// choose one to list what's found there.
+    fn found_in(&mut self, account: usize, query: String, mut found: Vec<(String, usize)>) {
+        // In the sidebar's order: Roles first, the Inbox first of them.
+        let order = sidebar::rows(&self.accounts);
+        found.sort_by_key(|(name, _)| {
+            order
+                .iter()
+                .position(|row| *row == Row::Mailbox(account, name.clone()))
+        });
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let rows: Vec<Line<'static>> = found
+            .iter()
+            .map(|(name, count)| {
+                let mailbox = state.mailbox(name);
+                let label = mailbox.map_or_else(
+                    || muttrs_mail::mailbox::decode(name),
+                    |mailbox| mailbox.path.join("/"),
+                );
+                Line::from(vec![
+                    Span::styled(
+                        sidebar::icon(&self.icons, mailbox.and_then(|mailbox| mailbox.role)),
+                        self.theme.dim,
+                    ),
+                    Span::raw(label),
+                    Span::styled(format!("  {count}"), self.theme.accent),
+                ])
+            })
+            .collect();
+        if rows.is_empty() {
+            self.say(&format!("Nothing found in any Mailbox for {query}"), false);
+            return;
+        }
+        let total: usize = found.iter().map(|(_, count)| count).sum();
+        let title = format!("{total} found: {query}");
+        self.found_in = Some((
+            account,
+            query,
+            found.into_iter().map(|(name, _)| name).collect(),
+        ));
+        self.overlay = Some(Overlay::new(overlay::Kind::Found, title, rows));
+    }
+
+    /// Searches every Mailbox of the Account shown on the server for `query`, to list where it found Messages.
+    fn search_all(&mut self, query: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::SearchAll {
+                query: query.to_owned(),
+            });
         }
     }
 
@@ -2054,84 +2902,131 @@ impl App {
     }
 
     fn help(&mut self) {
-        self.overlay = Some(overlay::help(
-            &self.theme,
-            &[
-                (
-                    "Reading",
-                    &[
-                        ("j k ↓ ↑", "scroll a line"),
-                        ("Space b", "a page down, up"),
-                        ("Ctrl-d Ctrl-u", "half a page down, up"),
-                        ("g G", "top, bottom"),
-                        ("/ n N", "search, next match, previous"),
-                        ("T", "HTML or plain text"),
-                        ("I", "load Remote Content"),
-                        ("H", "voight's Heatmap of the prose"),
-                    ],
-                ),
-                (
-                    "Parts",
-                    &[
-                        ("o", "Links: open or copy"),
-                        ("v", "Attachments: open or save"),
-                    ],
-                ),
-                (
-                    "Mailboxes",
-                    &[
-                        ("j k g G", "move"),
-                        ("Enter", "open"),
-                        ("/ n N", "search senders and subjects"),
-                        ("S", "search the server (Gmail's syntax on Gmail)"),
-                        ("T", "threads, or newest first"),
-                        ("za zM zR", "fold the thread, all, none"),
-                        ("J K", "in the Pager: the next Message, the previous"),
-                        ("Space", "select, or not, and move down"),
-                        ("F U", "flag, mark Unread or read: the selected, or this"),
-                        ("Y", "add or take off Labels: the selected, or this"),
-                        ("d a s", "delete (to Trash), archive, move to a Mailbox"),
-                        ("Tab h l", "the sidebar, the Index"),
-                        ("\\", "show or hide the sidebar"),
-                        ("$ :refresh", "ask for what's new"),
-                        (":cd NAME", "open a Mailbox by name"),
-                        (
-                            ":select F",
-                            "select what filter F picks: from:ann is:unread label:work …",
-                        ),
-                        (":unselect F", "unselect what F picks; without F, all"),
-                    ],
-                ),
-                (
-                    "Writing",
-                    &[
-                        ("m", "a new Message"),
-                        ("r R f", "reply, reply to all, forward"),
-                        ("y e", "with a Draft: send, edit again"),
-                        ("a D", "attach a file, detach the last"),
-                        ("P q q", "postpone to Drafts, discard"),
-                        ("e", "in Drafts: resume a Postponed Draft"),
-                    ],
-                ),
-                (
-                    "Anywhere",
-                    &[
-                        ("?", "these keys"),
-                        (":q q", "quit once what's asked is done, or close the Pager"),
-                        (":q!", "quit now"),
-                        (":login NAME", "sign in to an Account again, in the browser"),
-                        (
-                            "↑ ↓",
-                            "after : / or S, what was typed before, starting the same",
-                        ),
-                        (
-                            "Ctrl-p Ctrl-n",
-                            "after : / or S, what was typed before, all of it",
-                        ),
-                    ],
-                ),
-            ],
-        ));
+        // The keys of one's own, where they're pressed: what each types.
+        let yours: Vec<(String, String)> = [
+            (keys::Context::Index, "in the Index"),
+            (keys::Context::Sidebar, "in the sidebar"),
+            (keys::Context::Pager, "in the Pager"),
+            (keys::Context::Draft, "with a Draft"),
+        ]
+        .into_iter()
+        .flat_map(|(context, where_)| {
+            self.config
+                .keys
+                .written(context)
+                .into_iter()
+                .map(move |(key, typed)| (key.to_owned(), format!("types {typed}, {where_}")))
+        })
+        .collect();
+        let yours: Vec<(&str, &str)> = yours
+            .iter()
+            .map(|(key, typed)| (key.as_str(), typed.as_str()))
+            .collect();
+        let mut sections: Vec<(&str, &[(&str, &str)])> = vec![
+            (
+                "Reading",
+                &[
+                    ("j k ↓ ↑", "scroll a line"),
+                    ("Space b", "a page down, up"),
+                    ("Ctrl-d Ctrl-u", "half a page down, up"),
+                    ("g G", "top, bottom"),
+                    ("/ n N", "search, next match, previous"),
+                    ("T", "HTML or plain text"),
+                    ("h", "every header, as written, or those read"),
+                    (":source", "the Message as it came, or as read"),
+                    ("I", "load Remote Content"),
+                    ("H", "voight's Heatmap of the prose"),
+                ],
+            ),
+            (
+                "Parts",
+                &[
+                    ("o", "Links: open or copy"),
+                    ("|", "pipe the Message, or those selected, to a command"),
+                    ("v", "Attachments: open or save"),
+                ],
+            ),
+            (
+                "Mailboxes",
+                &[
+                    ("j k g G", "move"),
+                    ("Enter", "open"),
+                    ("/ n N", "search senders and subjects"),
+                    ("S", "search the server (Gmail's syntax on Gmail)"),
+                    (
+                        ":search Q",
+                        "search every Mailbox, for where Q finds Messages",
+                    ),
+                    ("T", "threads, or newest first"),
+                    (
+                        "o O",
+                        "sort, or the other way: (d)ate (f)rom (s)ubject si(z)e (t)hreads",
+                    ),
+                    ("za zM zR", "fold the thread, all, none"),
+                    ("J K", "in the Pager: the next Message, the previous"),
+                    ("Space", "select, or not, and move down"),
+                    ("F U", "flag, mark Unread or read: the selected, or this"),
+                    ("Y", "add or take off Labels: the selected, or this"),
+                    ("d a s", "delete (to Trash), archive, move to a Mailbox"),
+                    ("u", "undo the last of those: move them back"),
+                    ("Tab h l", "the sidebar, the Index"),
+                    ("\\", "show or hide the sidebar"),
+                    (":cd NAME", "open a Mailbox by name"),
+                    (":junk", "move to Junk, as spam: the selected, or this"),
+                    (":create NAME", "create a Mailbox (Work/Reports)"),
+                    (":rename NAME", "rename the open Mailbox"),
+                    (":delete-mailbox NAME", "delete a Mailbox, and its Messages"),
+                    (
+                        ":select F",
+                        "select what filter F picks: from:ann is:unread label:work …",
+                    ),
+                    (":unselect F", "unselect what F picks; without F, all"),
+                    (":limit F", "list only what F picks; without F, all"),
+                ],
+            ),
+            (
+                "Writing",
+                &[
+                    ("m", "a new Message"),
+                    ("r R f", "reply, reply to all, forward"),
+                    (":forward-attached", "forward the Message as an Attachment"),
+                    (":bounce TO", "send the Message on to TO, as it is"),
+                    ("L", "reply to the mailing list"),
+                    (":unsubscribe", "from the mailing list of the Message shown"),
+                    ("y e", "with a Draft: send, edit again"),
+                    ("a D", "attach a file, detach the last"),
+                    ("P q q", "postpone to Drafts, discard"),
+                    ("e", "in Drafts: resume a Postponed Draft"),
+                ],
+            ),
+            (
+                "Anywhere",
+                &[
+                    ("?", "these keys"),
+                    (":q q", "quit once what's asked is done, or close the Pager"),
+                    (":q!", "quit now"),
+                    ("$ :refresh", "ask for what's new"),
+                    (
+                        ":sync!",
+                        "forget what's kept of the open Mailbox, and list it anew",
+                    ),
+                    (":login NAME", "sign in to an Account again, in the browser"),
+                    ("!", "run a command, or the shell"),
+                    (
+                        "↑ ↓",
+                        "after : / or S, what was typed before, starting the same",
+                    ),
+                    (
+                        "Ctrl-p Ctrl-n",
+                        "after : / or S, what was typed before, all of it",
+                    ),
+                ],
+            ),
+        ];
+        if !yours.is_empty() {
+            sections.push(("Yours", &yours));
+        }
+        self.overlay = Some(overlay::help(&self.theme, &sections));
     }
 
     fn chosen(&mut self, kind: overlay::Kind, index: usize, verb: Verb) {
@@ -2143,6 +3038,22 @@ impl App {
         }
         if kind == overlay::Kind::Labels {
             self.toggle_label(index);
+            return;
+        }
+        if kind == overlay::Kind::Found {
+            self.overlay = None;
+            if let Some((account, query, mailboxes)) = self.found_in.take()
+                && let Some(mailbox) = mailboxes.get(index)
+            {
+                self.close_pager();
+                self.open_mailbox(account, mailbox);
+                if let Some(state) = self.accounts.get_mut(account) {
+                    state.ask(client::Request::Search {
+                        mailbox: mailbox.clone(),
+                        query,
+                    });
+                }
+            }
             return;
         }
         let Some(pager) = &self.pager else { return };
@@ -2181,7 +3092,10 @@ impl App {
                 }
                 self.overlay = None;
             }
-            overlay::Kind::Mailboxes | overlay::Kind::Labels | overlay::Kind::Help => {}
+            overlay::Kind::Mailboxes
+            | overlay::Kind::Labels
+            | overlay::Kind::Found
+            | overlay::Kind::Help => {}
         }
     }
 
@@ -2431,7 +3345,13 @@ impl App {
                 0 => String::new(),
                 count => format!(" · {count} selected"),
             };
-            format!(" · {messages}, {unread} Unread{listed}{selected}")
+            let limited = index
+                .limited()
+                .map_or_else(String::new, |filter| format!(" · limited to {filter}"));
+            let sorted = index
+                .sorted()
+                .map_or_else(String::new, |sorted| format!(" · {sorted}"));
+            format!(" · {messages}, {unread} Unread{listed}{sorted}{limited}{selected}")
         } else {
             String::new()
         };
@@ -2449,6 +3369,8 @@ impl App {
                 PromptKind::Server => "Search the server: ",
                 PromptKind::To => "To: ",
                 PromptKind::Subject => "Subject: ",
+                PromptKind::Pipe => "|",
+                PromptKind::Shell => "!",
             };
             let line = Line::from(vec![Span::raw(lead), Span::raw(prompt.text.clone())]);
             buffer.set_line(area.x, area.y, &line, area.width);
@@ -2471,6 +3393,7 @@ impl App {
             right.push(match pager.showing() {
                 pager::Body::Html => "HTML".to_owned(),
                 pager::Body::Plain => "Plain".to_owned(),
+                pager::Body::Source => "Source".to_owned(),
             });
             right.push(pager.position());
         } else if let Some((query, at, of)) = self.index.as_ref().and_then(Index::search_status) {
@@ -2517,11 +3440,74 @@ impl App {
     }
 }
 
+/// A Role, as people name it.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Inbox => "Inbox",
+        Role::Drafts => "Drafts",
+        Role::Sent => "Sent",
+        Role::Archive => "Archive",
+        Role::All => "All Mail",
+        Role::Flagged => "Flagged",
+        Role::Junk => "Junk",
+        Role::Trash => "Trash",
+    }
+}
+
 /// The status line's spinner, while the Accounts have Tasks, and how long each of its frames shows.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPIN: Duration = Duration::from_millis(80);
 /// How long a Task's taken before the status line says how long.
 const TAKING_A_WHILE: Duration = Duration::from_secs(3);
+
+/// Lets go of the terminal for `run`, which has it, and takes it back after: as an editor, or a shell command, needs.
+fn hand_over<T>(
+    terminal: &mut ratatui::DefaultTerminal,
+    mouse: bool,
+    run: impl FnOnce() -> T,
+) -> anyhow::Result<T> {
+    if mouse {
+        let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
+    }
+    ratatui::restore();
+    let ran = run();
+    *terminal = ratatui::try_init().context("setting up the terminal again")?;
+    // Cleared directly: `Terminal::clear` asks the terminal where its cursor is, an answer the input stream that
+    // just let go can still take, which leaves the question unanswered.
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
+    if mouse {
+        let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
+    }
+    Ok(ran)
+}
+
+/// Runs `shell` through `sh`, piping it its input, if any; then waits for Enter, so that what it wrote can be read.
+fn run_shell(shell: &Shell) -> io::Result<std::process::ExitStatus> {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&shell.command)
+        .stdin(if shell.input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
+        .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (shell.input.clone(), child.stdin.take()) {
+        // Written aside: a command that writes before it's read all of it waits neither on muttrs, nor muttrs on it.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    let status = child.wait();
+    print!("\r\n[muttrs] Enter goes back");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    let _ = io::stdin().read_line(&mut line);
+    status
+}
 
 /// Waits `every`, or for ever when it's None.
 async fn tick(every: Option<Duration>) {
@@ -2641,6 +3627,16 @@ pub(crate) async fn mail(setup: Setup, accounts: Vec<Account>) -> anyhow::Result
     let mut states = Vec::new();
     for (index, account) in accounts.into_iter().enumerate() {
         let name = account.name.clone();
+        // The address book's contacts, aside, once at the start.
+        if let Some(book) = account.carddav.clone() {
+            let (events, name) = (events.clone(), name.clone());
+            tokio::spawn(async move {
+                let contacts = muttrs_mail::carddav::contacts(&book, &name)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = events.send(Event::Contacts(name, contacts));
+            });
+        }
         let sender_of_drafts = account.sender();
         let cache = muttrs_mail::cache::Cache::new(
             xdg::cache_dir().map(|cache| cache.join("accounts").join(&name)),
@@ -2708,23 +3704,17 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
             {
                 // The editor takes the terminal: the input stream lets go of it first, so as not to read its keys.
                 drop(input);
-                if mouse {
-                    let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
-                }
-                ratatui::restore();
-                let status = compose::edit(&compose::editor(app.config.editor.as_deref()), &path);
-                terminal = ratatui::try_init().context("setting up the terminal again")?;
-                // Cleared directly: `Terminal::clear` asks the terminal where its cursor is, an answer the
-                // input stream that just let go can still take, which leaves the question unanswered.
-                crossterm::execute!(
-                    io::stdout(),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-                )?;
-                if mouse {
-                    let _ = crossterm::execute!(io::stdout(), EnableMouseCapture);
-                }
+                let editor = compose::editor(app.config.editor.as_deref());
+                let status = hand_over(&mut terminal, mouse, || compose::edit(&editor, &path))?;
                 input = EventStream::new();
                 app.edited(status);
+                continue;
+            }
+            if let Some(shell) = app.shell.take() {
+                drop(input);
+                let status = hand_over(&mut terminal, mouse, || run_shell(&shell))?;
+                input = EventStream::new();
+                app.ran(&shell.command, status);
                 continue;
             }
             tokio::select! {
@@ -2751,7 +3741,25 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 6] = ["select ", "unselect ", "cd ", "refresh", "help", "quit"];
+const COMMANDS: [&str; 17] = [
+    "select ",
+    "unselect ",
+    "limit ",
+    "cd ",
+    "refresh",
+    "sync!",
+    "search ",
+    "unsubscribe",
+    "source",
+    "junk",
+    "bounce ",
+    "forward-attached",
+    "create ",
+    "rename ",
+    "delete-mailbox ",
+    "help",
+    "quit",
+];
 
 /// The ways to complete the command typed, `text`, each as the whole of it: its name, until there's a space after it;
 /// then, for `select` and `unselect`, the filter's last word, by the Messages `listed`.
@@ -2762,10 +3770,12 @@ fn command_completions(text: &str, listed: &[muttrs_mail::Envelope]) -> Vec<Stri
             .filter(|command| command.starts_with(text))
             .map(|command| (*command).to_owned())
             .collect(),
-        Some((name @ ("select" | "unselect"), filter)) => filter::completions(filter, listed)
-            .into_iter()
-            .map(|filter| format!("{name} {filter}"))
-            .collect(),
+        Some((name @ ("select" | "unselect" | "limit"), filter)) => {
+            filter::completions(filter, listed)
+                .into_iter()
+                .map(|filter| format!("{name} {filter}"))
+                .collect()
+        }
         Some(_) => Vec::new(),
     }
 }
@@ -2804,7 +3814,10 @@ mod tests {
 
     #[test]
     fn commands_then_filters_complete() {
-        assert_eq!(command_completions("s", &[]), ["select "]);
+        assert_eq!(
+            command_completions("s", &[]),
+            ["select ", "sync!", "search ", "source"]
+        );
         assert_eq!(command_completions("", &[]).len(), COMMANDS.len());
         assert_eq!(
             command_completions("unselect is:u", &[]),

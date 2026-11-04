@@ -224,6 +224,7 @@ mod tests {
             exists: 3,
             uid_validity: 7,
             uid_next: Some(4),
+            highest_modseq: None,
         };
         assert!(!members.is_current(standing));
         assert_eq!(members.keep(7, &[1, 2, 3]), [1, 2, 3]);

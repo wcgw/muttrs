@@ -80,7 +80,15 @@ impl Tasks {
         let effect = effect(&request, labels);
         let at_once = matches!(
             request,
-            Request::Refresh | Request::Search { .. } | Request::Send { .. }
+            Request::Refresh
+                | Request::Resync(_)
+                | Request::Search { .. }
+                | Request::SearchAll { .. }
+                | Request::Send { .. }
+                | Request::Bounce { .. }
+                | Request::CreateMailbox(_)
+                | Request::RenameMailbox { .. }
+                | Request::DeleteMailbox(_)
         );
         let task = client.send(request);
         self.queued.push(Queued {
@@ -223,10 +231,17 @@ fn effect(request: &Request, labels: &[Label]) -> Effect {
             None => Effect::None,
         },
         Request::Refresh
+        | Request::Resync(_)
         | Request::Open(_)
         | Request::More(_)
         | Request::Search { .. }
+        | Request::SearchAll { .. }
         | Request::Body { .. }
+        | Request::MoveBack { .. }
+        | Request::CreateMailbox(_)
+        | Request::RenameMailbox { .. }
+        | Request::DeleteMailbox(_)
+        | Request::Bounce { .. }
         | Request::Append { .. }
         | Request::Send { .. } => Effect::None,
     }
@@ -251,9 +266,11 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
     };
     match request {
         Request::Refresh => "Asking for what's new".to_owned(),
+        Request::Resync(mailbox) => format!("Listing {} anew", named(mailbox)),
         Request::Open(mailbox) => format!("Opening {}", named(mailbox)),
         Request::More(mailbox) => format!("Listing more of {}", named(mailbox)),
         Request::Search { mailbox, query } => format!("Searching {} for {query}", named(mailbox)),
+        Request::SearchAll { query } => format!("Searching every Mailbox for {query}"),
         Request::Body { .. } => "Fetching the Message".to_owned(),
         Request::Flag { uids, flag, on, .. } => {
             let messages = count(uids.len());
@@ -295,12 +312,19 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
             }
         }
         Request::Archive { uids, .. } => format!("Archiving {}", count(uids.len())),
+        Request::MoveBack {
+            to, message_ids, ..
+        } => format!("Moving {} back to {}", count(message_ids.len()), named(to)),
         Request::Append { role, .. } => match role {
             Role::Drafts => "Postponing to Drafts".to_owned(),
             Role::Sent => "Keeping a copy in Sent".to_owned(),
             role => format!("Saving to {}", with_role(*role)),
         },
         Request::Send { .. } => "Sending".to_owned(),
+        Request::Bounce { .. } => "Bouncing a Message".to_owned(),
+        Request::CreateMailbox(path) => format!("Creating {path}"),
+        Request::RenameMailbox { mailbox, to } => format!("Renaming {} {to}", named(mailbox)),
+        Request::DeleteMailbox(mailbox) => format!("Deleting {}", named(mailbox)),
     }
 }
 

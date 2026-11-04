@@ -27,6 +27,14 @@ const IDLE_RENEWAL: Duration = Duration::from_mins(25);
 const POLL: Duration = Duration::from_mins(5);
 /// The longest wait before connecting again.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// How long moving Messages back waits, each time they aren't found where they went, before looking again: a server
+/// can take a while to show them there (Proton's Bridge, archiving). After the last, it gives up.
+const MOVE_BACK_WAITS: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 
 /// A Request asked of an Account, numbered by its Client: what [`Update::Started`] and [`Update::Finished`] tell of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,6 +45,9 @@ pub struct Task(u64);
 pub enum Request {
     /// List its Mailboxes again, and connect again now if it's offline.
     Refresh,
+    /// Forget what's kept of a Mailbox, its Envelopes listed (the cache's too) and which Messages each Label has, and
+    /// list it anew, as when it was first opened; and the Mailboxes, as [`Request::Refresh`] does.
+    Resync(String),
     /// Open a Mailbox, and list its newest Messages' Envelopes.
     Open(String),
     /// List older Envelopes of a Mailbox than those listed: as many again as were listed first.
@@ -45,6 +56,11 @@ pub enum Request {
     Search {
         /// The Mailbox to search.
         mailbox: String,
+        /// What to search for: Gmail's own syntax on Gmail, text anywhere in a Message elsewhere.
+        query: String,
+    },
+    /// Search every Mailbox on the server, for how many Messages each has that it finds.
+    SearchAll {
         /// What to search for: Gmail's own syntax on Gmail, text anywhere in a Message elsewhere.
         query: String,
     },
@@ -116,6 +132,16 @@ pub enum Request {
         /// Their UIDs there.
         uids: Vec<u32>,
     },
+    /// Move Messages back to where they were moved from, as undoing it does: those with `message_ids` (and only
+    /// those), found by them where they went.
+    MoveBack {
+        /// Where they went.
+        went: Went,
+        /// Where they were, by its name on the server.
+        to: String,
+        /// Their `Message-ID`s.
+        message_ids: Vec<String>,
+    },
     /// Add a Message to the Mailbox with a Role, as a Draft or a copy of what was sent.
     Append {
         /// The Role of the Mailbox to add it to.
@@ -125,6 +151,22 @@ pub enum Request {
         /// Whether it's a Draft, to be flagged Draft as well as Seen.
         draft: bool,
     },
+    /// Create a Mailbox, named for people as `Work/Reports`.
+    CreateMailbox(String),
+    /// Rename a Mailbox.
+    RenameMailbox {
+        /// The Mailbox, by its name on the server.
+        mailbox: String,
+        /// Its new name, for people, as `Work/Reports`.
+        to: String,
+    },
+    /// Delete a Mailbox, and its Messages with it.
+    DeleteMailbox(String),
+    /// Send a Message on as it is (mutt's bounce): through the Account's SMTP server, without a copy in Sent.
+    Bounce {
+        /// The Message, with its `Resent-` headers.
+        built: Box<Built>,
+    },
     /// Send a Message through the Account's SMTP server, then keep a copy in Sent (unless the server does) and
     /// flag what it answers as answered.
     Send {
@@ -133,6 +175,19 @@ pub enum Request {
         /// The Message it answers, by its Mailbox and UID.
         answers: Option<(String, u32)>,
     },
+}
+
+/// Where Messages were moved to: a Mailbox, or where deleting or archiving puts them, as the worker knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Went {
+    /// A Mailbox, by its name on the server.
+    Mailbox(String),
+    /// Trash, as deleting moves them.
+    Trash,
+    /// Where archiving moves them: the Archive Mailbox, or on Gmail All Mail.
+    Archived,
+    /// Junk, as taking them for spam moves them.
+    Junk,
 }
 
 impl Request {
@@ -147,10 +202,17 @@ impl Request {
             | Self::Delete { mailbox, .. }
             | Self::Archive { mailbox, .. } => Some(mailbox),
             Self::Refresh
+            | Self::Resync(_)
             | Self::Open(_)
             | Self::More(_)
             | Self::Search { .. }
+            | Self::SearchAll { .. }
             | Self::Body { .. }
+            | Self::MoveBack { .. }
+            | Self::CreateMailbox(_)
+            | Self::RenameMailbox { .. }
+            | Self::DeleteMailbox(_)
+            | Self::Bounce { .. }
             | Self::Append { .. }
             | Self::Send { .. } => None,
         }
@@ -190,6 +252,9 @@ pub enum Update {
     /// [`Update::Failed`] says); for one that changes a Mailbox's Messages, the Envelopes told next show them as the
     /// server has them since.
     Finished(Task),
+    /// The Messages a [`Request::MoveBack`] Task was for are back where they were. Finished without it, they
+    /// aren't.
+    MovedBack(Task),
     /// A Message was sent, or couldn't be, for this reason.
     Sent {
         /// The Task that sent it.
@@ -236,6 +301,14 @@ pub enum Update {
         envelopes: Vec<Envelope>,
         /// How many it found in all.
         count: usize,
+    },
+    /// What a search of every Mailbox found: the Mailboxes with Messages it found, by their names on the server, in
+    /// the order they're listed, and how many each has.
+    FoundIn {
+        /// What was searched for.
+        query: String,
+        /// The Mailboxes, and how many it found in each.
+        found: Vec<(String, usize)>,
     },
     /// Something asked for is done, as this says.
     Done(String),
@@ -293,7 +366,9 @@ impl Client {
             windows: HashMap::new(),
             open: None,
             selected: None,
+            selected_modseq: None,
             queue: VecDeque::new(),
+            again: Vec::new(),
         };
         tokio::spawn(worker.run(received, changes));
         tokio::spawn(watch(account, tls, credentials, inbox_changed));
@@ -463,6 +538,9 @@ struct Window {
     uid_validity: u32,
     exists: u32,
     envelopes: BTreeMap<u32, Envelope>,
+    /// The Mailbox's highest mod-sequence (CONDSTORE's) when they were brought up to date: what's changed since is
+    /// what's asked, rather than every one's Flags.
+    highest_modseq: Option<u64>,
 }
 
 struct Worker {
@@ -484,8 +562,13 @@ struct Worker {
     open: Option<String>,
     /// The Mailbox the session has selected.
     selected: Option<String>,
+    /// Its highest mod-sequence when it was, as the server said.
+    selected_modseq: Option<u64>,
     /// What's asked and not started yet, in the order asked: kept while offline, and across connections.
     queue: VecDeque<(Task, Request)>,
+    /// What's tried again once it's due, as moving back Messages not found where they went yet: when, the Task,
+    /// and how many times it was tried.
+    again: Vec<(tokio::time::Instant, Task, Request, usize)>,
 }
 
 impl Worker {
@@ -613,7 +696,13 @@ impl Worker {
             self.tolerate(opened)?;
         }
         loop {
-            // What's asked comes first; counting Mailboxes' Messages fills the gaps between.
+            // What's asked comes first, and what's tried again once it's due; counting Mailboxes' Messages fills the
+            // gaps between.
+            if let Some((task, request, tries)) = self.due_again() {
+                self.move_back_task(&mut session, task, request, tries)
+                    .await?;
+                continue;
+            }
             let (task, request) = if let Some(asked) = self.next_asked(requests) {
                 asked
             } else if let Some(mailbox) = counts_due.pop_front() {
@@ -634,6 +723,7 @@ impl Worker {
                         self.tolerate(seen)?;
                         continue;
                     }
+                    () = Self::until_again(self.again.iter().map(|(due, ..)| *due).min()) => continue,
                     () = tokio::time::sleep(POLL) => {
                         // Keeps the connection alive, and sees what's new in the open Mailbox.
                         if let Some(open) = self.open.clone() {
@@ -669,8 +759,11 @@ impl Worker {
         request: Request,
         counts_due: &mut VecDeque<String>,
     ) -> Result<(), imap::Error> {
+        if matches!(request, Request::MoveBack { .. }) {
+            return self.move_back_task(session, task, request, 0).await;
+        }
         (self.notify)(Update::Started(task));
-        let sending = matches!(request, Request::Send { .. });
+        let sending = matches!(request, Request::Send { .. } | Request::Bounce { .. });
         let changes = request.changes().map(str::to_owned);
         let handled = self.handle(session, task, request, counts_due).await;
         if !sending {
@@ -703,8 +796,20 @@ impl Worker {
                 self.open = Some(mailbox.clone());
                 self.open(session, &mailbox).await?;
             }
+            Request::Resync(mailbox) => {
+                self.list(session).await?;
+                *counts_due = self.counts_due();
+                self.members.clear();
+                self.open = Some(mailbox.clone());
+                self.open_as(session, &mailbox, true).await?;
+                (self.notify)(Update::Done(format!(
+                    "Listed {} anew",
+                    self.named(&mailbox)
+                )));
+            }
             Request::More(mailbox) => self.more(session, &mailbox).await?,
             Request::Search { mailbox, query } => self.search(session, mailbox, query).await?,
+            Request::SearchAll { query } => self.search_all(session, query).await?,
             Request::Body { mailbox, uid } => self.body(session, &mailbox, uid).await?,
             Request::Flag {
                 mailbox,
@@ -746,14 +851,35 @@ impl Worker {
                 self.delete(session, &mailbox, &uids).await?;
             }
             Request::Archive { mailbox, uids } => {
-                let role = if self.account.gmail {
-                    Role::All
-                } else {
-                    Role::Archive
-                };
-                self.move_to(session, &mailbox, &uids, role).await?;
+                self.move_to(session, &mailbox, &uids, self.archive_role())
+                    .await?;
             }
-            Request::Send { built, answers } => self.send(task, *built, answers),
+            // Done by `move_back_task`, which tries it again.
+            Request::MoveBack { .. } => {}
+            Request::Send { built, answers } => self.send(task, *built, answers, true),
+            Request::Bounce { built } => self.send(task, *built, None, false),
+            Request::CreateMailbox(path) => {
+                let name = session.mailbox_named(&path);
+                let done = session.create(&name).await;
+                self.changed_mailboxes(session, done, format!("Created {path}"))
+                    .await?;
+            }
+            Request::RenameMailbox { mailbox, to } => {
+                let name = session.mailbox_named(&to);
+                let from = self.named(&mailbox);
+                let done = session.rename(&mailbox, &name).await;
+                self.changed_mailboxes(session, done, format!("Renamed {from} {to}"))
+                    .await?;
+            }
+            Request::DeleteMailbox(mailbox) => {
+                let from = self.named(&mailbox);
+                if self.selected.as_deref() == Some(mailbox.as_str()) {
+                    self.selected = None;
+                }
+                let done = session.delete(&mailbox).await;
+                self.changed_mailboxes(session, done, format!("Deleted {from}"))
+                    .await?;
+            }
             Request::Append {
                 role,
                 message,
@@ -779,9 +905,25 @@ impl Worker {
         Ok(())
     }
 
+    /// Tells `done`, a Mailbox created, renamed or deleted, as `said`, or why it wasn't; and lists the Mailboxes
+    /// again.
+    async fn changed_mailboxes(
+        &mut self,
+        session: &mut Session,
+        done: Result<(), imap::Error>,
+        said: String,
+    ) -> Result<(), imap::Error> {
+        match done {
+            Ok(()) => (self.notify)(Update::Done(said)),
+            Err(error) if error.is_fatal() => return Err(error),
+            Err(error) => (self.notify)(Update::Failed(format!("Not done: {error}"))),
+        }
+        self.list(session).await
+    }
+
     /// Sends `built`, Task `task`, in the background, so that reading goes on meanwhile; then asks for the copy in
-    /// Sent and the answered flag.
-    fn send(&self, task: Task, built: Built, answers: Option<(String, u32)>) {
+    /// Sent, if it's `kept` and the Account keeps one, and the answered flag.
+    fn send(&self, task: Task, built: Built, answers: Option<(String, u32)>, kept: bool) {
         let (account, credentials, notify, own) = (
             Arc::clone(&self.account),
             Arc::clone(&self.credentials),
@@ -797,7 +939,7 @@ impl Worker {
             }
             .await;
             if sent.is_ok() {
-                if account.copy_to_sent {
+                if kept && account.copy_to_sent {
                     own.send(Request::Append {
                         role: Role::Sent,
                         message: built.kept,
@@ -889,6 +1031,7 @@ impl Worker {
         }
         let examined = session.examine(mailbox).await?;
         self.selected = Some(mailbox.to_owned());
+        self.selected_modseq = examined.highest_modseq;
         let uids = session.uids().await?;
         let members = self.members.entry(mailbox.to_owned()).or_default();
         let lacking = members.keep(examined.uid_validity, &uids);
@@ -1073,19 +1216,35 @@ impl Worker {
     ) -> Result<imap::Selected, imap::Error> {
         let selected = session.select(mailbox).await?;
         self.selected = Some(mailbox.to_owned());
+        self.selected_modseq = selected.highest_modseq;
         Ok(selected)
     }
 
     /// Opens `mailbox`, and tells its Envelopes: the newest, the first time; what's new and changed since, after.
     async fn open(&mut self, session: &mut Session, mailbox: &str) -> Result<(), imap::Error> {
+        self.open_as(session, mailbox, false).await
+    }
+
+    /// Opens `mailbox`: lists its newest Messages' Envelopes, as when it's first opened or if `anew`, else brings
+    /// those listed up to date. Listed anew, what was listed stays until what replaces it is had: the connection
+    /// dropping meanwhile leaves it as it was.
+    async fn open_as(
+        &mut self,
+        session: &mut Session,
+        mailbox: &str,
+        anew: bool,
+    ) -> Result<(), imap::Error> {
         // What the cache keeps is brought up to date, rather than fetched again.
-        self.listed_from_cache(mailbox);
+        if !anew {
+            self.listed_from_cache(mailbox);
+        }
         let selected = self.select(session, mailbox).await?;
         let window = self.windows.entry(mailbox.to_owned()).or_default();
-        if window.uid_validity != selected.uid_validity || window.envelopes.is_empty() {
+        if anew || window.uid_validity != selected.uid_validity || window.envelopes.is_empty() {
             *window = Window {
                 uid_validity: selected.uid_validity,
                 exists: selected.exists,
+                highest_modseq: selected.highest_modseq,
                 envelopes: session
                     .newest(selected.exists, WINDOW)
                     .await?
@@ -1095,7 +1254,7 @@ impl Worker {
             };
         } else {
             window.exists = selected.exists;
-            Self::update_window(session, window).await?;
+            Self::update_window(session, window, selected.highest_modseq).await?;
         }
         self.label_window(mailbox);
         self.tell_window(mailbox);
@@ -1176,7 +1335,14 @@ impl Worker {
     }
 
     /// The Envelopes of what's new in `window`'s Mailbox, which is selected, and the Flags of what it has.
-    async fn update_window(session: &mut Session, window: &mut Window) -> Result<(), imap::Error> {
+    /// Brings `window` up to date with its Mailbox, selected, whose highest mod-sequence when it was is `now`, if
+    /// the server keeps them: what's new, and what's changed since it was last brought up to date (only that, by
+    /// CONDSTORE, when both mod-sequences are known), and what's gone.
+    async fn update_window(
+        session: &mut Session,
+        window: &mut Window,
+        now: Option<u64>,
+    ) -> Result<(), imap::Error> {
         let Some((&first, _)) = window.envelopes.first_key_value() else {
             return Ok(());
         };
@@ -1190,26 +1356,53 @@ impl Worker {
                 window.envelopes.insert(envelope.uid, envelope);
             }
         }
-        let flags: HashMap<u32, Flags> = session
-            .flags(&format!("{first}:{last}"))
-            .await?
-            .into_iter()
-            .collect();
-        // What's no longer there was expunged.
-        window
-            .envelopes
-            .retain(|uid, _| *uid > last || flags.contains_key(uid));
-        for (uid, envelope) in &mut window.envelopes {
-            if let Some(flags) = flags.get(uid) {
-                envelope.flags = *flags;
+        let listed = format!("{first}:{last}");
+        let changed: Option<HashSet<u32>> = match (window.highest_modseq, now) {
+            // What's still there, and the Flags of what changed since: not every one's.
+            (Some(since), Some(_)) if session.can_condstore() => {
+                let there: HashSet<u32> = session.uids_in(&listed).await?.into_iter().collect();
+                window
+                    .envelopes
+                    .retain(|uid, _| *uid > last || there.contains(uid));
+                let flags = session.changed_flags(&listed, since).await?;
+                for (uid, flags) in &flags {
+                    if let Some(envelope) = window.envelopes.get_mut(uid) {
+                        envelope.flags = *flags;
+                    }
+                }
+                Some(flags.into_iter().map(|(uid, _)| uid).collect())
             }
+            _ => {
+                let flags: HashMap<u32, Flags> =
+                    session.flags(&listed).await?.into_iter().collect();
+                // What's no longer there was expunged.
+                window
+                    .envelopes
+                    .retain(|uid, _| *uid > last || flags.contains_key(uid));
+                for (uid, envelope) in &mut window.envelopes {
+                    if let Some(flags) = flags.get(uid) {
+                        envelope.flags = *flags;
+                    }
+                }
+                None
+            }
+        };
+        // Taken from a SELECT, before what was asked since: what changed meanwhile is asked again, never missed.
+        if now.is_some() {
+            window.highest_modseq = now;
         }
         // Those listed before Gmail's Threads were asked for, as the cache may keep them.
         session
             .add_gmail_threads(window.envelopes.values_mut())
             .await?;
+        // Gmail changes a Message's mod-sequence with its labels: only what changed is asked again.
         session
-            .refresh_gmail_labels(window.envelopes.values_mut())
+            .refresh_gmail_labels(window.envelopes.values_mut().filter(|envelope| {
+                envelope.uid > last
+                    || changed
+                        .as_ref()
+                        .is_none_or(|changed| changed.contains(&envelope.uid))
+            }))
             .await?;
         Ok(())
     }
@@ -1219,8 +1412,13 @@ impl Worker {
         session: &mut Session,
         mailbox: &str,
     ) -> Result<(), imap::Error> {
+        let now = if self.selected.as_deref() == Some(mailbox) {
+            self.selected_modseq
+        } else {
+            None
+        };
         if let Some(window) = self.windows.get_mut(mailbox) {
-            Self::update_window(session, window).await?;
+            Self::update_window(session, window, now).await?;
             self.label_window(mailbox);
             self.tell_window(mailbox);
         }
@@ -1235,6 +1433,7 @@ impl Worker {
                 uid_validity: window.uid_validity,
                 exists: window.exists,
                 envelopes: window.envelopes.values().cloned().collect(),
+                highest_modseq: window.highest_modseq,
             };
             self.cache.keep_envelopes(mailbox, &listed);
             (self.notify)(Update::Envelopes {
@@ -1267,6 +1466,7 @@ impl Worker {
                 Window {
                     uid_validity: listed.uid_validity,
                     exists: listed.exists,
+                    highest_modseq: listed.highest_modseq,
                     envelopes: listed
                         .envelopes
                         .into_iter()
@@ -1377,6 +1577,175 @@ impl Worker {
         self.count(session, target).await
     }
 
+    /// Searches every Mailbox that can be opened for `query`, and tells how many Messages each has that it finds.
+    async fn search_all(
+        &mut self,
+        session: &mut Session,
+        query: String,
+    ) -> Result<(), imap::Error> {
+        let names: Vec<String> = self
+            .mailboxes
+            .iter()
+            .filter(|mailbox| mailbox.selectable)
+            .map(|mailbox| mailbox.name.clone())
+            .collect();
+        let mut found = Vec::new();
+        for name in names {
+            // Examined, only to read: what's searched stays as it is.
+            let searched = async {
+                session.examine(&name).await?;
+                session.search(&query, self.gmail).await
+            }
+            .await;
+            match searched {
+                Ok(uids) if !uids.is_empty() => found.push((name, uids.len())),
+                Ok(_) => {}
+                Err(error) if !error.is_fatal() => {
+                    tracing::info!(mailbox = name, %error, "a Mailbox couldn't be searched");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Examined, none is selected: the next to read or change is selected again.
+        self.selected = None;
+        (self.notify)(Update::FoundIn { query, found });
+        Ok(())
+    }
+
+    /// The Mailbox named `name` on the server, by its name for people.
+    fn named(&self, name: &str) -> String {
+        self.mailboxes
+            .iter()
+            .find(|known| known.name == name)
+            .map_or_else(
+                || crate::mailbox::decode(name),
+                |known| known.label().to_owned(),
+            )
+    }
+
+    /// The Role of the Mailbox archiving moves Messages to: All Mail on Gmail, which archives by taking them out of
+    /// the Inbox; the Archive elsewhere.
+    fn archive_role(&self) -> Role {
+        if self.account.gmail {
+            Role::All
+        } else {
+            Role::Archive
+        }
+    }
+
+    /// The Task tried again that's due, if one is, and how many times it was tried.
+    fn due_again(&mut self) -> Option<(Task, Request, usize)> {
+        let now = tokio::time::Instant::now();
+        let at = self.again.iter().position(|(due, ..)| *due <= now)?;
+        let (_, task, request, tries) = self.again.remove(at);
+        Some((task, request, tries))
+    }
+
+    /// Waits until `due`, or for ever if nothing is.
+    async fn until_again(due: Option<tokio::time::Instant>) {
+        match due {
+            Some(due) => tokio::time::sleep_until(due).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Does `task`, a [`Request::MoveBack`] tried `tries` times before: if the Messages aren't where they went
+    /// yet, it's tried again once it's waited, until it's waited the last time. Told finished once it's done with,
+    /// moved back (as [`Update::MovedBack`] says) or not.
+    async fn move_back_task(
+        &mut self,
+        session: &mut Session,
+        task: Task,
+        request: Request,
+        tries: usize,
+    ) -> Result<(), imap::Error> {
+        let Request::MoveBack {
+            went,
+            to,
+            message_ids,
+        } = &request
+        else {
+            return Ok(());
+        };
+        if tries == 0 {
+            (self.notify)(Update::Started(task));
+        }
+        let moved = match self.move_back(session, went, to, message_ids).await {
+            Ok(moved) => moved,
+            Err(error) => {
+                (self.notify)(Update::Finished(task));
+                return self.tolerate(Err(error));
+            }
+        };
+        match moved {
+            MovedBack::NotThere(_) if tries < MOVE_BACK_WAITS.len() => {
+                let due = tokio::time::Instant::now() + MOVE_BACK_WAITS[tries];
+                self.again.push((due, task, request, tries + 1));
+                return Ok(());
+            }
+            MovedBack::Moved => (self.notify)(Update::MovedBack(task)),
+            MovedBack::NotThere(from) => (self.notify)(Update::Failed(format!(
+                "Not moved back: they aren't in {from}"
+            ))),
+            MovedBack::Refused(why) => (self.notify)(Update::Failed(why)),
+        }
+        (self.notify)(Update::Finished(task));
+        Ok(())
+    }
+
+    /// Moves the Messages with `message_ids` in the Mailbox they `went` to back `to` where they were.
+    async fn move_back(
+        &mut self,
+        session: &mut Session,
+        went: &Went,
+        to: &str,
+        message_ids: &[String],
+    ) -> Result<MovedBack, imap::Error> {
+        let from = match went {
+            Went::Mailbox(name) => Some(name.clone()),
+            Went::Trash => self.with_role(Role::Trash),
+            Went::Archived => self.with_role(self.archive_role()),
+            Went::Junk => self.with_role(Role::Junk),
+        };
+        let Some(from) = from else {
+            return Ok(MovedBack::Refused("Nowhere to move them back from".into()));
+        };
+        // Selected again, so that what's come since it was shows.
+        self.selected = None;
+        self.select(session, &from).await?;
+        let uids = session.with_message_ids(message_ids).await?;
+        if uids.is_empty() {
+            return Ok(MovedBack::NotThere(self.named(&from)));
+        }
+        // Taken out of All Mail, a Gmail Message is deleted: one archived goes back to the Inbox as a copy, which
+        // labels it so again.
+        let moved = if self.with_role(Role::All).as_deref() == Some(from.as_str()) {
+            session.copy(&uids, to).await
+        } else {
+            session.move_to(&uids, to).await
+        };
+        let outcome = match moved {
+            Ok(()) => {
+                (self.notify)(Update::Done(format!(
+                    "Moved {} back to {}",
+                    count(uids.len()),
+                    self.named(to)
+                )));
+                MovedBack::Moved
+            }
+            Err(error) if error.is_fatal() => return Err(error),
+            Err(error) => MovedBack::Refused(format!("Moving back: {error}")),
+        };
+        for mailbox in [from.as_str(), to] {
+            if self.windows.contains_key(mailbox) {
+                self.select(session, mailbox).await?;
+                self.refresh_window(session, mailbox).await?;
+            }
+            self.count(session, mailbox).await?;
+        }
+        Ok(outcome)
+    }
+
     async fn delete(
         &mut self,
         session: &mut Session,
@@ -1396,6 +1765,15 @@ impl Worker {
         }
         self.refresh_window(session, mailbox).await
     }
+}
+
+/// What came of moving Messages back.
+enum MovedBack {
+    Moved,
+    /// They aren't in the Mailbox they went to, by its name for people: not yet, or no longer.
+    NotThere(String),
+    /// The server wouldn't, for this reason.
+    Refused(String),
 }
 
 /// The next Task to do of those `queue`d: a Message to read before anything else, as reading waits for it, and

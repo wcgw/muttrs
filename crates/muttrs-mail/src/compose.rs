@@ -232,6 +232,20 @@ impl Draft {
         }
     }
 
+    /// A reply to the mailing list `list` (by its address) that `original` came through, quoting `quoted`: to the
+    /// list alone, as mutt's list-reply writes it.
+    #[must_use]
+    pub fn reply_to_list(original: &Message, sender: &Sender, list: &str, quoted: &str) -> Self {
+        Self {
+            to: vec![Address {
+                name: None,
+                email: list.to_owned(),
+            }],
+            cc: Vec::new(),
+            ..Self::reply(original, sender, false, quoted)
+        }
+    }
+
     /// A Postponed Draft, as it was kept: its headers, its body (`text`, its Markdown) and its Attachments.
     #[must_use]
     pub fn resumed(kept: &Message, text: &str) -> Self {
@@ -297,6 +311,34 @@ impl Draft {
                 text.trim_end()
             ),
             attachments,
+            ..Self::default()
+        }
+    }
+
+    /// A forward of `original` as an Attachment of its own (`message/rfc822`), as it came, rather than quoted.
+    #[must_use]
+    pub fn forward_attached(original: &Message, sender: &Sender) -> Self {
+        let named: String = original
+            .subject
+            .chars()
+            .map(|character| {
+                if character.is_alphanumeric() || " -_.".contains(character) {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let named = named.trim();
+        Self {
+            from: sender.primary().cloned(),
+            subject: prefixed("Fwd:", &original.subject),
+            body: format!("\n\n{}", spaced(&sender.signed()).trim_end()),
+            attachments: vec![Attachment {
+                name: format!("{}.eml", if named.is_empty() { "message" } else { named }),
+                mime_type: "message/rfc822".into(),
+                source: Source::Bytes(Arc::new(original.raw().to_vec())),
+            }],
             ..Self::default()
         }
     }
@@ -487,6 +529,92 @@ impl Draft {
                 .collect(),
         })
     }
+}
+
+/// `original`, a Message as RFC 5322 writes it, sent on as it is to `to`, from `from` (mutt's bounce): its own
+/// headers and body, under `Resent-` headers saying who sent it on, to whom and when (RFC 5322's 3.6.6), and its
+/// `Resent-Message-ID`, `message_id`.
+#[must_use]
+pub fn bounced(original: &[u8], from: &Address, to: &[Address], message_id: &str) -> Built {
+    let now = jiff::Zoned::now()
+        .strftime("%a, %-d %b %Y %H:%M:%S %z")
+        .to_string();
+    let recipients: Vec<String> = to.iter().map(|address| address.email.clone()).collect();
+    let mut message = format!(
+        "Resent-From: {}\r\nResent-To: {}\r\nResent-Date: {now}\r\nResent-Message-ID: {message_id}\r\n",
+        from.email,
+        recipients.join(", ")
+    )
+    .into_bytes();
+    message.extend_from_slice(original);
+    Built {
+        kept: message.clone(),
+        message,
+        from: from.email.clone(),
+        recipients,
+    }
+}
+
+/// A `mailto:` URL (RFC 6068), read: whom it's to, and the subject and body it gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mailto {
+    /// The address it's to: the first, if it names several.
+    pub to: String,
+    /// The subject it gives a Message to it.
+    pub subject: Option<String>,
+    /// The body it gives a Message to it.
+    pub body: Option<String>,
+}
+
+/// `url` read as a `mailto:` URL; None if it isn't one, or names no address.
+#[must_use]
+pub fn mailto(url: &str) -> Option<Mailto> {
+    let rest = url
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &url[7..])?;
+    let (to, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let to = percent_decoded(to.split(',').next().unwrap_or_default());
+    let to = to.trim();
+    if to.is_empty() || !to.contains('@') {
+        return None;
+    }
+    let mut mailto = Mailto {
+        to: to.to_owned(),
+        subject: None,
+        body: None,
+    };
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = percent_decoded(value);
+        if name.eq_ignore_ascii_case("subject") {
+            mailto.subject = Some(value);
+        } else if name.eq_ignore_ascii_case("body") {
+            mailto.body = Some(value);
+        }
+    }
+    Some(mailto)
+}
+
+/// `text` with its `%XX` escapes decoded, as UTF-8 (what isn't valid stays as it was).
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = (bytes[at] == b'%')
+            .then(|| text.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escaped {
+            decoded.push(byte);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| text.to_owned())
 }
 
 /// A fresh `Message-ID`, angle brackets and all, at the domain of `email`.
@@ -842,5 +970,92 @@ mod tests {
         let id = message_id("me@example.com");
         assert!(id.starts_with('<') && id.ends_with("@example.com>"), "{id}");
         assert_ne!(id, message_id("me@example.com"));
+    }
+
+    #[test]
+    fn mailto_urls_are_read_with_their_subject_and_body() {
+        assert_eq!(
+            mailto("MAILTO:leave%40lists.example.org?Subject=bye%20now&body=please&x=y"),
+            Some(Mailto {
+                to: "leave@lists.example.org".into(),
+                subject: Some("bye now".into()),
+                body: Some("please".into()),
+            })
+        );
+        assert_eq!(
+            mailto("mailto:a@example.org,b@example.org").map(|mailto| mailto.to),
+            Some("a@example.org".into()),
+            "the first of several"
+        );
+        assert_eq!(mailto("https://example.org"), None);
+        assert_eq!(mailto("mailto:?subject=x"), None, "to no one");
+        assert_eq!(
+            mailto("mailto:100%25@example.org").map(|m| m.to),
+            Some("100%@example.org".into())
+        );
+    }
+
+    #[test]
+    fn a_reply_to_the_list_is_to_the_list_alone() {
+        let original = Message::parse(
+            b"From: Ann <ann@example.com>\r\nTo: rust@lists.example.org\r\nCc: bob@example.com\r\n\
+              Subject: Patches\r\nMessage-ID: <p@example.com>\r\n\r\nHi\r\n"
+                .to_vec(),
+        )
+        .unwrap();
+        let sender = Sender::default();
+        let draft = Draft::reply_to_list(&original, &sender, "rust@lists.example.org", "Hi");
+        assert_eq!(
+            draft
+                .to
+                .iter()
+                .map(|a| a.email.as_str())
+                .collect::<Vec<_>>(),
+            ["rust@lists.example.org"]
+        );
+        assert_eq!(draft.cc, Vec::<Address>::new());
+        assert_eq!(draft.subject, "Re: Patches");
+        assert_eq!(draft.in_reply_to.as_deref(), Some("p@example.com"));
+    }
+
+    #[test]
+    fn a_bounce_is_the_message_as_it_came_under_resent_headers() {
+        let original = b"From: Ann <ann@example.com>\r\nSubject: Patches\r\n\r\nHi\r\n";
+        let from = address("Alex", "alex@example.com");
+        let built = bounced(
+            original,
+            &from,
+            &[address("Bob", "bob@example.com")],
+            "<b@example.com>",
+        );
+        let text = String::from_utf8(built.message.clone()).unwrap();
+        assert!(
+            text.starts_with(
+                "Resent-From: alex@example.com\r\nResent-To: bob@example.com\r\nResent-Date: "
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\r\nResent-Message-ID: <b@example.com>\r\nFrom: Ann <ann@example.com>\r\n"
+            )
+        );
+        assert!(text.ends_with("\r\n\r\nHi\r\n"));
+        assert_eq!(built.recipients, ["bob@example.com"]);
+        assert_eq!(built.from, "alex@example.com");
+    }
+
+    #[test]
+    fn a_forward_attached_is_the_message_as_an_attachment_of_its_own() {
+        let raw = b"From: Ann <ann@example.com>\r\nSubject: Re: a/b?\r\n\r\nHi\r\n".to_vec();
+        let original = Message::parse(raw.clone()).unwrap();
+        let draft = Draft::forward_attached(&original, &Sender::default());
+        assert_eq!(draft.subject, "Fwd: Re: a/b?");
+        assert_eq!(draft.attachments.len(), 1);
+        let attachment = &draft.attachments[0];
+        assert_eq!(attachment.mime_type, "message/rfc822");
+        assert_eq!(attachment.name, "Re_ a_b_.eml");
+        assert_eq!(attachment.source, Source::Bytes(Arc::new(raw)));
+        assert_eq!(draft.to, Vec::<Address>::new());
     }
 }

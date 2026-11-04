@@ -133,6 +133,17 @@ pub struct Message {
     pub in_reply_to: Vec<String>,
     /// The `Message-ID`s of the Messages before it in its thread, oldest first.
     pub references: Vec<String>,
+    /// The mailing list it came through, by name: its `List-Id`'s description, else its id.
+    pub list: Option<String>,
+    /// The address of the mailing list it came through, to write to it (its `List-Post`, RFC 2369): None if it
+    /// came through none, or one that takes no posts (`List-Post: NO`).
+    pub list_post: Option<String>,
+    /// How to unsubscribe from the mailing list it came through (its `List-Unsubscribe`): URLs, `mailto:` or
+    /// `https:`, in the order given, the list's preferred first.
+    pub list_unsubscribe: Vec<String>,
+    /// Whether its `https:` URL to unsubscribe does it with a POST alone, without a page to confirm it on
+    /// (`List-Unsubscribe-Post: List-Unsubscribe=One-Click`, RFC 8058).
+    pub one_click_unsubscribe: bool,
     html: Option<mail_parser::PartId>,
     plain: Option<(mail_parser::PartId, TextFormat)>,
     parts: Vec<Part>,
@@ -185,11 +196,80 @@ impl Message {
             message_id: root.message_id().map(|id| strip_brackets(id).to_owned()),
             in_reply_to: ids(root.in_reply_to()),
             references: ids(root.references()),
+            list: root.list_id().and_then(|list| {
+                let list = list.mailboxes().next()?;
+                list.name()
+                    .filter(|name| !name.trim().is_empty())
+                    .or(list.address())
+                    .map(|name| strip_brackets(name).to_owned())
+            }),
+            list_post: urls(root.list_post())
+                .iter()
+                .find_map(|url| crate::compose::mailto(url))
+                .map(|mailto| mailto.to),
+            list_unsubscribe: urls(root.list_unsubscribe()),
+            one_click_unsubscribe: root
+                .headers()
+                .get("List-Unsubscribe-Post")
+                .and_then(|header| header.value().as_text())
+                .is_some_and(|value| {
+                    value
+                        .trim()
+                        .eq_ignore_ascii_case("List-Unsubscribe=One-Click")
+                }),
             html: html.map(|part| part.id()),
             plain: plain.map(|part| (part.id(), text_format(&part))),
             parts,
             parsed,
         })
+    }
+
+    /// How to unsubscribe from the mailing list it came through, as its `List-Unsubscribe` says, in the order RFC
+    /// 8058 prefers: by a POST alone where it says one does; else by mail; else at a page. None if it says no way.
+    #[must_use]
+    pub fn unsubscribe(&self) -> Option<Unsubscribe> {
+        let page = self.list_unsubscribe.iter().find(|url| {
+            url.get(..8)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        });
+        if self.one_click_unsubscribe
+            && let Some(url) = page
+        {
+            return Some(Unsubscribe::OneClick(url.clone()));
+        }
+        self.list_unsubscribe
+            .iter()
+            .find_map(|url| crate::compose::mailto(url))
+            .map(Unsubscribe::Mail)
+            .or_else(|| page.map(|url| Unsubscribe::Page(url.clone())))
+    }
+
+    /// Its headers, every one, in order, as written: each's name, and its value unfolded onto one line (encoded
+    /// words left as they are).
+    #[must_use]
+    pub fn headers(&self) -> Vec<(String, String)> {
+        self.parsed
+            .root()
+            .headers()
+            .iter()
+            .map(|header| {
+                let value = String::from_utf8_lossy(header.raw_value());
+                let unfolded = value
+                    .split(['\r', '\n'])
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (header.raw_name().to_owned(), unfolded)
+            })
+            .collect()
+    }
+
+    /// The whole of it, as it came: its headers and its body, as RFC 5322 writes them (what isn't UTF-8 shown as
+    /// best it can be).
+    #[must_use]
+    pub fn source(&self) -> String {
+        String::from_utf8_lossy(self.raw()).into_owned()
     }
 
     /// Its HTML body, if it has one.
@@ -299,6 +379,29 @@ pub(crate) fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Vec<Addre
                     email: mailbox.address()?.to_owned(),
                 })
             })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// How to unsubscribe from a mailing list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unsubscribe {
+    /// By a POST to this URL, with nothing to confirm (RFC 8058).
+    OneClick(String),
+    /// By mail.
+    Mail(crate::compose::Mailto),
+    /// At the page at this URL, in a browser.
+    Page(String),
+}
+
+/// The URLs of a `List-` header (RFC 2369), in order.
+fn urls(list: Option<mail_parser::AddressList<'_>>) -> Vec<String> {
+    list.map(|list| {
+        list.mailboxes()
+            .filter_map(|mailbox| mailbox.address())
+            .map(|url| strip_brackets(url).to_owned())
+            .filter(|url| !url.is_empty())
             .collect()
     })
     .unwrap_or_default()
@@ -431,5 +534,78 @@ JVBERi0=\r
         assert_eq!(message.plain().unwrap().0, "just text\r\n");
         assert_eq!(message.parts(), []);
         assert!(!message.has_attachments());
+    }
+
+    #[test]
+    fn a_mailing_lists_headers_say_where_to_post_and_how_to_unsubscribe() {
+        let message = |headers: &str| {
+            Message::parse(
+                format!("From: ann@example.com\r\n{headers}Subject: s\r\n\r\nbody\r\n")
+                    .into_bytes(),
+            )
+            .unwrap()
+        };
+        let listed = message(
+            "List-Id: Rust for Linux <rust-for-linux.vger.kernel.org>\r\n\
+             List-Post: <mailto:rust-for-linux@vger.kernel.org>\r\n\
+             List-Unsubscribe: <mailto:rust-for-linux+unsubscribe@vger.kernel.org?subject=leave%20now>,\r\n \
+             <https://lists.example.org/u/abc>\r\n\
+             List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n",
+        );
+        assert_eq!(listed.list.as_deref(), Some("Rust for Linux"));
+        assert_eq!(
+            listed.list_post.as_deref(),
+            Some("rust-for-linux@vger.kernel.org")
+        );
+        assert_eq!(listed.list_unsubscribe.len(), 2);
+        assert_eq!(
+            listed.unsubscribe(),
+            Some(Unsubscribe::OneClick(
+                "https://lists.example.org/u/abc".into()
+            )),
+            "one click, where it says it takes one"
+        );
+        let by_mail = message(
+            "List-Unsubscribe: <https://lists.example.org/u/abc>, \
+             <mailto:leave@lists.example.org?subject=leave%20now>\r\n",
+        );
+        assert_eq!(
+            by_mail.unsubscribe(),
+            Some(Unsubscribe::Mail(crate::compose::Mailto {
+                to: "leave@lists.example.org".into(),
+                subject: Some("leave now".into()),
+                body: None,
+            })),
+            "by mail before a page, which wants confirming"
+        );
+        let at_a_page =
+            message("List-Unsubscribe: <https://lists.example.org/u/abc>\r\nList-Post: NO\r\n");
+        assert_eq!(
+            at_a_page.unsubscribe(),
+            Some(Unsubscribe::Page("https://lists.example.org/u/abc".into()))
+        );
+        assert_eq!(at_a_page.list_post, None, "a list that takes no posts");
+        assert_eq!(message("").unsubscribe(), None);
+        assert_eq!(message("").list, None);
+    }
+
+    #[test]
+    fn every_header_shows_as_written_and_unfolded_and_the_source_as_it_came() {
+        let bytes = b"Received: from a.example\r\n\tby b.example; Mon, 2 Nov 2026\r\n\
+                      Subject: =?utf-8?q?caf=C3=A9?=\r\nX-Spam: no\r\n\r\nbody\r\n";
+        let message = Message::parse(bytes.to_vec()).unwrap();
+        assert_eq!(
+            message.headers(),
+            [
+                (
+                    "Received".to_owned(),
+                    "from a.example by b.example; Mon, 2 Nov 2026".to_owned()
+                ),
+                ("Subject".to_owned(), "=?utf-8?q?caf=C3=A9?=".to_owned()),
+                ("X-Spam".to_owned(), "no".to_owned()),
+            ]
+        );
+        assert_eq!(message.subject, "café", "as read");
+        assert_eq!(message.source().as_bytes(), bytes);
     }
 }
