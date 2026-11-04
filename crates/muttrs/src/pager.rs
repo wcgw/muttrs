@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr as _;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::assessment::{self, Window};
 use crate::config::Prefer;
@@ -23,6 +23,8 @@ use crate::theme::Theme;
 pub(crate) enum Body {
     Html,
     Plain,
+    /// The whole Message as it came, its headers and its body as written.
+    Source,
 }
 
 /// Where an image of the HTML body stands.
@@ -91,7 +93,12 @@ pub(crate) struct Pager {
     message: Arc<Message>,
     html: Option<Document>,
     plain: Option<Document>,
+    /// The body shown, HTML or plain text.
     showing: Body,
+    /// Whether every header shows, as written, rather than those people read.
+    all_headers: bool,
+    /// Whether the Message's source shows, in place of its headers and body.
+    source: bool,
     /// The states of the HTML body's images, by index.
     images: Vec<Image>,
     remote_allowed: bool,
@@ -150,6 +157,8 @@ impl Pager {
             html,
             plain,
             showing,
+            all_headers: false,
+            source: false,
             images,
             remote_allowed,
             laid: None,
@@ -193,14 +202,40 @@ impl Pager {
         &self.message
     }
 
+    /// What shows: a body, or the source.
     pub(crate) fn showing(&self) -> Body {
-        self.showing
+        if self.source {
+            Body::Source
+        } else {
+            self.showing
+        }
+    }
+
+    /// Shows every header, as written, or only those people read.
+    pub(crate) fn toggle_headers(&mut self) {
+        self.all_headers = !self.all_headers;
+        self.relayout();
+        self.scroll = 0;
+    }
+
+    /// Shows the Message's source in place of its headers and body, or them again.
+    pub(crate) fn toggle_source(&mut self) {
+        self.source = !self.source;
+        // The source isn't prose for voight to assess.
+        self.prose = if self.source {
+            None
+        } else {
+            self.prose_shown()
+        };
+        self.heat = None;
+        self.relayout();
+        self.scroll = 0;
     }
 
     fn document(&self) -> Option<&Document> {
         match self.showing {
             Body::Html => self.html.as_ref(),
-            Body::Plain => self.plain.as_ref(),
+            Body::Plain | Body::Source => self.plain.as_ref(),
         }
     }
 
@@ -242,6 +277,11 @@ impl Pager {
 
     /// Shows the other body, if there's another.
     pub(crate) fn toggle_body(&mut self) -> bool {
+        // From the source, back to the body it was.
+        if self.source {
+            self.toggle_source();
+            return true;
+        }
         let other = match self.showing {
             Body::Html if self.plain.is_some() => Body::Plain,
             Body::Plain if self.html.is_some() => Body::Html,
@@ -306,6 +346,17 @@ impl Pager {
     /// Lays the Pager out `width` cells wide, unless it is already.
     fn lay_out(&mut self, width: u16, cx: &Cx<'_>) {
         if self.laid.as_ref().is_some_and(|laid| laid.width == width) {
+            return;
+        }
+        if self.source {
+            self.laid = Some(Laid {
+                width,
+                lines: source_lines(&self.message.source(), width),
+                slots: Vec::new(),
+            });
+            if let Some(search) = self.search.take() {
+                self.search_for(search.query);
+            }
             return;
         }
         let mut lines = self.headers(width, cx.theme, cx.icons);
@@ -377,6 +428,14 @@ impl Pager {
     fn headers(&self, width: u16, theme: &Theme, icons: &Icons) -> Vec<Line<'static>> {
         let message = &self.message;
         let mut lines = Vec::new();
+        if self.all_headers {
+            for (name, value) in message.headers() {
+                let label = Span::styled(format!("{name}: "), theme.dim);
+                lines.extend(wrap_header(&label, &value, Style::new(), width));
+            }
+            lines.push(Line::styled("─".repeat(usize::from(width)), theme.dim));
+            return lines;
+        }
         let label = |name: &str| Span::styled(format!("{name:<9}"), theme.dim);
         let addresses = |list: &[Address]| {
             list.iter()
@@ -694,6 +753,25 @@ fn wrap_header(label: &Span<'static>, value: &str, style: Style, width: u16) -> 
         .collect()
 }
 
+/// The lines of `source`, as written, each cut into `width` cells' worth where it's longer.
+fn source_lines(source: &str, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width).max(1);
+    let mut lines = Vec::new();
+    for line in source.lines() {
+        let mut piece = String::new();
+        for character in line.chars() {
+            let cells = character.width().unwrap_or(0);
+            if piece.width() + cells > width {
+                lines.push(Line::raw(std::mem::take(&mut piece)));
+            }
+            // Tabs as a space: their width depends on where they fall.
+            piece.push(if character == '\t' { ' ' } else { character });
+        }
+        lines.push(Line::raw(piece));
+    }
+    lines
+}
+
 /// A size in bytes, as people read it.
 pub(crate) fn size(bytes: usize) -> String {
     // Sizes of mail are far below where f64 loses precision.
@@ -784,6 +862,20 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_source_shows_line_by_line_cut_to_the_width() {
+        let lines: Vec<String> = source_lines("ab\r\ncdefg\r\n\r\n\tz", 3)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(lines, ["ab", "cde", "fg", "", " z"]);
     }
 
     #[test]

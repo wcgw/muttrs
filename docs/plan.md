@@ -163,7 +163,7 @@ Not there yet, roughly in the order a mutt user would reach for them:
       where they went, found there by their `Message-ID`
 - [x] Mailing lists: replying to the list (`L`, to `List-Post`), and unsubscribing (`:unsubscribe`, by
       `List-Unsubscribe`: one click, RFC 8058, else by mail, else at the list's page)
-- [ ] The Pager's full headers, and the Message's source (mutt's `h`)
+- [x] The Pager's full headers (`h`, as mutt's), and the Message's source (`:source`)
 - [ ] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`)
 - [ ] Limiting the Index to what a Filter picks (mutt's `l`), without asking the server as `S` does
 - [ ] Piping a Message to a command (`|`), as patches to `git am` or `b4`; a shell (`!`)

@@ -1818,6 +1818,7 @@ impl App {
             KeyCode::Char(':') => {
                 self.prompt = Some(Prompt::new(PromptKind::Command, String::new()));
             }
+            KeyCode::Char('h') => pager.toggle_headers(),
             KeyCode::Char('T') => {
                 if !pager.toggle_body() {
                     self.say("This Message has one body only", false);
@@ -2057,6 +2058,10 @@ impl App {
             "refresh!" | "sync!" => self.resync(),
             "login" => self.login(argument),
             "unsubscribe" => self.unsubscribe(),
+            "source" => match &mut self.pager {
+                Some(pager) => pager.toggle_source(),
+                None => self.say(":source is for the Message the Pager shows", true),
+            },
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
             "unselect" => self.select_by(false, argument),
@@ -2293,6 +2298,8 @@ impl App {
                         ("g G", "top, bottom"),
                         ("/ n N", "search, next match, previous"),
                         ("T", "HTML or plain text"),
+                        ("h", "every header, as written, or those read"),
+                        (":source", "the Message as it came, or as read"),
                         ("I", "load Remote Content"),
                         ("H", "voight's Heatmap of the prose"),
                     ],
@@ -2705,6 +2712,7 @@ impl App {
             right.push(match pager.showing() {
                 pager::Body::Html => "HTML".to_owned(),
                 pager::Body::Plain => "Plain".to_owned(),
+                pager::Body::Source => "Source".to_owned(),
             });
             right.push(pager.position());
         } else if let Some((query, at, of)) = self.index.as_ref().and_then(Index::search_status) {
@@ -2985,13 +2993,14 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
     "select ",
     "unselect ",
     "cd ",
     "refresh",
     "sync!",
     "unsubscribe",
+    "source",
     "help",
     "quit",
 ];
@@ -3047,7 +3056,10 @@ mod tests {
 
     #[test]
     fn commands_then_filters_complete() {
-        assert_eq!(command_completions("s", &[]), ["select ", "sync!"]);
+        assert_eq!(
+            command_completions("s", &[]),
+            ["select ", "sync!", "source"]
+        );
         assert_eq!(command_completions("", &[]).len(), COMMANDS.len());
         assert_eq!(
             command_completions("unselect is:u", &[]),

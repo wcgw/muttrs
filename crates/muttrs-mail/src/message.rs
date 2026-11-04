@@ -244,6 +244,34 @@ impl Message {
             .or_else(|| page.map(|url| Unsubscribe::Page(url.clone())))
     }
 
+    /// Its headers, every one, in order, as written: each's name, and its value unfolded onto one line (encoded
+    /// words left as they are).
+    #[must_use]
+    pub fn headers(&self) -> Vec<(String, String)> {
+        self.parsed
+            .root()
+            .headers()
+            .iter()
+            .map(|header| {
+                let value = String::from_utf8_lossy(header.raw_value());
+                let unfolded = value
+                    .split(['\r', '\n'])
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (header.raw_name().to_owned(), unfolded)
+            })
+            .collect()
+    }
+
+    /// The whole of it, as it came: its headers and its body, as RFC 5322 writes them (what isn't UTF-8 shown as
+    /// best it can be).
+    #[must_use]
+    pub fn source(&self) -> String {
+        String::from_utf8_lossy(self.parsed.raw()).into_owned()
+    }
+
     /// Its HTML body, if it has one.
     #[must_use]
     pub fn html(&self) -> Option<String> {
@@ -559,5 +587,25 @@ JVBERi0=\r
         assert_eq!(at_a_page.list_post, None, "a list that takes no posts");
         assert_eq!(message("").unsubscribe(), None);
         assert_eq!(message("").list, None);
+    }
+
+    #[test]
+    fn every_header_shows_as_written_and_unfolded_and_the_source_as_it_came() {
+        let bytes = b"Received: from a.example\r\n\tby b.example; Mon, 2 Nov 2026\r\n\
+                      Subject: =?utf-8?q?caf=C3=A9?=\r\nX-Spam: no\r\n\r\nbody\r\n";
+        let message = Message::parse(bytes.to_vec()).unwrap();
+        assert_eq!(
+            message.headers(),
+            [
+                (
+                    "Received".to_owned(),
+                    "from a.example by b.example; Mon, 2 Nov 2026".to_owned()
+                ),
+                ("Subject".to_owned(), "=?utf-8?q?caf=C3=A9?=".to_owned()),
+                ("X-Spam".to_owned(), "no".to_owned()),
+            ]
+        );
+        assert_eq!(message.subject, "café", "as read");
+        assert_eq!(message.source().as_bytes(), bytes);
     }
 }
