@@ -163,7 +163,8 @@ without one). A filter is written as Gmail's search is: `from:`, `to:` and `cc:`
 repeated picks either, as in `from:ann from:bob`; different ones, both, as in `from:ann is:unread`. On the command
 line, `Tab` and `Shift-Tab` complete the command, then the filter's qualifier, then its value: the addresses of the
 Messages listed (by the address, or a word of the name), their Labels (in double quotes, with spaces), or `is:`'s
-values that would pick some of them.
+values that would pick some of them. `:limit` lists only the Messages a filter picks, in threads among themselves,
+until `:limit` alone lists them all again; `:select` then picks among those.
 
 After `:`, `/` or `S`, `Up` and `Down` go back through what was typed there before that starts with what's typed, as
 in vim; `Ctrl-p` and `Ctrl-n` through all of it. Commands have a History of their own, searches (`/` and `S`) share

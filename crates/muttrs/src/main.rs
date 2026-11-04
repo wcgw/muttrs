@@ -193,5 +193,5 @@ async fn view(path: &str) -> anyhow::Result<()> {
     }
     let message = Message::parse(bytes).with_context(|| format!("reading {path}"))?;
     setup.assessor = voight(&setup.config).await?;
-    ui::view(setup, message).await
+    Box::pin(ui::view(setup, message)).await
 }

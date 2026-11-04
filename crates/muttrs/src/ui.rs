@@ -2098,9 +2098,34 @@ impl App {
             },
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
+            "limit" => self.limit_to(argument),
             "unselect" => self.select_by(false, argument),
             _ => self.say(&format!("Not a command: {command}"), true),
         }
+    }
+
+    /// Limits the Index to the Messages `filter` picks; to none, all show again, if it's empty.
+    fn limit_to(&mut self, filter: &str) {
+        let parsed = if filter.is_empty() {
+            None
+        } else {
+            match filter.parse::<Filter>() {
+                Ok(parsed) => Some((filter.to_owned(), parsed)),
+                Err(error) => {
+                    self.say(&error.to_string(), true);
+                    return;
+                }
+            }
+        };
+        let Some(index) = &mut self.index else { return };
+        let shown = index.limit(parsed);
+        let text = match (filter, shown) {
+            ("", _) => "All show again".to_owned(),
+            (_, 0) => format!("None listed matches {filter}"),
+            (_, 1) => format!("1 Message matches {filter}"),
+            (_, shown) => format!("{shown} Messages match {filter}"),
+        };
+        self.say(&text, false);
     }
 
     /// Selects, or unselects, the Messages the Index lists that `filter` picks: all of them, without one.
@@ -2386,6 +2411,7 @@ impl App {
                         "select what filter F picks: from:ann is:unread label:work …",
                     ),
                     (":unselect F", "unselect what F picks; without F, all"),
+                    (":limit F", "list only what F picks; without F, all"),
                 ],
             ),
             (
@@ -2727,7 +2753,10 @@ impl App {
                 0 => String::new(),
                 count => format!(" · {count} selected"),
             };
-            format!(" · {messages}, {unread} Unread{listed}{selected}")
+            let limited = index
+                .limited()
+                .map_or_else(String::new, |filter| format!(" · limited to {filter}"));
+            format!(" · {messages}, {unread} Unread{listed}{limited}{selected}")
         } else {
             String::new()
         };
@@ -3048,9 +3077,10 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 10] = [
     "select ",
     "unselect ",
+    "limit ",
     "cd ",
     "refresh",
     "sync!",
@@ -3069,10 +3099,12 @@ fn command_completions(text: &str, listed: &[muttrs_mail::Envelope]) -> Vec<Stri
             .filter(|command| command.starts_with(text))
             .map(|command| (*command).to_owned())
             .collect(),
-        Some((name @ ("select" | "unselect"), filter)) => filter::completions(filter, listed)
-            .into_iter()
-            .map(|filter| format!("{name} {filter}"))
-            .collect(),
+        Some((name @ ("select" | "unselect" | "limit"), filter)) => {
+            filter::completions(filter, listed)
+                .into_iter()
+                .map(|filter| format!("{name} {filter}"))
+                .collect()
+        }
         Some(_) => Vec::new(),
     }
 }

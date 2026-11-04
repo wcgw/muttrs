@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::filter::Filter;
 use crate::icons::Icons;
 use crate::theme::Theme;
 use crate::ui::truncate;
@@ -78,6 +79,8 @@ pub(crate) struct Index {
     more: More,
     /// What a search on the server found, if that's what this lists: its query, and how many it found.
     pub(crate) found: Option<(String, usize)>,
+    /// The Filter the rows are limited to, as written and read: only the Messages it picks show.
+    limit: Option<(String, Filter)>,
     cursor: usize,
     top: usize,
     height: usize,
@@ -115,6 +118,7 @@ impl Index {
             loaded: false,
             more: More::Idle,
             found: None,
+            limit: None,
             cursor: 0,
             top: 0,
             height: 0,
@@ -165,10 +169,14 @@ impl Index {
     /// Lays the rows out again, the cursor on Message `at` if it still shows.
     fn arrange(&mut self, at: Option<u32>) {
         let row = self.cursor;
+        let shown: Vec<usize> = (0..self.envelopes.len())
+            .filter(|&envelope| self.within_limit(&self.envelopes[envelope]))
+            .collect();
         self.rows = if self.threaded {
-            self.threads()
+            self.threads(&shown)
         } else {
-            (0..self.envelopes.len())
+            shown
+                .into_iter()
                 .map(|envelope| Row {
                     envelope,
                     tree: String::new(),
@@ -189,14 +197,24 @@ impl Index {
         }
     }
 
-    fn threads(&self) -> Vec<Row> {
-        let threaded = thread::threads(&self.envelopes);
+    /// The rows of the Envelopes `shown`, by their place, in threads among themselves.
+    fn threads(&self, shown: &[usize]) -> Vec<Row> {
+        let listed: Vec<Envelope>;
+        let (envelopes, shown): (&[Envelope], Option<&[usize]>) =
+            if shown.len() == self.envelopes.len() {
+                (&self.envelopes, None)
+            } else {
+                listed = shown.iter().map(|&at| self.envelopes[at].clone()).collect();
+                (&listed, Some(shown))
+            };
+        let place = |envelope: usize| shown.map_or(envelope, |shown| shown[envelope]);
+        let threaded = thread::threads(envelopes);
         let mut rows: Vec<Row> = Vec::with_capacity(threaded.len());
         let mut head = 0;
         // The subjects of the row's ancestors, by depth: its parent's last.
         let mut ancestors: Vec<&str> = Vec::new();
         for (at, message) in threaded.iter().enumerate() {
-            let envelope = &self.envelopes[message.envelope];
+            let envelope = &envelopes[message.envelope];
             ancestors.truncate(message.depth);
             let subject = base_subject(&envelope.subject);
             let repeated = self.hide_subjects
@@ -212,16 +230,16 @@ impl Index {
                 let folded_unread = folded
                     && replies
                         .iter()
-                        .any(|reply| !self.envelopes[reply.envelope].flags.seen);
+                        .any(|reply| !envelopes[reply.envelope].flags.seen);
                 rows.push(Row {
-                    envelope: message.envelope,
+                    envelope: place(message.envelope),
                     tree: String::new(),
                     head,
                     folded: if folded { message.replies } else { 0 },
                     folded_uids: if folded {
                         replies
                             .iter()
-                            .map(|reply| self.envelopes[reply.envelope].uid)
+                            .map(|reply| envelopes[reply.envelope].uid)
                             .collect()
                     } else {
                         Vec::new()
@@ -241,7 +259,7 @@ impl Index {
                     })
                     .collect();
                 rows.push(Row {
-                    envelope: message.envelope,
+                    envelope: place(message.envelope),
                     tree,
                     head,
                     folded: 0,
@@ -321,7 +339,12 @@ impl Index {
         picks: impl Fn(&Envelope) -> bool,
     ) -> (usize, usize) {
         let (mut picked, mut changed) = (0, 0);
-        for envelope in self.envelopes.iter().filter(|envelope| picks(envelope)) {
+        let shown: Vec<&Envelope> = self
+            .envelopes
+            .iter()
+            .filter(|envelope| self.within_limit(envelope) && picks(envelope))
+            .collect();
+        for envelope in shown {
             picked += 1;
             let did = if on {
                 self.selected.insert(envelope.uid)
@@ -331,6 +354,29 @@ impl Index {
             changed += usize::from(did);
         }
         (picked, changed)
+    }
+
+    /// Limits the rows to the Messages `limit` picks, as written and read; or not, if it's None. How many show.
+    pub(crate) fn limit(&mut self, limit: Option<(String, Filter)>) -> usize {
+        let at = self.current().map(|envelope| envelope.uid);
+        self.limit = limit;
+        self.arrange(at);
+        self.envelopes
+            .iter()
+            .filter(|envelope| self.within_limit(envelope))
+            .count()
+    }
+
+    /// The Filter the rows are limited to, as written, if they are.
+    pub(crate) fn limited(&self) -> Option<&str> {
+        self.limit.as_ref().map(|(written, _)| written.as_str())
+    }
+
+    /// Whether `envelope` shows, within the limit, if there's one.
+    fn within_limit(&self, envelope: &Envelope) -> bool {
+        self.limit
+            .as_ref()
+            .is_none_or(|(_, filter)| filter.matches(envelope))
     }
 
     /// The Envelopes listed, in no particular order.
@@ -1064,6 +1110,43 @@ mod tests {
             "not selected now"
         );
         assert_eq!(index.select_where(true, |_| false), (0, 0));
+    }
+
+    #[test]
+    fn limited_only_what_the_filter_picks_shows_in_threads_of_its_own() {
+        let mut index = index(true);
+        index.set(
+            vec![
+                envelope(1, 1, "Lunch", "Ann"),
+                reply(2, 2, &[1]),
+                reply(3, 3, &[2]),
+                envelope(4, 4, "Report", "Ann"),
+            ],
+            4,
+        );
+        let rows = |index: &Index| -> Vec<(u32, String)> {
+            index
+                .rows
+                .iter()
+                .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
+                .collect()
+        };
+        let shown = index.limit(Some(("from:bob".into(), "from:bob".parse().unwrap())));
+        assert_eq!(shown, 2);
+        assert_eq!(
+            rows(&index),
+            [(2, String::new()), (3, "└─".to_owned())],
+            "Bob's replies, a thread among themselves"
+        );
+        assert_eq!(index.limited(), Some("from:bob"));
+        assert_eq!(
+            index.select_where(true, |_| true),
+            (2, 2),
+            "only what shows"
+        );
+        assert_eq!(index.limit(None), 4);
+        assert_eq!(rows(&index).len(), 4);
+        assert_eq!(index.limited(), None);
     }
 
     #[test]

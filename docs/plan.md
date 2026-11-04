@@ -166,7 +166,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
 - [x] The Pager's full headers (`h`, as mutt's), and the Message's source (`:source`)
 - [x] Key bindings and macros of one's own, in the configuration (mutt's `bind` and `macro`), as vim's `noremap`:
       `[keys.index]` and the like map a key to the keys it types
-- [ ] Limiting the Index to what a Filter picks (mutt's `l`), without asking the server as `S` does
+- [x] Limiting the Index to what a Filter picks (`:limit`, as mutt's `l`, which is muttrs' open), without asking
+      the server as `S` does
 - [ ] Piping a Message to a command (`|`), as patches to `git am` or `b4`; a shell (`!`)
 - [ ] Sorting by sender, subject or size, besides threads and newest first
 - [ ] Searching every Mailbox of an Account, not only the open one
