@@ -197,6 +197,8 @@ pub(crate) struct App {
     pager: Option<Pager>,
     /// The Message the Pager shows, or is waiting for.
     opened: Option<Opened>,
+    /// The Message the Pager shows: the one opened, once it's come. Until then, it shows the one before.
+    shown: Option<Opened>,
     /// The Pager, by its ID, whose Message is marked read once it's shown for `pager_read_delay`.
     reading: Option<u64>,
     overlay: Option<Overlay>,
@@ -284,6 +286,7 @@ impl App {
             searched: None,
             pager: None,
             opened: None,
+            shown: None,
             reading: None,
             overlay: None,
             prompt: None,
@@ -431,6 +434,7 @@ impl App {
         );
         let request = pager.remote_to_fetch();
         self.pager = Some(pager);
+        self.shown.clone_from(&self.opened);
         self.read_later(id);
         self.fulfil(request);
     }
@@ -653,6 +657,11 @@ impl App {
                         Ok(message) => {
                             let message = Arc::new(message);
                             match self.write_when_fetched.take() {
+                                // Asked from the Pager while it showed the Message before: it shows this one.
+                                Some(writing) if self.pager.is_some() => {
+                                    self.open(Arc::clone(&message));
+                                    self.write_about(writing, account, &message, uid);
+                                }
                                 Some(writing) => {
                                     self.opened = None;
                                     self.write_about(writing, account, &message, uid);
@@ -664,6 +673,10 @@ impl App {
                     },
                     Err(why) => {
                         self.write_when_fetched = None;
+                        // The Message before isn't shown in its place.
+                        if self.pager.is_some() {
+                            self.close_pager();
+                        }
                         self.say(&format!("Couldn't fetch the Message: {why}"), true);
                     }
                 }
@@ -691,8 +704,14 @@ impl App {
             return;
         }
         if let (Some(pager), Some(opened)) = (&self.pager, &self.opened) {
-            let (message, account, uid) = (Arc::clone(pager.message()), opened.account, opened.uid);
-            self.write_about(writing, account, &message, uid);
+            if self.shown.as_ref() == Some(opened) {
+                let (message, account, uid) =
+                    (Arc::clone(pager.message()), opened.account, opened.uid);
+                self.write_about(writing, account, &message, uid);
+            } else {
+                // The Pager still shows the Message before: about the one coming, once it's come.
+                self.write_when_fetched = Some(writing);
+            }
             return;
         }
         // From the Index: once the Message is fetched.
@@ -1114,23 +1133,18 @@ impl App {
             };
             self.remember_undo(account, &mailbox, &uids, went);
         }
+        // The next Message to read asked first, so that it doesn't wait for them to go.
+        self.taken_out(&uids);
         let Some(state) = self.accounts.get_mut(account) else {
             return;
         };
         // The worker knows where to: the Mailbox with the Role, by the server or the configuration. Without one it
         // says so, and lists the Mailbox again, which brings the Messages back.
         state.ask(if archive {
-            client::Request::Archive {
-                mailbox,
-                uids: uids.clone(),
-            }
+            client::Request::Archive { mailbox, uids }
         } else {
-            client::Request::Delete {
-                mailbox,
-                uids: uids.clone(),
-            }
+            client::Request::Delete { mailbox, uids }
         });
-        self.taken_out(&uids);
     }
 
     /// Keeps, for `u` to undo, that `account`'s Messages `uids` of `mailbox` `went` elsewhere: those with a
@@ -1177,8 +1191,13 @@ impl App {
             index.remove(uids);
         }
         if self.pager.is_some() {
-            self.close_pager();
-            self.open_current();
+            // Straight to the next one, as `J` goes: the Pager shows what it showed until it comes, rather than the
+            // Index meanwhile. After the last, the Index.
+            if self.index.as_ref().and_then(Index::current).is_some() {
+                self.open_current();
+            } else {
+                self.close_pager();
+            }
         }
     }
 
@@ -1332,14 +1351,15 @@ impl App {
             &uids,
             client::Went::Mailbox(target.name.clone()),
         );
+        // The next Message to read asked first, so that it doesn't wait for them to go.
+        self.taken_out(&uids);
         if let Some(state) = self.accounts.get_mut(account) {
             state.ask(client::Request::Move {
                 mailbox,
-                uids: uids.clone(),
+                uids,
                 to: target.name,
             });
         }
-        self.taken_out(&uids);
     }
 
     fn on_terminal(&mut self, event: &TerminalEvent) {
@@ -1746,6 +1766,7 @@ impl App {
     fn close_pager(&mut self) {
         self.pager = None;
         self.opened = None;
+        self.shown = None;
         self.reading = None;
         self.pictures.keep(None, |_| false);
         // Standing alone, as `muttrs view` opens it, the Pager is all there is.
