@@ -59,6 +59,11 @@ pub enum Request {
         /// What to search for: Gmail's own syntax on Gmail, text anywhere in a Message elsewhere.
         query: String,
     },
+    /// Search every Mailbox on the server, for how many Messages each has that it finds.
+    SearchAll {
+        /// What to search for: Gmail's own syntax on Gmail, text anywhere in a Message elsewhere.
+        query: String,
+    },
     /// The whole of a Message.
     Body {
         /// The Mailbox it's in, by its name on the server.
@@ -183,6 +188,7 @@ impl Request {
             | Self::Open(_)
             | Self::More(_)
             | Self::Search { .. }
+            | Self::SearchAll { .. }
             | Self::Body { .. }
             | Self::MoveBack { .. }
             | Self::Append { .. }
@@ -273,6 +279,14 @@ pub enum Update {
         envelopes: Vec<Envelope>,
         /// How many it found in all.
         count: usize,
+    },
+    /// What a search of every Mailbox found: the Mailboxes with Messages it found, by their names on the server, in
+    /// the order they're listed, and how many each has.
+    FoundIn {
+        /// What was searched for.
+        query: String,
+        /// The Mailboxes, and how many it found in each.
+        found: Vec<(String, usize)>,
     },
     /// Something asked for is done, as this says.
     Done(String),
@@ -767,6 +781,7 @@ impl Worker {
             }
             Request::More(mailbox) => self.more(session, &mailbox).await?,
             Request::Search { mailbox, query } => self.search(session, mailbox, query).await?,
+            Request::SearchAll { query } => self.search_all(session, query).await?,
             Request::Body { mailbox, uid } => self.body(session, &mailbox, uid).await?,
             Request::Flag {
                 mailbox,
@@ -1449,6 +1464,41 @@ impl Worker {
         }
         self.refresh_window(session, mailbox).await?;
         self.count(session, target).await
+    }
+
+    /// Searches every Mailbox that can be opened for `query`, and tells how many Messages each has that it finds.
+    async fn search_all(
+        &mut self,
+        session: &mut Session,
+        query: String,
+    ) -> Result<(), imap::Error> {
+        let names: Vec<String> = self
+            .mailboxes
+            .iter()
+            .filter(|mailbox| mailbox.selectable)
+            .map(|mailbox| mailbox.name.clone())
+            .collect();
+        let mut found = Vec::new();
+        for name in names {
+            // Examined, only to read: what's searched stays as it is.
+            let searched = async {
+                session.examine(&name).await?;
+                session.search(&query, self.gmail).await
+            }
+            .await;
+            match searched {
+                Ok(uids) if !uids.is_empty() => found.push((name, uids.len())),
+                Ok(_) => {}
+                Err(error) if !error.is_fatal() => {
+                    tracing::info!(mailbox = name, %error, "a Mailbox couldn't be searched");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Examined, none is selected: the next to read or change is selected again.
+        self.selected = None;
+        (self.notify)(Update::FoundIn { query, found });
+        Ok(())
     }
 
     /// The Mailbox named `name` on the server, by its name for people.

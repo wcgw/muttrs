@@ -208,7 +208,9 @@ never evidence of authorship.
 
 `/` searches what the Index lists, by sender and subject, as you'd search in vim. `S` searches the whole Mailbox on
 the server, for text anywhere in its Messages, and lists the newest 300 it finds as an Index of their own until
-`Esc`. On Gmail, `S` takes Gmail's own syntax: `from:ann has:attachment after:2026/10/01`.
+`Esc`. On Gmail, `S` takes Gmail's own syntax: `from:ann has:attachment after:2026/10/01`. `:search QUERY` searches
+every Mailbox of the Account, and lists those it found Messages in, how many in each; choosing one lists what it
+found there, as `S` does.
 
 ## Writing
 

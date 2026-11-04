@@ -173,7 +173,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
       a shell (`!`)
 - [x] Sorting by sender, subject or size, besides threads and newest first: `o`, or `O` the other way, then a
       letter, as mutt's
-- [ ] Searching every Mailbox of an Account, not only the open one
+- [x] Searching every Mailbox of an Account, not only the open one (`:search`): where it found Messages, how many
+      in each; one chosen, what's found there
 - [ ] Contacts beyond the addresses seen: a command to query (abook, khard, as mutt's `query_command`), CardDAV
 - [ ] Marking as Junk; creating, renaming and deleting Mailboxes; bouncing (mutt's `b`); forwarding as an
       Attachment

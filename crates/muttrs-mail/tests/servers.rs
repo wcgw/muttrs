@@ -1204,6 +1204,77 @@ async fn moving_back_undoes_deleting_and_moving() {
     assert_eq!(session.counts("INBOX").await.unwrap().messages, 4);
 }
 
+#[tokio::test]
+#[ignore = "needs scripts/test-servers.sh"]
+async fn searching_every_mailbox_says_where_it_found_messages() {
+    let username = user("everywhere");
+    let mut session = Session::connect(
+        &endpoint(31143, Tls::Starttls),
+        tls::client_config(&roots()).unwrap(),
+        &password(&username, "secret"),
+    )
+    .await
+    .unwrap();
+    session.create("Work").await.unwrap();
+    session.create("Trash").await.unwrap();
+    for (mailbox, subject) in [
+        ("INBOX", "budget"),
+        ("INBOX", "lunch"),
+        ("Work", "budget"),
+        ("Work", "budget-2027"),
+    ] {
+        session
+            .append(mailbox, "()", &message(subject))
+            .await
+            .unwrap();
+    }
+    let config: AccountConfig = toml::from_str(&format!(
+        "name = \"test\"\nemail = \"{username}\"\npassword_command = \"echo secret\"\nca_file = {:?}\n\
+         imap = {{ host = \"localhost\", port = 31143, tls = \"starttls\" }}\n\
+         smtp = {{ host = \"localhost\", port = 3465 }}\n[mailboxes]\ntrash = \"Trash\"",
+        ca().display().to_string()
+    ))
+    .unwrap();
+    let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+    let sender = Arc::new(Mutex::new(sender));
+    let client = Client::spawn(
+        config.resolve().unwrap(),
+        Cache::new(None),
+        Arc::new(move |update| {
+            let _ = sender.lock().unwrap().send(update);
+        }),
+    )
+    .unwrap();
+    until(&mut updates, |update| {
+        matches!(update, Update::Mailboxes(_)).then_some(())
+    })
+    .await;
+    client.send(Request::Open("INBOX".into()));
+    let listed = until(&mut updates, |update| match update {
+        Update::Envelopes { envelopes, .. } if envelopes.len() == 2 => Some(envelopes.clone()),
+        _ => None,
+    })
+    .await;
+    client.send(Request::SearchAll {
+        query: "budget".into(),
+    });
+    let mut found = until(&mut updates, |update| match update {
+        Update::FoundIn { found, .. } => Some(found.clone()),
+        _ => None,
+    })
+    .await;
+    found.sort();
+    assert_eq!(found, [("INBOX".to_owned(), 1), ("Work".to_owned(), 2)]);
+
+    // Searched only to read: the Inbox's Messages change as before.
+    let lunch = listed.iter().find(|e| e.subject == "lunch").unwrap().uid;
+    client.send(Request::Delete {
+        mailbox: "INBOX".into(),
+        uids: vec![lunch],
+    });
+    assert_eq!(done(&mut updates).await, "Moved a Message to Trash");
+}
+
 /// Waits for what the client says it did, failing if it says it couldn't.
 async fn done(updates: &mut tokio::sync::mpsc::UnboundedReceiver<Update>) -> String {
     until(updates, |update| match update {

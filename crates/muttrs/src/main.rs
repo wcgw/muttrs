@@ -180,7 +180,7 @@ async fn mail() -> anyhow::Result<()> {
         .map(muttrs_mail::AccountConfig::resolve)
         .collect::<Result<Vec<_>, _>>()?;
     setup.assessor = voight(&setup.config).await?;
-    ui::mail(setup, accounts).await
+    Box::pin(ui::mail(setup, accounts)).await
 }
 
 async fn view(path: &str) -> anyhow::Result<()> {

@@ -272,6 +272,9 @@ pub(crate) struct App {
     undoing: Vec<(usize, Task, Undo)>,
     /// The command to run with the terminal, which the loop does between draws.
     shell: Option<Shell>,
+    /// What a search of every Mailbox found, while its list shows: the Account, the query, and the Mailboxes, by
+    /// their names on the server, as listed.
+    found_in: Option<(usize, String, Vec<String>)>,
     /// The Messages being fetched, to pipe to a command once they've all come.
     piping: Option<Piping>,
     /// When the UI started: the status line's spinner turns by it.
@@ -352,6 +355,7 @@ impl App {
             undo: Vec::new(),
             undoing: Vec::new(),
             shell: None,
+            found_in: None,
             piping: None,
             started: Instant::now(),
             quitting: false,
@@ -726,6 +730,7 @@ impl App {
                     }
                 }
             }
+            Update::FoundIn { query, found } => self.found_in(account, query, found),
             Update::Done(done) => self.say(&done, false),
             Update::Failed(failed) => self.say(&failed, true),
             Update::Started(task) => state.tasks.started(task, Instant::now()),
@@ -2305,6 +2310,7 @@ impl App {
             "cd" | "open" if !argument.is_empty() => self.change_mailbox(argument),
             "select" => self.select_by(true, argument),
             "limit" => self.limit_to(argument),
+            "search" if !argument.is_empty() => self.search_all(argument),
             "unselect" => self.select_by(false, argument),
             _ => self.say(&format!("Not a command: {command}"), true),
         }
@@ -2377,6 +2383,61 @@ impl App {
                 self.open_mailbox(account, &name);
             }
             None => self.say(&format!("No Mailbox called {wanted}"), true),
+        }
+    }
+
+    /// Lists the Mailboxes of `account` a search of them all for `query` `found` Messages in, how many in each, to
+    /// choose one to list what's found there.
+    fn found_in(&mut self, account: usize, query: String, mut found: Vec<(String, usize)>) {
+        // In the sidebar's order: Roles first, the Inbox first of them.
+        let order = sidebar::rows(&self.accounts);
+        found.sort_by_key(|(name, _)| {
+            order
+                .iter()
+                .position(|row| *row == Row::Mailbox(account, name.clone()))
+        });
+        let Some(state) = self.accounts.get(account) else {
+            return;
+        };
+        let rows: Vec<Line<'static>> = found
+            .iter()
+            .map(|(name, count)| {
+                let mailbox = state.mailbox(name);
+                let label = mailbox.map_or_else(
+                    || muttrs_mail::mailbox::decode(name),
+                    |mailbox| mailbox.path.join("/"),
+                );
+                Line::from(vec![
+                    Span::styled(
+                        sidebar::icon(&self.icons, mailbox.and_then(|mailbox| mailbox.role)),
+                        self.theme.dim,
+                    ),
+                    Span::raw(label),
+                    Span::styled(format!("  {count}"), self.theme.accent),
+                ])
+            })
+            .collect();
+        if rows.is_empty() {
+            self.say(&format!("Nothing found in any Mailbox for {query}"), false);
+            return;
+        }
+        let total: usize = found.iter().map(|(_, count)| count).sum();
+        let title = format!("{total} found: {query}");
+        self.found_in = Some((
+            account,
+            query,
+            found.into_iter().map(|(name, _)| name).collect(),
+        ));
+        self.overlay = Some(Overlay::new(overlay::Kind::Found, title, rows));
+    }
+
+    /// Searches every Mailbox of the Account shown on the server for `query`, to list where it found Messages.
+    fn search_all(&mut self, query: &str) {
+        let account = self.index.as_ref().map_or(0, |index| index.account);
+        if let Some(state) = self.accounts.get_mut(account) {
+            state.ask(client::Request::SearchAll {
+                query: query.to_owned(),
+            });
         }
     }
 
@@ -2602,6 +2663,10 @@ impl App {
                     ("Enter", "open"),
                     ("/ n N", "search senders and subjects"),
                     ("S", "search the server (Gmail's syntax on Gmail)"),
+                    (
+                        ":search Q",
+                        "search every Mailbox, for where Q finds Messages",
+                    ),
                     ("T", "threads, or newest first"),
                     (
                         "o O",
@@ -2679,6 +2744,22 @@ impl App {
             self.toggle_label(index);
             return;
         }
+        if kind == overlay::Kind::Found {
+            self.overlay = None;
+            if let Some((account, query, mailboxes)) = self.found_in.take()
+                && let Some(mailbox) = mailboxes.get(index)
+            {
+                self.close_pager();
+                self.open_mailbox(account, mailbox);
+                if let Some(state) = self.accounts.get_mut(account) {
+                    state.ask(client::Request::Search {
+                        mailbox: mailbox.clone(),
+                        query,
+                    });
+                }
+            }
+            return;
+        }
         let Some(pager) = &self.pager else { return };
         match kind {
             overlay::Kind::Links => {
@@ -2715,7 +2796,10 @@ impl App {
                 }
                 self.overlay = None;
             }
-            overlay::Kind::Mailboxes | overlay::Kind::Labels | overlay::Kind::Help => {}
+            overlay::Kind::Mailboxes
+            | overlay::Kind::Labels
+            | overlay::Kind::Found
+            | overlay::Kind::Help => {}
         }
     }
 
@@ -3337,13 +3421,14 @@ async fn run(mut app: App, mut received: mpsc::UnboundedReceiver<Event>) -> anyh
 }
 
 /// The commands `:` completes, in the order offered; those that take more with a space after.
-const COMMANDS: [&str; 10] = [
+const COMMANDS: [&str; 11] = [
     "select ",
     "unselect ",
     "limit ",
     "cd ",
     "refresh",
     "sync!",
+    "search ",
     "unsubscribe",
     "source",
     "help",
@@ -3405,7 +3490,7 @@ mod tests {
     fn commands_then_filters_complete() {
         assert_eq!(
             command_completions("s", &[]),
-            ["select ", "sync!", "source"]
+            ["select ", "sync!", "search ", "source"]
         );
         assert_eq!(command_completions("", &[]).len(), COMMANDS.len());
         assert_eq!(

@@ -80,7 +80,11 @@ impl Tasks {
         let effect = effect(&request, labels);
         let at_once = matches!(
             request,
-            Request::Refresh | Request::Resync(_) | Request::Search { .. } | Request::Send { .. }
+            Request::Refresh
+                | Request::Resync(_)
+                | Request::Search { .. }
+                | Request::SearchAll { .. }
+                | Request::Send { .. }
         );
         let task = client.send(request);
         self.queued.push(Queued {
@@ -227,6 +231,7 @@ fn effect(request: &Request, labels: &[Label]) -> Effect {
         | Request::Open(_)
         | Request::More(_)
         | Request::Search { .. }
+        | Request::SearchAll { .. }
         | Request::Body { .. }
         | Request::MoveBack { .. }
         | Request::Append { .. }
@@ -257,6 +262,7 @@ fn describe(request: &Request, mailboxes: &[Mailbox], labels: &[Label]) -> Strin
         Request::Open(mailbox) => format!("Opening {}", named(mailbox)),
         Request::More(mailbox) => format!("Listing more of {}", named(mailbox)),
         Request::Search { mailbox, query } => format!("Searching {} for {query}", named(mailbox)),
+        Request::SearchAll { query } => format!("Searching every Mailbox for {query}"),
         Request::Body { .. } => "Fetching the Message".to_owned(),
         Request::Flag { uids, flag, on, .. } => {
             let messages = count(uids.len());
