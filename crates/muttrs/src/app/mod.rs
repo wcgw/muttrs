@@ -1779,8 +1779,21 @@ impl wcgw_kit::App for Muttrs {
                 _ => None,
             };
             if index.cursor != under {
-                index.cursor = under;
-                self.dirty.insert(current);
+                let before = std::mem::replace(&mut index.cursor, under);
+                // The rows the cursor left and came to, alone, unless all of them are laid out again anyway.
+                if !self.dirty.contains(&current) {
+                    let look = index::Look::of(kit);
+                    let width = usize::from(self.width.max(20));
+                    let blocks: Vec<_> = [before, under]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|uid| index.block(uid, width, &look))
+                        .collect();
+                    let doc = kit.buffer_mut(current).doc_mut();
+                    for (key, content) in blocks {
+                        doc.replace(key, content);
+                    }
+                }
             }
             let near_end = kit.cursor_near_end();
             effects.extend(self.more_if_wanted(current, near_end));

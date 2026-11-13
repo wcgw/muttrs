@@ -524,26 +524,58 @@ impl Index {
                 .iter()
                 .position(|row| row.head != head)
                 .map_or(self.rows.len(), |len| at + len);
-            let thread = &self.rows[at..end];
-            let lines: Vec<Line> = thread
-                .iter()
-                .map(|row| self.line(row, None, width, look))
-                .collect();
-            let mut content = Content::from(lines);
-            if thread.len() > 1 {
-                let unread = thread
-                    .iter()
-                    .any(|row| !self.envelopes[row.envelope].flags.seen);
-                content.folds.push(Fold {
-                    lines: 0..thread.len(),
-                    summary: self.line(&thread[0], Some((thread.len(), unread)), width, look),
-                    closed: false,
-                });
-            }
-            blocks.push((BlockKey::new(block_key(head)), content));
+            blocks.push((
+                BlockKey::new(block_key(head)),
+                self.thread(&self.rows[at..end], width, look),
+            ));
             at = end;
         }
         blocks
+    }
+
+    /// The block of the thread Message `uid` is in, `width` cells wide, by its key: to lay it out again alone, as when
+    /// the cursor comes or goes.
+    pub(crate) fn block(
+        &self,
+        uid: u32,
+        width: usize,
+        look: &Look,
+    ) -> Option<(BlockKey, Content<Target>)> {
+        let head = self
+            .rows
+            .iter()
+            .find(|row| self.envelopes[row.envelope].uid == uid)?
+            .head;
+        let start = self.rows.iter().position(|row| row.head == head)?;
+        let len = self.rows[start..]
+            .iter()
+            .take_while(|row| row.head == head)
+            .count();
+        Some((
+            BlockKey::new(block_key(head)),
+            self.thread(&self.rows[start..start + len], width, look),
+        ))
+    }
+
+    /// The rows of a thread, `width` cells wide, with a fold over them whose summary is the head's row saying how many
+    /// it holds.
+    fn thread(&self, thread: &[Row], width: usize, look: &Look) -> Content<Target> {
+        let lines: Vec<Line> = thread
+            .iter()
+            .map(|row| self.line(row, None, width, look))
+            .collect();
+        let mut content = Content::from(lines);
+        if thread.len() > 1 {
+            let unread = thread
+                .iter()
+                .any(|row| !self.envelopes[row.envelope].flags.seen);
+            content.folds.push(Fold {
+                lines: 0..thread.len(),
+                summary: self.line(&thread[0], Some((thread.len(), unread)), width, look),
+                closed: false,
+            });
+        }
+        content
     }
 
     /// The text of the row the thread Message `uid` heads is folded into, `width` cells wide: what the kit shows of

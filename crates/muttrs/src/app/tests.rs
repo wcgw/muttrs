@@ -1012,3 +1012,69 @@ fn help_lists_muttrs_commands_and_keys() {
     mail.press("gg/delete the Messages<CR>");
     assert!(mail.harness.kit.cursor_row_text().contains("delete"));
 }
+
+#[test]
+fn the_mini_index_keeps_some_of_the_index_above_the_pager_on_the_message_read() {
+    let config = Config {
+        pager_index_lines: 4,
+        ..Config::default()
+    };
+    let mut mail = Mail::with(config, false, 100, 30);
+    mail.two();
+    mail.read(1, html_message("Lunch"));
+    assert_eq!(
+        mail.harness.kit.window_ids().len(),
+        3,
+        "the sidebar, the mini-index, the Pager"
+    );
+    let rows = mail.rows();
+    let lunch = rows
+        .iter()
+        .position(|row| row.contains("Ann") && row.contains("Lunch"));
+    let from = rows.iter().position(|row| row.contains("From     Ann"));
+    assert!(lunch < from, "the Index above the Pager: {rows:#?}");
+    mail.press("<C-n>");
+    mail.body(2, plain_message("Report", "The numbers."));
+    assert_eq!(mail.harness.kit.window_ids().len(), 3);
+    mail.press("q");
+    assert_eq!(
+        mail.harness.kit.window_ids().len(),
+        2,
+        "back to the sidebar and the Index"
+    );
+}
+
+#[test]
+fn the_cursor_s_row_is_drawn_across_the_index() {
+    let mut mail = Mail::new(100, 20);
+    mail.two();
+    mail.press("j");
+    let rows = mail.rows();
+    let y = rows.iter().position(|row| row.contains("Report")).unwrap();
+    let cursor = mail.harness.kit.style(crate::hl::CURSOR_LINE).bg;
+    assert!(cursor.is_some());
+    assert_eq!(
+        mail.harness.style_at(99, u16::try_from(y).unwrap()).bg,
+        cursor,
+        "to the edge"
+    );
+    let lunch = rows.iter().position(|row| row.contains("Lunch")).unwrap();
+    assert_ne!(
+        mail.harness.style_at(99, u16::try_from(lunch).unwrap()).bg,
+        cursor
+    );
+}
+
+#[test]
+fn an_account_in_the_sidebar_asks_what_s_new_and_cd_opens_a_mailbox() {
+    let mut mail = Mail::new(100, 20);
+    mail.requests();
+    mail.press("<C-w>hgg<CR>");
+    assert_eq!(mail.requests(), [Request::Refresh]);
+    mail.press(":cd work/reports<CR>");
+    assert_eq!(mail.requests(), [Request::Open("Work/Reports".to_owned())]);
+    let current = mail.harness.kit.current_buffer();
+    assert_eq!(mail.harness.kit.buffer(current).name(), "Reports");
+    mail.press(":e Archive<CR>");
+    assert_eq!(mail.requests(), [Request::Open("Archive".to_owned())]);
+}
