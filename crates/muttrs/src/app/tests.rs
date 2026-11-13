@@ -343,7 +343,7 @@ fn the_index_shows_its_columns_and_its_winbar_counts() {
         index.find(text).map(|at| index[..at].width())
     };
     for (row, who, subject) in [(lunch, "Ann", "Lunch"), (report, "Bob", "Report")] {
-        assert_eq!(column(row, "Nov 0"), column(lunch, "Nov 0"), "{row:?}");
+        assert_eq!(column(row, " Nov"), column(lunch, " Nov"), "{row:?}");
         assert_eq!(column(row, who), column(lunch, "Ann"), "{row:?}");
         assert_eq!(column(row, subject), column(lunch, "Lunch"), "{row:?}");
     }

@@ -586,7 +586,7 @@ impl Index {
         ];
         let flags_width: usize = spans.iter().map(|span| span.text.width()).sum();
         let date = envelope.date.map_or_else(String::new, |date| {
-            short_date(&date.to_zoned(TimeZone::system()), &look.now)
+            wcgw_kit::when::short(&date.to_zoned(TimeZone::system()), &look.now)
         });
         let who = if self.sent {
             envelope
@@ -600,12 +600,12 @@ impl Index {
                 .map_or_else(String::new, |from| from.short().to_owned())
         };
         let who_width = (width / 4).clamp(12, 28);
-        spans.push(Span::new(format!("{date:>6} "), hl::DIM));
+        spans.push(Span::new(format!("{date:>8} "), hl::DIM));
         let who = truncate(&who, who_width);
         let who_padding = who_width.saturating_sub(who.width());
         spans.push(Span::new(who, text));
         spans.push(Span::new(" ".repeat(who_padding + 2), Group::NORMAL));
-        let mut room = width.saturating_sub(flags_width + 7 + who_width + 2);
+        let mut room = width.saturating_sub(flags_width + 9 + who_width + 2);
         if row.repeated && folded.is_none() {
             // mutt's arrow, for the subject left out.
             let arrow = truncate(&format!("{}>", row.tree), room);
@@ -685,17 +685,6 @@ fn base_subject(subject: &str) -> &str {
             Some(after) => rest = after,
             None => return rest,
         }
-    }
-}
-
-/// A date as short as says it: the time today, the day this year, the month before.
-fn short_date(date: &Zoned, now: &Zoned) -> String {
-    if date.date() == now.date() {
-        date.strftime("%H:%M").to_string()
-    } else if date.year() == now.year() {
-        date.strftime("%b %d").to_string()
-    } else {
-        date.strftime("%Y-%m").to_string()
     }
 }
 
@@ -956,23 +945,6 @@ mod tests {
     fn base_subjects() {
         assert_eq!(base_subject("Re: RE: Fwd: Lunch"), "Lunch");
         assert_eq!(base_subject("Rebate"), "Rebate");
-    }
-
-    #[test]
-    fn short_dates() {
-        let now = date(2026, 11, 2)
-            .at(15, 0, 0, 0)
-            .to_zoned(TimeZone::UTC)
-            .unwrap();
-        let at = |y, m, d| {
-            date(y, m, d)
-                .at(9, 5, 0, 0)
-                .to_zoned(TimeZone::UTC)
-                .unwrap()
-        };
-        assert_eq!(short_date(&at(2026, 11, 2), &now), "09:05");
-        assert_eq!(short_date(&at(2026, 3, 14), &now), "Mar 14");
-        assert_eq!(short_date(&at(2025, 12, 31), &now), "2025-12");
     }
 
     #[test]

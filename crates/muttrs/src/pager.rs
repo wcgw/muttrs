@@ -412,10 +412,7 @@ impl Pager {
             let local = date.to_zoned(TimeZone::system());
             lines.push(Line::Text(vec![
                 Span::new(label("Date"), hl::DIM),
-                Span::new(
-                    local.strftime("%a %-d %b %Y, %H:%M").to_string(),
-                    Group::NORMAL,
-                ),
+                Span::new(wcgw_kit::when::long(&local), Group::NORMAL),
             ]));
         }
         let subject = if message.subject.is_empty() {

@@ -1036,9 +1036,7 @@ impl Muttrs {
         field(
             "Date",
             envelope.date.map_or_else(String::new, |date| {
-                date.to_zoned(jiff::tz::TimeZone::system())
-                    .strftime("%a %-d %b %Y, %H:%M")
-                    .to_string()
+                wcgw_kit::when::long(&date.to_zoned(jiff::tz::TimeZone::system()))
             }),
         );
         field("Subject", envelope.subject.clone());
