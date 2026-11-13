@@ -26,8 +26,8 @@ pub(crate) struct Config {
     pub(crate) load_remote_content: bool,
     /// Which body to show of a Message that has both: `"html"` or `"plain"`.
     pub(crate) prefer: Prefer,
-    /// The widest the Pager lays bodies out, in cells, however wide the terminal.
-    pub(crate) pager_width: u16,
+    /// Read no more: `:set textwidth=` in `init.vim` says the widest prose is laid out, in every app.
+    pub(crate) pager_width: Option<toml::Value>,
     /// How many rows the Index keeps above the Pager, its status line among them, as mutt's `pager_index_lines`;
     /// 0 for none. At most half the screen.
     pub(crate) pager_index_lines: u16,
@@ -72,7 +72,7 @@ impl Default for Config {
             images: None,
             load_remote_content: false,
             prefer: Prefer::Html,
-            pager_width: 100,
+            pager_width: None,
             pager_index_lines: 0,
             pager_read_delay: 1,
             max_picture_rows: 24,
@@ -173,9 +173,6 @@ impl Config {
                 );
             }
         }
-        if config.pager_width < 20 {
-            bail!("in {}: pager_width is at least 20", path.display());
-        }
         match config.voight.device() {
             Some(device) if !cfg!(feature = "voight") => bail!(
                 "in {}: voight = \"{device}\", but this muttrs was built without voight: set voight = \"off\", \
@@ -215,6 +212,13 @@ impl Config {
                 "{keys} read no more: :colorscheme and :set icons= graphics= mouse= go in \
                  ~/.config/muttrs/init.vim (scripts/convert-config.py writes them)"
             ));
+        }
+        if self.pager_width.is_some() {
+            ignored.push(
+                "pager_width read no more: :set textwidth= in ~/.config/muttrs/init.vim says the widest prose is laid \
+                 out (scripts/convert-config.py writes it)"
+                    .to_owned(),
+            );
         }
         if self.keys.is_some() {
             ignored.push(
@@ -263,7 +267,7 @@ mod tests {
         .unwrap();
         assert_eq!((config.pager_index_lines, config.pager_read_delay), (8, 0));
         assert_eq!(config.prefer, Prefer::Plain);
-        assert_eq!(config.pager_width, 80);
+        assert!(config.ignored()[1].starts_with("pager_width read no more"));
     }
 
     #[test]

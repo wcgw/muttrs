@@ -52,7 +52,8 @@ with ghd.
 - `config.toml` keeps what's muttrs' own. Themes (`themes/*.toml`) and keys (`[keys.*]`) are no longer read:
   `init.vim` says them, as `:hi` and `:map` lines, which `scripts/convert-config.py` writes from them. `theme`,
   `icons`, `images` and `mouse` are read no more either, as ghd's `theme` and `icons`: a warning says so, and the
-  script writes them as `:colorscheme` and `:set` lines.
+  script writes them as `:colorscheme` and `:set` lines. So is `pager_width`: bodies are laid out up to the kit's
+  `'textwidth'` (120, as every app's prose), which `:set textwidth=` changes.
 - `:` commands are named as vim's are, letters only: `:not-junk` is `:notjunk`, `:delete-mailbox` `:delmailbox`,
   `:forward-attached` `:forward attached`, and `:source` (the Message as it came) `:raw`, as `:source` is vim's.
 - Asking for what's new is `<C-l>` (`:e!`), as in every app: `:refresh` goes, and `:sync` lists the open Mailbox

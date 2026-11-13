@@ -456,6 +456,27 @@ fn an_html_message_opens_in_the_pager_with_its_picture_asked_for() {
 }
 
 #[test]
+fn a_body_is_laid_out_no_wider_than_textwidth_however_wide_the_window() {
+    let mut mail = Mail::new(200, 30);
+    mail.two();
+    mail.read(1, plain_message("Lunch", &"words ".repeat(80)));
+    let widest = mail
+        .rows()
+        .iter()
+        .filter(|row| row.contains("words"))
+        .map(|row| {
+            row.split_once('│')
+                .map_or(0, |(_, body)| body.trim_end().width())
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        (101..=120).contains(&widest),
+        "as wide as 'textwidth', 120, in a window of 164: {widest}"
+    );
+}
+
+#[test]
 fn a_plain_message_shows_with_its_headers_and_q_goes_back_to_the_index() {
     let mut mail = Mail::new(100, 30);
     mail.two();

@@ -537,8 +537,13 @@ impl Muttrs {
             .chain(self.draft.iter())
             .copied()
             .filter(|&buffer| {
-                !kit.windows_showing(buffer).is_empty()
-                    && self.widths.get(&buffer) != Some(&kit.text_width(buffer))
+                // The Index fills its window; a body is prose, up to `'textwidth'`.
+                let width = if self.indexes.contains_key(&buffer) {
+                    kit.text_width(buffer)
+                } else {
+                    kit.prose_width(buffer)
+                };
+                !kit.windows_showing(buffer).is_empty() && self.widths.get(&buffer) != Some(&width)
             })
             .collect();
         self.dirty.extend(shown);
@@ -687,11 +692,12 @@ impl Muttrs {
         styles
     }
 
-    /// The width the Pager or the Draft in `buffer` lays bodies out for: its window's, up to `pager_width`.
+    /// The width the Pager or the Draft in `buffer` lays bodies out for: its window's, up to the kit's `'textwidth'`
+    /// (120, as every app lays out prose).
     fn pager_width(&mut self, kit: &Kit, buffer: BufferId) -> u16 {
-        let width = kit.text_width(buffer);
+        let width = kit.prose_width(buffer);
         self.widths.insert(buffer, width);
-        width.clamp(20, self.config.pager_width.max(20))
+        width.max(20)
     }
 
     fn render_pager(&mut self, kit: &mut Kit, buffer: BufferId) {

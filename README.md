@@ -290,7 +290,6 @@ is optional:
 ```toml
 load_remote_content = false   # load Remote Content without being asked
 prefer = "html"               # the body to show of a Message that has both: "html" or "plain"
-pager_width = 100             # the widest bodies are laid out, in cells
 pager_index_lines = 0         # rows of the Index kept above the Pager, as mutt's: a window of its own
 pager_read_delay = 1          # seconds a Message shows before it's marked read; 0 at once, as NeoMutt's
 max_picture_rows = 24         # the most rows a Picture takes
@@ -304,7 +303,8 @@ voight = "cpu"                # where voight assesses the Pager's prose: "off", 
 
 What's on screen is the kit's, and `~/.config/muttrs/init.vim` says it, after `~/.config/wcgw/init.vim`:
 `:colorscheme` (tokyonight-moon by default; `default` is the terminal's own colours, which the `terminal` theme was),
-`:set icons=auto|nerd|plain`, `:set graphics=auto|kitty|halfblocks|off` and `:set mouse=`, `:hi` for any group, and
+`:set icons=auto|nerd|plain`, `:set graphics=auto|kitty|halfblocks|off`, `:set mouse=`, `:set textwidth=` (the
+widest bodies are laid out, 120 by default; it was config.toml's `pager_width`), `:hi` for any group, and
 `:map` for keys. muttrs' groups are named `Muttrs…` (`MuttrsUnread`, `MuttrsFlagged`, `MuttrsLabel`, …) and link to
 the standard ones, with colours of their own in tokyonight-moon; `MuttrsPage` has the background authors' colours
 are judged against. `theme`, `icons`, `images` and `mouse` in config.toml, and themes in `themes/`, are no longer

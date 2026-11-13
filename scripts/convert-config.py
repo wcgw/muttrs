@@ -100,7 +100,7 @@ ATTRIBUTES = {
 
 
 def settings(config):
-    """The `:colorscheme` and `:set` lines of config.toml's `theme`, `icons`, `images` and `mouse`."""
+    """The `:colorscheme` and `:set` lines of config.toml's `theme`, `icons`, `images`, `mouse` and `pager_width`."""
     lines = []
     theme = config.get("theme")
     if theme and theme != "tokyonight-moon":
@@ -113,6 +113,8 @@ def settings(config):
         lines.append(f"set graphics={graphics}")
     if config.get("mouse") is False:
         lines.append("set mouse=")
+    if "pager_width" in config:
+        lines.append(f"set textwidth={config['pager_width']}")
     return lines
 
 
