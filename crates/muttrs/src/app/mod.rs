@@ -302,6 +302,8 @@ pub(crate) struct Muttrs {
     width: u16,
     /// The Message `muttrs view` shows, until the runtime starts.
     to_view: Option<Message>,
+    /// The Index shown last, to go back to.
+    last_index: Option<BufferId>,
 }
 
 impl Muttrs {
@@ -417,6 +419,7 @@ impl Muttrs {
             dirty: HashSet::new(),
             width: 0,
             to_view: None,
+            last_index: None,
         };
         (muttrs, kit)
     }
@@ -1356,7 +1359,15 @@ impl Muttrs {
             self.show_in_main(kit, mailbox);
             return Vec::new();
         }
-        if current == self.home && !self.mailboxes.is_empty() {
+        let window = kit.current_window();
+        if window != self.main && Some(window) != self.sidebar_window() && Some(window) != self.mini
+        {
+            // A window of its own, as `:help`'s: it closes, as Vim's `q` would close it.
+            return kit.run_ex(self, "close").unwrap_or_default();
+        }
+        let sidebar = self.sidebar.as_ref().map(|sidebar| sidebar.buffer);
+        let elsewhere = !self.indexes.contains_key(&current) && Some(current) != sidebar;
+        if elsewhere && (current != self.home || self.last_index.is_some()) {
             self.back_from(kit);
             return Vec::new();
         }
@@ -1365,10 +1376,15 @@ impl Muttrs {
 
     /// Back from a buffer of muttrs' own (signing in, a command's output) to the Index last shown.
     fn back_from(&mut self, kit: &mut Kit) {
-        let index = self.mailboxes.values().next().copied();
-        match index {
-            Some(index) => self.show_in_main(kit, index),
-            None => kit.show_buffer(self.home),
+        if let Some(index) = self
+            .last_index
+            .filter(|index| self.indexes.contains_key(index))
+        {
+            self.show_in_main(kit, index);
+        } else {
+            let main = self.main_window(kit);
+            kit.focus_window(main);
+            kit.show_buffer(self.home);
         }
     }
 
@@ -1759,6 +1775,9 @@ impl wcgw_kit::App for Muttrs {
     fn shown(&mut self, kit: &mut Kit, buffer: BufferId) -> Effects {
         if self.pagers.contains_key(&buffer) {
             self.kept(kit, buffer);
+        }
+        if self.indexes.contains_key(&buffer) {
+            self.last_index = Some(buffer);
         }
         if let Some(sidebar) = &self.sidebar {
             self.dirty.insert(sidebar.buffer);

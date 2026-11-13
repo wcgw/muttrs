@@ -1078,3 +1078,26 @@ fn an_account_in_the_sidebar_asks_what_s_new_and_cd_opens_a_mailbox() {
     mail.press(":e Archive<CR>");
     assert_eq!(mail.requests(), [Request::Open("Archive".to_owned())]);
 }
+
+#[test]
+fn q_closes_help_s_window_and_goes_back_from_a_command_s_output() {
+    let mut mail = Mail::new(100, 30);
+    mail.two();
+    mail.press(":help<CR>");
+    assert_eq!(mail.harness.kit.window_ids().len(), 3);
+    let effects = mail.press("q");
+    assert!(!effects.contains(&wcgw_kit::Effect::Quit));
+    assert_eq!(mail.harness.kit.window_ids().len(), 2);
+    mail.harness.send(Msg::Ran {
+        command: "date".to_owned(),
+        output: "Thu Nov 12\n".to_owned(),
+        status: Ok(()),
+    });
+    assert!(line_with(&mail.rows(), "!date").is_some());
+    mail.press("q");
+    assert!(
+        mail.rows()[0].contains("home › Inbox"),
+        "{:#?}",
+        mail.rows()
+    );
+}
