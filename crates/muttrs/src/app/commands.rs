@@ -17,7 +17,7 @@ const WRITING: Topic = Topic::new(74, "Writing");
 const LISTING: Topic = Topic::new(76, "Listing");
 
 /// muttrs' default keys: keys, the command each runs, what which-key says of it, and its `:help` topic.
-const KEYS: [(&str, &str, &str, Topic); 39] = [
+const KEYS: [(&str, &str, &str, Topic); 40] = [
     (
         "K",
         "details",
@@ -52,7 +52,7 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
     ("dd", "delete", "delete, to Trash", MAIL),
     ("a", "archive", "archive", MAIL),
     ("u", "undo", "move back what went last", MAIL),
-    ("<leader>m", "pick mailboxes", "move to a Mailbox", MAIL),
+    ("<leader>m", "pick move", "move to a Mailbox", MAIL),
     ("<leader>l", "pick labels", "Labels", MAIL),
     ("<leader>j", "junk", "to Junk, as spam", MAIL),
     ("<leader>J", "notjunk", "out of Junk, not spam", MAIL),
@@ -70,6 +70,7 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
         LISTING,
     ),
     ("A", "toggle!", "select all listed, or none", LISTING),
+    ("<leader>ff", "pick mailboxes", "find a Mailbox", LISTING),
     ("S", "grep", "search the server", LISTING),
     ("od", "sort date", "sort newest first", LISTING),
     ("of", "sort from", "sort by sender", LISTING),
@@ -89,7 +90,7 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
         "reply to the mailing list",
         WRITING,
     ),
-    ("<leader>f", "forward", "forward", WRITING),
+    ("<leader>F", "forward", "forward", WRITING),
     ("<leader>s", "send", "send the Draft", WRITING),
     ("<leader>p", "postpone", "postpone the Draft", WRITING),
 ];

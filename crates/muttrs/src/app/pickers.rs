@@ -1,6 +1,7 @@
 //! The lists muttrs opens over its windows as the kit's pickers (its D14), narrowed as what's typed matches: the
 //! Links of the Message shown (`<CR>` opens one, `<C-y>` yanks it), its Attachments (`<CR>` opens one, `<C-s>`
-//! saves it), the Mailboxes to move to, the Labels, and where a search of every Mailbox found Messages.
+//! saves it), the Mailboxes to open (`<leader>ff`) or to move to (`<leader>m`), the Labels, and where a search of
+//! every Mailbox found Messages.
 
 use wcgw_kit::hl::Group;
 use wcgw_kit::shell::{Choice, Pick, Picker};
@@ -19,7 +20,8 @@ pub(super) fn add(kit: &mut Kit) {
             .unwrap_or_else(|why| Picker::list("Links", Vec::new(), why))
     });
     kit.add_picker("attachments", |muttrs, kit| muttrs.attachments_picker(kit));
-    kit.add_picker("mailboxes", |muttrs, kit| muttrs.move_picker(kit));
+    kit.add_picker("mailboxes", |muttrs, kit| muttrs.mailbox_picker(kit));
+    kit.add_picker("move", |muttrs, kit| muttrs.move_picker(kit));
     kit.add_picker("labels", |muttrs, kit| match muttrs.targets(kit) {
         Some(targets) => muttrs.labels_picker(&targets),
         None => Picker::list("Labels", Vec::new(), "No Message here"),
@@ -122,6 +124,34 @@ impl Muttrs {
                 _ => Vec::new(),
             },
         )
+    }
+
+    /// The Account's Mailboxes, to open one, as `:e NAME` does (`<leader>ff`, as every app finds its own).
+    pub(super) fn mailbox_picker(&self, kit: &Kit) -> Picker<Self> {
+        let account = self.account_shown(kit);
+        let choices: Vec<Choice<Target>> =
+            self.accounts.get(account).map_or_else(Vec::new, |state| {
+                state
+                    .mailboxes
+                    .iter()
+                    .filter(|mailbox| mailbox.selectable)
+                    .map(|mailbox| {
+                        let path = mailbox.path.join("/");
+                        Choice {
+                            label: vec![
+                                (kit.icon(icons::role(mailbox.role)), hl::DIM),
+                                (path.clone(), Group::NORMAL_FLOAT),
+                            ],
+                            text: path,
+                            pick: Pick::Target(Target::Mailbox {
+                                account,
+                                name: mailbox.name.clone(),
+                            }),
+                        }
+                    })
+                    .collect()
+            });
+        Picker::list("Mailboxes", choices, "No Mailbox matches")
     }
 
     /// The Account's other Mailboxes, to move the Messages an action is for to one.

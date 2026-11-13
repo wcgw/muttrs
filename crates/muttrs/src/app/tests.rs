@@ -295,6 +295,16 @@ fn backslash_goes_to_the_sidebar_hides_it_from_within_and_brings_it_back() {
 }
 
 #[test]
+fn leader_ff_finds_a_mailbox_to_open_as_every_app_finds_its_own() {
+    let mut mail = Mail::new(100, 20);
+    let _ = mail.requests();
+    mail.press("<Space>ff");
+    assert!(mail.screen().contains("Mailboxes"), "{}", mail.screen());
+    mail.press("arch<CR>");
+    assert_eq!(mail.requests(), [Request::Open("Archive".to_owned())]);
+}
+
+#[test]
 fn opening_a_mailbox_from_the_sidebar_lists_its_index_in_the_main_window() {
     let mut mail = Mail::new(100, 20);
     assert!(mail.requests().contains(&Request::Open("INBOX".to_owned())));
@@ -555,7 +565,7 @@ fn replying_opens_the_editor_then_the_draft_shows_until_it_is_sent() {
 fn a_new_draft_left_as_it_was_is_dropped() {
     let mut mail = Mail::new(100, 30);
     mail.two();
-    mail.press("<Space>f");
+    mail.press("<Space>F");
     assert!(mail.requests().contains(&Request::Body {
         mailbox: "INBOX".to_owned(),
         uid: 1

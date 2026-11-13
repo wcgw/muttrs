@@ -25,7 +25,7 @@ COMMANDS = {
     "Y": "pick labels",
     "d": "delete",
     "a": "archive",
-    "s": "pick mailboxes",
+    "s": "pick move",
     "u": "undo",
     "|": "pipe",
     "!": "shell",

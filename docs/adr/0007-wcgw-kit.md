@@ -59,6 +59,8 @@ with ghd.
   anew, as `:sync!` did.
 - A Mailbox opens by name with `:e NAME`, as a buffer does in every app: `:cd` goes.
 - `:limit` is `:filter`, as ghd's: it narrows the Index to what a Filter picks, and the winbar says `filter …`.
+- `<leader>f` is the kit's find prefix, as fzf-lua's in the author's Neovim: `<leader>ff` finds a Mailbox to open
+  (`:pick mailboxes`), as every app finds its own, so forwarding is `<leader>F`, and moving is `:pick move`.
 - `:voight on` and `off` start and stop assessing, as ghd's do; they showed and hid the Heatmap, which
   `:voight heatmap` (`<leader>h`) does.
 - The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.
