@@ -280,7 +280,7 @@ impl Flag {
 }
 
 /// What an Account tells the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Update {
     /// Where the connection stands.
     Connection(Connection),

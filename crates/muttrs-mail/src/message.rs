@@ -310,8 +310,7 @@ impl Message {
     pub fn bytes(&self, part: &Part) -> Vec<u8> {
         self.parsed
             .part(part.id)
-            .map(|part| part.decoded().into_owned())
-            .unwrap_or_default()
+            .map_or_default(|part| part.decoded().into_owned())
     }
 
     /// The bytes it was read from.
@@ -371,7 +370,7 @@ fn text_format(part: &MessagePart<'_>) -> TextFormat {
 
 /// The addresses of a header.
 pub(crate) fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Vec<Address> {
-    list.map(|list| {
+    list.map_or_default(|list| {
         list.mailboxes()
             .filter_map(|mailbox| {
                 Some(Address {
@@ -381,7 +380,6 @@ pub(crate) fn addresses(list: Option<mail_parser::AddressList<'_>>) -> Vec<Addre
             })
             .collect()
     })
-    .unwrap_or_default()
 }
 
 /// How to unsubscribe from a mailing list.
@@ -397,24 +395,22 @@ pub enum Unsubscribe {
 
 /// The URLs of a `List-` header (RFC 2369), in order.
 fn urls(list: Option<mail_parser::AddressList<'_>>) -> Vec<String> {
-    list.map(|list| {
+    list.map_or_default(|list| {
         list.mailboxes()
             .filter_map(|mailbox| mailbox.address())
             .map(|url| strip_brackets(url).to_owned())
             .filter(|url| !url.is_empty())
             .collect()
     })
-    .unwrap_or_default()
 }
 
 /// The `Message-ID`s of a header, without angle brackets.
 pub(crate) fn ids(list: Option<mail_parser::TextList<'_>>) -> Vec<String> {
-    list.map(|list| {
+    list.map_or_default(|list| {
         list.iter()
             .map(|id| strip_brackets(id).to_owned())
             .collect()
     })
-    .unwrap_or_default()
 }
 
 /// A `Date` header as a timestamp, if it's a valid date.

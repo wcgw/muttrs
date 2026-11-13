@@ -116,6 +116,12 @@ impl Tasks {
         self.queued.len()
     }
 
+    /// The Tasks not finished, in the order asked.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> Vec<Task> {
+        self.queued.iter().map(|queued| queued.task).collect()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.queued.is_empty()
     }

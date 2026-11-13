@@ -356,11 +356,7 @@ impl Draft {
         };
         let mut text = String::new();
         // Writing to a String can't fail.
-        let from = self
-            .from
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
+        let from = self.from.as_ref().map_or_default(ToString::to_string);
         let _ = writeln!(text, "From: {from}");
         let _ = writeln!(text, "To: {}", list(&self.to));
         let _ = writeln!(text, "Cc: {}", list(&self.cc));
@@ -756,8 +752,7 @@ fn quote(text: &str) -> String {
 fn guess_type(name: &str) -> &'static str {
     let extension = name
         .rsplit_once('.')
-        .map(|(_, extension)| extension.to_ascii_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|(_, extension)| extension.to_ascii_lowercase());
     match extension.as_str() {
         "pdf" => "application/pdf",
         "png" => "image/png",

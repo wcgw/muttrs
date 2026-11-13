@@ -70,7 +70,7 @@ _Avoid_: tagged, marked
 
 **Filter**:
 A line of `qualifier:value` terms, as Gmail's search writes them (`from:ann is:unread`), that picks Messages of the
-Index; `:select` and `:unselect` act on what it picks.
+Index; `:select` and `:unselect` act on what it picks, and `:filter` lists only that.
 _Avoid_: pattern, query (that's what `S` sends the server)
 
 **Task**:
@@ -80,8 +80,8 @@ done; the status line says the one being done, and how many more wait.
 _Avoid_: job, operation, request (`Request` is what a Task asks, in the code)
 
 **History**:
-What was typed at the prompt before, kept between runs: commands (`:`), and searches (`/` and `S`, which share
-theirs). `Up` and `Down` go back through it.
+What was typed at the command line before, kept between runs: commands (`:`), and searches (`/`). `Up` and `Down` go
+back through it. wcgw-kit keeps it.
 
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.
@@ -122,7 +122,8 @@ An image no one is meant to see (one pixel, or hidden) whose only use is to tell
 Never loaded, never drawn.
 
 **Link**:
-A URL in a body, numbered where it appears, which the user opens by its number.
+A URL in a body, numbered where it appears: the user opens it from where it is, or by its number in the list of the
+Message's Links.
 
 **Picture**:
 An image drawn in the terminal's cells: through kitty's Unicode placeholders, or as half blocks.

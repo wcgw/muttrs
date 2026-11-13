@@ -25,9 +25,8 @@ doc_markdown = "allow"
 anyhow = "1.0.104"
 async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.23.1"
-crossterm = { version = "0.29.0", features = ["event-stream"] }
+crossterm = "0.29.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-ego-tree = "0.11.1"
 jiff = { version = "0.2.39", features = ["serde"] }
 # SMTP submission, and building the MIME of what's sent. rustls with ring and the platform's roots, as for IMAP.
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "hostname", "ring", "rustls-native-certs", "smtp-transport", "tokio1", "tokio1-rustls"] }
@@ -53,19 +52,13 @@ tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "pro
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
-ratatui-core = "0.1.2"
-# HTML parsing (html5ever) and CSS selectors, for the rules of `<style>` elements.
-scraper = "0.29.0"
-unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 wiremock = "0.6.5"
 
-# voight's main, pinned as ghd pins it: the library isn't published.
-voight = { git = "https://github.com/wcgw/voight", rev = "26c88c90f7b971a1700e892332023a6d5771361e", default-features = false }
+# voight's shared Assessor (wcgw-kit's D17), at its release tag.
+voight = { git = "https://github.com/wcgw/voight", tag = "v0.2.0", default-features = false }
 
-muttrs-gfx = { path = "crates/muttrs-gfx" }
 muttrs-mail = { path = "crates/muttrs-mail" }
-muttrs-render = { path = "crates/muttrs-render" }
 
 # Decoding and resizing images is unusably slow unoptimized, and so is voight's model (an Assessment didn't finish in
 # five minutes, in ghd): dependencies are built optimized even in debug builds, which keep muttrs' own code easy to

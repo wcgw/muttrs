@@ -1,5 +1,7 @@
 //! The Index: the Envelopes of the open Mailbox, one a row, newest first, or in threads, each under what it
-//! replies to and threads with the latest replies first. A thread can be folded into the row heading it.
+//! replies to and threads with the latest replies first. It's a kit buffer: a block per thread (per Message, out of
+//! threads), its rows laid out for the window's width, and a fold over each thread's rows, which `zc` closes into
+//! the row heading it.
 
 use std::collections::HashSet;
 
@@ -7,18 +9,13 @@ use jiff::Zoned;
 use jiff::tz::TimeZone;
 use muttrs_mail::thread::{self, Branch};
 use muttrs_mail::{Envelope, Role};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
+use wcgw_kit::doc::{BlockKey, Content, Fold};
 
+use crate::app::{Kit, Line, Opened, Span, Target};
 use crate::filter::Filter;
-use crate::icons::Icons;
-use crate::theme::Theme;
-use crate::ui::truncate;
-
-/// How near the end of the Envelopes listed the cursor comes before older ones are asked for.
-const MORE_WITHIN: usize = 30;
+use crate::hl::{self, Group};
+use crate::icons;
 
 /// Where asking for older Envelopes stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,12 +36,6 @@ struct Row {
     tree: String,
     /// The UID of the Message heading its thread; its own, flat.
     head: u32,
-    /// How many replies are folded into it.
-    folded: usize,
-    /// The UIDs of the replies folded into it, which what's done to it is done to.
-    folded_uids: Vec<u32>,
-    /// Whether any of them is Unread.
-    folded_unread: bool,
     /// Whether its subject is what it replies to's, and isn't shown again: an arrow shows instead.
     repeated: bool,
 }
@@ -60,6 +51,46 @@ pub(crate) enum Sort {
     Subject,
     /// Largest first.
     Size,
+}
+
+impl Sort {
+    /// The sort a letter names, as mutt's `o` takes it: `t` for threads, which is none.
+    pub(crate) fn named(name: &str) -> Result<Option<Self>, String> {
+        match name {
+            "d" | "date" => Ok(Some(Self::Date)),
+            "f" | "from" | "sender" => Ok(Some(Self::Sender)),
+            "s" | "subject" => Ok(Some(Self::Subject)),
+            "z" | "size" => Ok(Some(Self::Size)),
+            "t" | "threads" => Ok(None),
+            _ => Err(format!(
+                "Not a sort: {name}: date, from, subject, size or threads"
+            )),
+        }
+    }
+
+    /// The names `:sort` completes.
+    pub(crate) const NAMES: [&str; 5] = ["date", "from", "subject", "size", "threads"];
+}
+
+/// What the Index draws with, from the kit: its icons, and the time now.
+pub(crate) struct Look {
+    unread: String,
+    flagged: String,
+    answered: String,
+    attachment: String,
+    now: Zoned,
+}
+
+impl Look {
+    pub(crate) fn of(kit: &Kit) -> Self {
+        Self {
+            unread: kit.icon(icons::UNREAD),
+            flagged: kit.icon(icons::FLAGGED),
+            answered: kit.icon(icons::ANSWERED),
+            attachment: kit.icon(icons::ATTACHMENT),
+            now: Zoned::now(),
+        }
+    }
 }
 
 // Each bool says something of its own of the Index: what it lists, how, and whether it has come.
@@ -80,8 +111,6 @@ pub(crate) struct Index {
     threaded: bool,
     /// Whether a reply's subject is left out where it's what it replies to's, as mutt's `hide_thread_subject`.
     hide_subjects: bool,
-    /// The threads folded, by the UID of the Message heading them.
-    folded: HashSet<u32>,
     /// The Messages selected, to act on together, by UID.
     selected: HashSet<u32>,
     /// How many Messages the Mailbox has, of which `envelopes` are the newest.
@@ -92,23 +121,11 @@ pub(crate) struct Index {
     more: More,
     /// What a search on the server found, if that's what this lists: its query, and how many it found.
     pub(crate) found: Option<(String, usize)>,
-    /// The Filter the rows are limited to, as written and read: only the Messages it picks show.
-    limit: Option<(String, Filter)>,
+    /// The Filter the rows are narrowed to (`:filter`), as written and read: only the Messages it picks show.
+    filter: Option<(String, Filter)>,
     /// What the rows are ordered by when they aren't in threads, and whether the other way.
     sort: Sort,
     reverse: bool,
-    cursor: usize,
-    top: usize,
-    height: usize,
-    /// The first row drawn around the cursor, as above the Pager.
-    around: usize,
-    search: Option<Search>,
-}
-
-struct Search {
-    query: String,
-    /// The rows that match, in order.
-    matches: Vec<usize>,
 }
 
 impl Index {
@@ -128,20 +145,14 @@ impl Index {
             rows: Vec::new(),
             threaded,
             hide_subjects: false,
-            folded: HashSet::new(),
             selected: HashSet::new(),
             exists: 0,
             loaded: false,
             more: More::Idle,
             found: None,
-            limit: None,
+            filter: None,
             sort: Sort::Date,
             reverse: false,
-            cursor: 0,
-            top: 0,
-            height: 0,
-            around: 0,
-            search: None,
         }
     }
 
@@ -151,9 +162,8 @@ impl Index {
         self
     }
 
-    /// Takes the Envelopes the server listed, keeping the cursor on the Message it was on.
+    /// Takes the Envelopes the server listed.
     pub(crate) fn set(&mut self, mut envelopes: Vec<Envelope>, exists: u32) {
-        let at = self.current().map(|envelope| envelope.uid);
         envelopes.sort_by(|a, b| b.date.cmp(&a.date).then(b.uid.cmp(&a.uid)));
         self.more = match self.more {
             // Asked, and none came: there are none to list, whatever the count says.
@@ -164,7 +174,7 @@ impl Index {
         self.envelopes = envelopes;
         self.exists = exists;
         self.loaded = true;
-        self.arrange(at);
+        self.arrange();
     }
 
     /// What a search of this Index's Mailbox for `query` found: `envelopes`, the newest of `count`.
@@ -184,11 +194,10 @@ impl Index {
         found
     }
 
-    /// Lays the rows out again, the cursor on Message `at` if it still shows.
-    fn arrange(&mut self, at: Option<u32>) {
-        let row = self.cursor;
+    /// Lays the rows out again.
+    fn arrange(&mut self) {
         let mut shown: Vec<usize> = (0..self.envelopes.len())
-            .filter(|&envelope| self.within_limit(&self.envelopes[envelope]))
+            .filter(|&envelope| self.within_filter(&self.envelopes[envelope]))
             .collect();
         if !self.threaded {
             self.order(&mut shown);
@@ -202,20 +211,10 @@ impl Index {
                     envelope,
                     tree: String::new(),
                     head: self.envelopes[envelope].uid,
-                    folded: 0,
-                    folded_uids: Vec::new(),
-                    folded_unread: false,
                     repeated: false,
                 })
                 .collect()
         };
-        self.cursor = at
-            .and_then(|uid| self.position(uid))
-            .unwrap_or(row)
-            .min(self.rows.len().saturating_sub(1));
-        if let Some(search) = self.search.take() {
-            self.search_for(search.query);
-        }
     }
 
     /// The rows of the Envelopes `shown`, by their place, in threads among themselves.
@@ -234,7 +233,7 @@ impl Index {
         let mut head = 0;
         // The subjects of the row's ancestors, by depth: its parent's last.
         let mut ancestors: Vec<&str> = Vec::new();
-        for (at, message) in threaded.iter().enumerate() {
+        for message in &threaded {
             let envelope = &envelopes[message.envelope];
             ancestors.truncate(message.depth);
             let subject = base_subject(&envelope.subject);
@@ -246,58 +245,25 @@ impl Index {
             ancestors.push(subject);
             if message.depth == 0 {
                 head = envelope.uid;
-                let folded = self.folded.contains(&head) && message.replies > 0;
-                let replies = &threaded[at + 1..at + 1 + message.replies];
-                let folded_unread = folded
-                    && replies
-                        .iter()
-                        .any(|reply| !envelopes[reply.envelope].flags.seen);
-                rows.push(Row {
-                    envelope: place(message.envelope),
-                    tree: String::new(),
-                    head,
-                    folded: if folded { message.replies } else { 0 },
-                    folded_uids: if folded {
-                        replies
-                            .iter()
-                            .map(|reply| envelopes[reply.envelope].uid)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    },
-                    folded_unread,
-                    repeated: false,
-                });
-            } else if !self.folded.contains(&head) {
-                let tree = message
-                    .branches
-                    .iter()
-                    .map(|branch| match branch {
-                        Branch::Through => "│ ",
-                        Branch::Blank => "  ",
-                        Branch::Tee => "├─",
-                        Branch::Corner => "└─",
-                    })
-                    .collect();
-                rows.push(Row {
-                    envelope: place(message.envelope),
-                    tree,
-                    head,
-                    folded: 0,
-                    folded_uids: Vec::new(),
-                    folded_unread: false,
-                    repeated,
-                });
             }
+            let tree = message
+                .branches
+                .iter()
+                .map(|branch| match branch {
+                    Branch::Through => "│ ",
+                    Branch::Blank => "  ",
+                    Branch::Tee => "├─",
+                    Branch::Corner => "└─",
+                })
+                .collect();
+            rows.push(Row {
+                envelope: place(message.envelope),
+                tree,
+                head,
+                repeated,
+            });
         }
         rows
-    }
-
-    /// The row showing Message `uid`.
-    fn position(&self, uid: u32) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|row| self.envelopes[row.envelope].uid == uid)
     }
 
     /// Orders the Envelopes `shown`, by their place (newest first), by the sort: ties stay newest first.
@@ -335,7 +301,6 @@ impl Index {
 
     /// Orders the rows by `sort` (the other way if `reverse`), out of threads; or in threads, if it's None.
     pub(crate) fn sort(&mut self, sort: Option<Sort>, reverse: bool) {
-        let at = self.current().map(|envelope| envelope.uid);
         match sort {
             Some(sort) => {
                 self.sort = sort;
@@ -344,7 +309,7 @@ impl Index {
             }
             None => self.threaded = true,
         }
-        self.arrange(at);
+        self.arrange();
     }
 
     /// What the rows are ordered by, when they aren't in threads, nor newest first, for people.
@@ -366,50 +331,24 @@ impl Index {
 
     /// Shows rows in threads, or not.
     pub(crate) fn toggle_threads(&mut self) -> bool {
-        let at = self.current().map(|envelope| envelope.uid);
         self.threaded = !self.threaded;
-        self.arrange(at);
+        self.arrange();
         self.threaded
     }
 
-    /// Folds the thread at the cursor into its head's row, or unfolds it.
-    pub(crate) fn toggle_fold(&mut self) {
-        let Some(row) = self.rows.get(self.cursor) else {
-            return;
-        };
-        let head = row.head;
-        if !self.folded.remove(&head) {
-            self.folded.insert(head);
-        }
-        self.arrange(Some(head));
-    }
-
-    /// Folds every thread, or unfolds them all.
-    pub(crate) fn fold_all(&mut self, fold: bool) {
-        let at = self.rows.get(self.cursor).map(|row| row.head);
-        self.folded = if fold {
-            self.rows.iter().map(|row| row.head).collect()
-        } else {
-            HashSet::new()
-        };
-        self.arrange(at);
-    }
-
-    /// Selects the Message at the cursor (and the replies folded into it), or unselects it, and moves down.
-    pub(crate) fn toggle_selected(&mut self) {
-        let uids = self.at_cursor();
+    /// Selects the Messages `uids`, or unselects them if the first is selected.
+    pub(crate) fn toggle_selected(&mut self, uids: &[u32]) {
         let Some(first) = uids.first() else { return };
         if self.selected.contains(first) {
-            for uid in &uids {
+            for uid in uids {
                 self.selected.remove(uid);
             }
         } else {
             self.selected.extend(uids);
         }
-        self.move_by(1);
     }
 
-    /// Unselects everything; `false` if nothing was.
+    /// Unselects every Message, listed or not; `false` if none was selected.
     pub(crate) fn clear_selected(&mut self) -> bool {
         let any = !self.selected.is_empty();
         self.selected.clear();
@@ -427,7 +366,7 @@ impl Index {
         let shown: Vec<&Envelope> = self
             .envelopes
             .iter()
-            .filter(|envelope| self.within_limit(envelope) && picks(envelope))
+            .filter(|envelope| self.within_filter(envelope) && picks(envelope))
             .collect();
         for envelope in shown {
             picked += 1;
@@ -441,25 +380,24 @@ impl Index {
         (picked, changed)
     }
 
-    /// Limits the rows to the Messages `limit` picks, as written and read; or not, if it's None. How many show.
-    pub(crate) fn limit(&mut self, limit: Option<(String, Filter)>) -> usize {
-        let at = self.current().map(|envelope| envelope.uid);
-        self.limit = limit;
-        self.arrange(at);
+    /// Narrows the rows to the Messages `filter` picks, as written and read; or not, if it's None. How many show.
+    pub(crate) fn filter(&mut self, filter: Option<(String, Filter)>) -> usize {
+        self.filter = filter;
+        self.arrange();
         self.envelopes
             .iter()
-            .filter(|envelope| self.within_limit(envelope))
+            .filter(|envelope| self.within_filter(envelope))
             .count()
     }
 
-    /// The Filter the rows are limited to, as written, if they are.
-    pub(crate) fn limited(&self) -> Option<&str> {
-        self.limit.as_ref().map(|(written, _)| written.as_str())
+    /// The Filter the rows are narrowed to, as written, if they are.
+    pub(crate) fn filtered(&self) -> Option<&str> {
+        self.filter.as_ref().map(|(written, _)| written.as_str())
     }
 
-    /// Whether `envelope` shows, within the limit, if there's one.
-    fn within_limit(&self, envelope: &Envelope) -> bool {
-        self.limit
+    /// Whether `envelope` shows, as the Filter the rows are narrowed to picks it, if there's one.
+    fn within_filter(&self, envelope: &Envelope) -> bool {
+        self.filter
             .as_ref()
             .is_none_or(|(_, filter)| filter.matches(envelope))
     }
@@ -474,32 +412,30 @@ impl Index {
         self.selected.len()
     }
 
-    /// The UIDs of the Message at the cursor and of the replies folded into it.
-    fn at_cursor(&self) -> Vec<u32> {
-        let Some(row) = self.rows.get(self.cursor) else {
-            return Vec::new();
-        };
-        std::iter::once(self.envelopes[row.envelope].uid)
-            .chain(row.folded_uids.iter().copied())
+    /// The UIDs of the Messages selected, if any.
+    pub(crate) fn selection(&self) -> Vec<u32> {
+        let mut uids: Vec<u32> = self.selected.iter().copied().collect();
+        uids.sort_unstable();
+        uids
+    }
+
+    /// The UIDs of the Messages of the thread Message `uid` heads, it first: what's done to it when it's folded.
+    pub(crate) fn thread_of(&self, uid: u32) -> Vec<u32> {
+        let head = self
+            .rows
+            .iter()
+            .find(|row| self.envelopes[row.envelope].uid == uid)
+            .map_or(uid, |row| row.head);
+        self.rows
+            .iter()
+            .filter(|row| row.head == head)
+            .map(|row| self.envelopes[row.envelope].uid)
             .collect()
     }
 
-    /// The UIDs of the Messages an action is for: those selected, or else the one at the cursor (with the replies
-    /// folded into it).
-    pub(crate) fn targets(&self) -> Vec<u32> {
-        if self.selected.is_empty() {
-            self.at_cursor()
-        } else {
-            let mut uids: Vec<u32> = self.selected.iter().copied().collect();
-            uids.sort_unstable();
-            uids
-        }
-    }
-
-    /// Whether to ask for older Envelopes: the cursor is near the end of those listed, and the Mailbox has more.
-    /// Asking is noted, so that it's asked once.
-    pub(crate) fn wants_more(&mut self) -> bool {
-        let near_end = self.cursor + MORE_WITHIN >= self.rows.len();
+    /// Whether to ask for older Envelopes, the cursor being `near_end` of those listed: the Mailbox has more. Asking
+    /// is noted, so that it's asked once.
+    pub(crate) fn wants_more(&mut self, near_end: bool) -> bool {
         let has_more = u32::try_from(self.envelopes.len()).unwrap_or(u32::MAX) < self.exists;
         if self.loaded && near_end && has_more && self.more == More::Idle {
             self.more = More::Asked(self.envelopes.len());
@@ -507,11 +443,6 @@ impl Index {
         } else {
             false
         }
-    }
-
-    pub(crate) fn current(&self) -> Option<&Envelope> {
-        let row = self.rows.get(self.cursor)?;
-        self.envelopes.get(row.envelope)
     }
 
     pub(crate) fn find(&self, uid: u32) -> Option<&Envelope> {
@@ -541,227 +472,121 @@ impl Index {
         self.envelopes
             .retain(|envelope| !uids.contains(&envelope.uid));
         self.selected.retain(|uid| !uids.contains(uid));
-        // The cursor stays on its row: on what followed what's taken out.
-        self.arrange(None);
+        self.arrange();
     }
 
-    pub(crate) fn move_by(&mut self, rows: isize) {
-        self.cursor = self
-            .cursor
-            .saturating_add_signed(rows)
-            .min(self.rows.len().saturating_sub(1));
+    /// The UIDs of the rows, in the order they show.
+    pub(crate) fn uids(&self) -> Vec<u32> {
+        self.rows
+            .iter()
+            .map(|row| self.envelopes[row.envelope].uid)
+            .collect()
     }
 
-    pub(crate) fn move_pages(&mut self, pages: f32) {
-        // A page is at most a few thousand rows; rounding is what's wanted.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-        let rows = (self.height.max(2) as f32 * pages).round() as isize;
-        self.move_by(rows);
+    /// The Message shown after `uid`, or before it if not `down`; `None` at either end.
+    pub(crate) fn next(&self, uid: u32, down: bool) -> Option<u32> {
+        let uids = self.uids();
+        let at = uids.iter().position(|&listed| listed == uid)?;
+        let next = if down { at + 1 } else { at.checked_sub(1)? };
+        uids.get(next).copied()
     }
 
-    pub(crate) fn top(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub(crate) fn bottom(&mut self) {
-        self.cursor = self.rows.len().saturating_sub(1);
-    }
-
-    /// Puts the cursor on the row drawn `offset` rows down from the top of the Index; `false` if it was there
-    /// already, as a second click is, or there's no row there.
-    pub(crate) fn click(&mut self, offset: usize) -> bool {
-        self.put_cursor(self.top + offset)
-    }
-
-    /// As [`Index::click`], on the rows drawn around the cursor.
-    pub(crate) fn click_around_cursor(&mut self, offset: usize) -> bool {
-        self.put_cursor(self.around + offset)
-    }
-
-    fn put_cursor(&mut self, row: usize) -> bool {
-        if row >= self.rows.len() || row == self.cursor {
-            return false;
-        }
-        self.cursor = row;
-        true
-    }
-
-    /// Whether the row drawn `offset` rows down from the top is the cursor's.
-    pub(crate) fn is_cursor_at(&self, offset: usize) -> bool {
-        self.top + offset == self.cursor && self.cursor < self.rows.len()
-    }
-
-    /// Moves to the next row, or the previous. `false` if there's none.
-    pub(crate) fn step(&mut self, down: bool) -> bool {
-        let next = if down {
-            self.cursor + 1
-        } else {
-            match self.cursor.checked_sub(1) {
-                Some(previous) => previous,
-                None => return false,
-            }
-        };
-        if next < self.rows.len() {
-            self.cursor = next;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Searches the rows' senders and subjects for `query`, ignoring case, going to the first match from the cursor.
-    pub(crate) fn search_for(&mut self, query: String) {
-        let lower = query.to_lowercase();
-        let matches: Vec<usize> = self
+    /// Where Message `uid` is: the key of its thread's block, and its line there.
+    pub(crate) fn place_of(&self, uid: u32) -> Option<(String, usize)> {
+        let at = self
             .rows
             .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                let envelope = &self.envelopes[row.envelope];
-                envelope.subject.to_lowercase().contains(&lower)
-                    || envelope
-                        .from
-                        .iter()
-                        .chain(&envelope.to)
-                        .any(|address| address.to_string().to_lowercase().contains(&lower))
-            })
-            .map(|(row, _)| row)
-            .collect();
-        if let Some(&first) = matches
-            .iter()
-            .find(|&&row| row >= self.cursor)
-            .or(matches.first())
-        {
-            self.cursor = first;
-        }
-        self.search = Some(Search { query, matches });
+            .position(|row| self.envelopes[row.envelope].uid == uid)?;
+        let head = self.rows[at].head;
+        let first = self.rows.iter().position(|row| row.head == head)?;
+        Some((block_key(head), at - first))
     }
 
-    pub(crate) fn next_match(&mut self, forward: bool) {
-        let Some(search) = &self.search else { return };
-        let next = if forward {
-            search
-                .matches
-                .iter()
-                .find(|&&row| row > self.cursor)
-                .or(search.matches.first())
-        } else {
-            search
-                .matches
-                .iter()
-                .rev()
-                .find(|&&row| row < self.cursor)
-                .or(search.matches.last())
-        };
-        if let Some(&row) = next {
-            self.cursor = row;
-        }
-    }
-
-    pub(crate) fn clear_search(&mut self) -> bool {
-        self.search.take().is_some()
-    }
-
-    /// The query searched for, which match the cursor is on (if any), and how many there are.
-    pub(crate) fn search_status(&self) -> Option<(String, Option<usize>, usize)> {
-        let search = self.search.as_ref()?;
-        let at = search.matches.iter().position(|&row| row == self.cursor);
-        Some((
-            search.query.clone(),
-            at.map(|at| at + 1),
-            search.matches.len(),
-        ))
-    }
-
-    /// Draws the rows around the cursor's, it a third of the way down (unless near the top or the end), as mutt's
-    /// mini-index above the Pager, leaving where the Index itself is scrolled to as it was.
-    pub(crate) fn draw_around_cursor(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
-        let height = usize::from(area.height);
-        self.around = self
-            .cursor
-            .saturating_sub(height / 3)
-            .min(self.rows.len().saturating_sub(height));
-        self.draw_rows(self.around, area, buffer, cx);
-    }
-
-    pub(crate) fn draw(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
-        self.height = usize::from(area.height);
-        if self.cursor < self.top {
-            self.top = self.cursor;
-        } else if self.height > 0 && self.cursor >= self.top + self.height {
-            self.top = self.cursor + 1 - self.height;
-        }
-        self.draw_rows(self.top, area, buffer, cx);
-    }
-
-    /// Draws the rows from `top` down, in `area`.
-    fn draw_rows(&self, top: usize, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
+    /// The rows as blocks of a kit document, `width` cells wide: a block per thread, its rows its lines, with a fold
+    /// over them whose summary is the head's row saying how many it holds. Or what's said while there are none.
+    pub(crate) fn blocks(&self, width: usize, look: &Look) -> Vec<(BlockKey, Content<Target>)> {
         if !self.loaded {
-            let waiting = Line::styled(
-                format!(" {}Fetching {}…", cx.icons.loading, self.label),
-                cx.theme.dim,
-            );
-            buffer.set_line(area.x, area.y, &waiting, area.width);
-            return;
+            return vec![(
+                BlockKey::new("waiting"),
+                Content::from(vec![Line::Text(vec![Span::new(
+                    format!(" Fetching {}…", self.label),
+                    hl::DIM,
+                )])]),
+            )];
         }
         if self.rows.is_empty() {
-            buffer.set_line(
-                area.x,
-                area.y,
-                &Line::styled(" Nothing here.", cx.theme.dim),
-                area.width,
-            );
-            return;
+            return vec![(
+                BlockKey::new("empty"),
+                Content::from(vec![Line::Text(vec![Span::new(" Nothing here.", hl::DIM)])]),
+            )];
         }
-        let now = Zoned::now();
-        let matches = self.search.as_ref().map(|search| search.matches.as_slice());
-        for (index, row) in self
-            .rows
-            .iter()
-            .enumerate()
-            .skip(top)
-            .take(usize::from(area.height))
-        {
-            let y = area.y + u16::try_from(index - top).unwrap_or(0);
-            let line = self.line(row, usize::from(area.width), &now, cx);
-            buffer.set_line(area.x, y, &line, area.width);
-            let row_area = Rect::new(area.x, y, area.width, 1);
-            if index == self.cursor {
-                let style = if cx.focused {
-                    cx.theme.cursor
-                } else {
-                    cx.theme.cursor_unfocused
-                };
-                buffer.set_style(row_area, style);
-            } else if matches.is_some_and(|matches| matches.contains(&index)) {
-                buffer.set_style(Rect::new(area.x, y, 1, 1), cx.theme.found);
-            }
-            if self.selected.contains(&self.envelopes[row.envelope].uid) {
-                buffer.set_string(area.x, y, "▌", cx.theme.accent);
-            }
+        let mut blocks = Vec::new();
+        let mut at = 0;
+        while at < self.rows.len() {
+            let head = self.rows[at].head;
+            let end = self.rows[at..]
+                .iter()
+                .position(|row| row.head != head)
+                .map_or(self.rows.len(), |len| at + len);
+            blocks.push((
+                BlockKey::new(block_key(head)),
+                self.thread(&self.rows[at..end], width, look),
+            ));
+            at = end;
         }
+        blocks
     }
 
-    fn line(&self, row: &Row, width: usize, now: &Zoned, cx: &Draw<'_>) -> Line<'static> {
+    /// The rows of a thread, `width` cells wide, with a fold over them whose summary is the head's row saying how many
+    /// it holds.
+    fn thread(&self, thread: &[Row], width: usize, look: &Look) -> Content<Target> {
+        let lines: Vec<Line> = thread
+            .iter()
+            .map(|row| self.line(row, None, width, look))
+            .collect();
+        let mut content = Content::from(lines);
+        if thread.len() > 1 {
+            let unread = thread
+                .iter()
+                .any(|row| !self.envelopes[row.envelope].flags.seen);
+            content.folds.push(Fold {
+                lines: 0..thread.len(),
+                summary: self.line(&thread[0], Some((thread.len(), unread)), width, look),
+                closed: false,
+            });
+        }
+        content
+    }
+
+    /// The line of `row`, `width` cells wide; or of its thread folded into it, of `folded` Messages, any Unread.
+    fn line(&self, row: &Row, folded: Option<(usize, bool)>, width: usize, look: &Look) -> Line {
         let envelope = &self.envelopes[row.envelope];
-        let theme = cx.theme;
-        let icons = cx.icons;
-        let unread = !envelope.flags.seen || row.folded_unread;
-        let text = if unread { theme.unread } else { theme.read };
-        let mark = |on: bool, icon: &str, style| {
-            let blank = " ".repeat(icon.width());
-            Span::styled(if on { icon.to_owned() } else { blank }, style)
+        let target = Target::Message(Opened {
+            account: self.account,
+            mailbox: self.mailbox.clone(),
+            uid: envelope.uid,
+        });
+        let unread = !envelope.flags.seen || folded.is_some_and(|(_, unread)| unread);
+        let text = if unread { hl::UNREAD } else { hl::READ };
+        let mark = |on: bool, icon: &str, group: Group| {
+            let shown = if on {
+                icon.to_owned()
+            } else {
+                " ".repeat(icon.width())
+            };
+            Span::new(shown, group)
         };
-        let flags = vec![
-            Span::raw(" "),
-            mark(unread, icons.unread, theme.accent),
-            mark(envelope.flags.flagged, icons.flagged, theme.flagged),
-            mark(envelope.flags.answered, icons.answered, theme.dim),
-            mark(envelope.has_attachments, icons.attachment, theme.attachment),
+        let selected = self.selected.contains(&envelope.uid);
+        let mut spans = vec![
+            Span::new(if selected { "▌" } else { " " }, hl::ACCENT),
+            mark(unread, &look.unread, hl::ACCENT),
+            mark(envelope.flags.flagged, &look.flagged, hl::FLAGGED),
+            mark(envelope.flags.answered, &look.answered, hl::DIM),
+            mark(envelope.has_attachments, &look.attachment, hl::ATTACHMENT),
         ];
-        let flags_width: usize = flags.iter().map(|span| span.content.width()).sum();
+        let flags_width: usize = spans.iter().map(|span| span.text.width()).sum();
         let date = envelope.date.map_or_else(String::new, |date| {
-            short_date(&date.to_zoned(TimeZone::system()), now)
+            wcgw_kit::when::short(&date.to_zoned(TimeZone::system()), &look.now)
         });
         let who = if self.sent {
             envelope
@@ -775,50 +600,63 @@ impl Index {
                 .map_or_else(String::new, |from| from.short().to_owned())
         };
         let who_width = (width / 4).clamp(12, 28);
-        let mut spans = flags;
-        spans.push(Span::styled(format!("{date:>6} "), theme.dim));
+        spans.push(Span::new(format!("{date:>8} "), hl::DIM));
         let who = truncate(&who, who_width);
         let who_padding = who_width.saturating_sub(who.width());
-        spans.push(Span::styled(who, text));
-        spans.push(Span::raw(" ".repeat(who_padding + 2)));
-        let mut room = width.saturating_sub(flags_width + 7 + who_width + 2);
-        if row.repeated {
+        spans.push(Span::new(who, text));
+        spans.push(Span::new(" ".repeat(who_padding + 2), Group::NORMAL));
+        let mut room = width.saturating_sub(flags_width + 9 + who_width + 2);
+        if row.repeated && folded.is_none() {
             // mutt's arrow, for the subject left out.
             let arrow = truncate(&format!("{}>", row.tree), room);
             room = room.saturating_sub(arrow.width() + 1);
-            spans.push(Span::styled(arrow, theme.dim));
-            spans.push(Span::raw(" "));
-            spans.extend(labels(&envelope.labels, room, theme));
-            return Line::from(spans);
-        }
-        if !row.tree.is_empty() {
-            let tree = truncate(&row.tree, room);
-            room = room.saturating_sub(tree.width() + 1);
-            spans.push(Span::styled(tree, theme.dim));
-            spans.push(Span::raw(" "));
-        }
-        if row.folded > 0 {
-            let count = format!("({}) ", row.folded + 1);
-            room = room.saturating_sub(count.width());
-            spans.push(Span::styled(count, theme.accent));
-        }
-        // As Gmail shows them: before the subject, but leaving it most of the room.
-        let labels = labels(&envelope.labels, room / 2, theme);
-        room = room.saturating_sub(labels.iter().map(|span| span.content.width()).sum());
-        spans.extend(labels);
-        let subject = if envelope.subject.is_empty() {
-            "(no subject)"
+            spans.push(Span::new(arrow, hl::DIM));
+            spans.push(Span::new(" ", Group::NORMAL));
+            spans.extend(labels(&envelope.labels, room));
         } else {
-            &envelope.subject
-        };
-        spans.push(Span::styled(truncate(subject, room), text));
-        Line::from(spans)
+            if !row.tree.is_empty() {
+                let tree = truncate(&row.tree, room);
+                room = room.saturating_sub(tree.width() + 1);
+                spans.push(Span::new(tree, hl::DIM));
+                spans.push(Span::new(" ", Group::NORMAL));
+            }
+            if let Some((count, _)) = folded {
+                let count = format!("({count}) ");
+                room = room.saturating_sub(count.width());
+                spans.push(Span::new(count, hl::ACCENT));
+            }
+            // As Gmail shows them: before the subject, but leaving it most of the room.
+            let labels = labels(&envelope.labels, room / 2);
+            room = room.saturating_sub(labels.iter().map(|span| span.text.width()).sum());
+            spans.extend(labels);
+            let subject = if envelope.subject.is_empty() {
+                "(no subject)"
+            } else {
+                &envelope.subject
+            };
+            spans.push(Span::new(truncate(subject, room), text));
+        }
+        // To the window's edge, as wide as the window.
+        let used: usize = spans.iter().map(|span| span.text.width()).sum();
+        if used < width {
+            spans.push(Span::new(" ".repeat(width - used), Group::NORMAL));
+        }
+        Line::Text(
+            spans
+                .into_iter()
+                .map(|span| span.with_target(target.clone()))
+                .collect(),
+        )
     }
 }
 
-/// The Labels named `labels`, as many as fit in `room` cells, each padded in `theme`'s label style and a space apart
-/// from what follows.
-fn labels(labels: &[String], room: usize, theme: &Theme) -> Vec<Span<'static>> {
+/// The key of the block of the thread Message `head` heads.
+fn block_key(head: u32) -> String {
+    format!("t{head}")
+}
+
+/// The Labels named `labels`, as many as fit in `room` cells, each padded and a space apart from what follows.
+fn labels(labels: &[String], room: usize) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut left = room;
     for name in labels {
@@ -828,8 +666,8 @@ fn labels(labels: &[String], room: usize, theme: &Theme) -> Vec<Span<'static>> {
             break;
         }
         left -= width;
-        spans.push(Span::styled(label, theme.label));
-        spans.push(Span::raw(" "));
+        spans.push(Span::new(label, hl::LABEL));
+        spans.push(Span::new(" ", Group::NORMAL));
     }
     spans
 }
@@ -850,22 +688,21 @@ fn base_subject(subject: &str) -> &str {
     }
 }
 
-/// What drawing the Index takes.
-pub(crate) struct Draw<'a> {
-    pub(crate) theme: &'a Theme,
-    pub(crate) icons: &'a Icons,
-    pub(crate) focused: bool,
-}
-
-/// A date as short as says it: the time today, the day this year, the month before.
-fn short_date(date: &Zoned, now: &Zoned) -> String {
-    if date.date() == now.date() {
-        date.strftime("%H:%M").to_string()
-    } else if date.year() == now.year() {
-        date.strftime("%b %d").to_string()
-    } else {
-        date.strftime("%Y-%m").to_string()
+/// `text` cut to `width` cells, with an ellipsis if it's cut.
+pub(crate) fn truncate(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_owned();
     }
+    let mut cut = String::new();
+    for character in text.chars() {
+        if cut.width() + unicode_width::UnicodeWidthChar::width(character).unwrap_or(0) + 1 > width
+        {
+            break;
+        }
+        cut.push(character);
+    }
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]
@@ -922,36 +759,29 @@ mod tests {
         )
     }
 
+    fn rows(index: &Index) -> Vec<(u32, String)> {
+        index
+            .rows
+            .iter()
+            .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
+            .collect()
+    }
+
     #[test]
-    fn newest_first_and_the_cursor_stays_on_its_message() {
+    fn newest_first_and_next_in_order() {
         let mut index = index(false);
         index.set(
             vec![envelope(1, 1, "old", "Ann"), envelope(2, 2, "new", "Bob")],
             2,
         );
-        assert_eq!(index.current().unwrap().subject, "new");
-        index.move_by(1);
-        assert_eq!(index.current().unwrap().subject, "old");
-        index.set(
-            vec![
-                envelope(1, 1, "old", "Ann"),
-                envelope(2, 2, "new", "Bob"),
-                envelope(3, 3, "newer", "Cy"),
-            ],
-            3,
-        );
-        assert_eq!(
-            index.current().unwrap().subject,
-            "old",
-            "still on it, a row further down"
-        );
-        assert!(!index.step(true), "nothing older");
-        assert!(index.step(false));
-        assert_eq!(index.current().unwrap().subject, "new");
+        assert_eq!(index.uids(), [2, 1]);
+        assert_eq!(index.next(2, true), Some(1));
+        assert_eq!(index.next(1, true), None, "nothing older");
+        assert_eq!(index.next(1, false), Some(2));
     }
 
     #[test]
-    fn threads_fold_into_their_heads() {
+    fn threads_are_blocks_of_their_rows_folded_into_their_heads() {
         let mut index = index(true);
         index.set(
             vec![
@@ -962,16 +792,9 @@ mod tests {
             ],
             4,
         );
-        let shown = |index: &Index| -> Vec<(u32, String)> {
-            index
-                .rows
-                .iter()
-                .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
-                .collect()
-        };
         // The Lunch thread's latest reply (day 4) is newer than the Report (day 3).
         assert_eq!(
-            shown(&index),
+            rows(&index),
             [
                 (1, String::new()),
                 (2, "└─".into()),
@@ -979,194 +802,41 @@ mod tests {
                 (4, String::new())
             ]
         );
+        assert_eq!(index.thread_of(2), [1, 2, 3]);
+        assert_eq!(index.place_of(3), Some(("t1".to_owned(), 2)));
+        assert_eq!(index.place_of(4), Some(("t4".to_owned(), 0)));
+        let look = Look {
+            unread: "● ".into(),
+            flagged: "★ ".into(),
+            answered: "↩ ".into(),
+            attachment: "+ ".into(),
+            now: Zoned::now(),
+        };
+        let blocks = index.blocks(100, &look);
+        assert_eq!(blocks.len(), 2, "two threads");
+        assert_eq!(blocks[0].1.lines.len(), 3);
+        assert_eq!(blocks[0].1.folds[0].lines, 0..3);
+        let Line::Text(folded) = &blocks[0].1.folds[0].summary else {
+            panic!("a row of text");
+        };
+        let folded: String = folded.iter().map(|span| span.text.as_str()).collect();
+        assert!(folded.contains("(3) Lunch"), "{folded:?}");
+        assert!(folded.contains('●'), "Unread replies: {folded:?}");
+        assert!(blocks[1].1.folds.is_empty(), "one Message: no fold");
 
-        // Every row says its subject, replies' too, the same as their thread's head's though it is.
-        let theme = crate::theme::Theme::named("terminal", &Icons::PLAIN).unwrap();
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 4));
-        index.draw(
-            buffer.area,
-            &mut buffer,
-            &Draw {
-                theme: &theme,
-                icons: &Icons::PLAIN,
-                focused: true,
-            },
-        );
-        let row = |y: u16| -> String { (0..100).map(|x| buffer[(x, y)].symbol()).collect() };
-        assert!(row(0).trim_end().ends_with(" Lunch"), "{:?}", row(0));
-        assert!(row(1).trim_end().ends_with("└─ Re: Lunch"), "{:?}", row(1));
-        assert!(
-            row(2).trim_end().ends_with("  └─ Re: Lunch"),
-            "{:?}",
-            row(2)
-        );
-
-        // Hidden as mutt hides them, a reply's subject that's what it replies to's shows as an arrow.
-        let mut hiding = Index::new(0, "INBOX".into(), "Inbox".into(), None, true)
-            .hiding_repeated_subjects(true);
-        hiding.set(
-            vec![
-                envelope(1, 1, "[PATCH 0/2] fix", "Ann"),
-                Envelope {
-                    subject: "[PATCH 1/2] first".into(),
-                    ..reply(2, 2, &[1])
-                },
-                Envelope {
-                    subject: "Re: [PATCH 1/2] first".into(),
-                    ..reply(3, 3, &[1, 2])
-                },
-                Envelope {
-                    subject: "RE: [patch 1/2] FIRST".into(),
-                    ..reply(4, 4, &[1, 2, 3])
-                },
-            ],
-            4,
-        );
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 4));
-        hiding.draw(
-            buffer.area,
-            &mut buffer,
-            &Draw {
-                theme: &theme,
-                icons: &Icons::PLAIN,
-                focused: true,
-            },
-        );
-        let row = |y: u16| -> String { (0..100).map(|x| buffer[(x, y)].symbol()).collect() };
-        assert!(
-            row(1).trim_end().ends_with("└─ [PATCH 1/2] first"),
-            "not its parent's: {:?}",
-            row(1)
-        );
-        assert!(
-            row(2).trim_end().ends_with("  └─>"),
-            "its parent's: {:?}",
-            row(2)
-        );
-        assert!(
-            row(3).trim_end().ends_with("    └─>"),
-            "its parent's, case aside: {:?}",
-            row(3)
-        );
-        index.move_by(2);
-        index.toggle_fold();
-        assert_eq!(shown(&index).len(), 2);
-        assert_eq!(
-            index.current().unwrap().uid,
-            1,
-            "the cursor goes to the thread's head"
-        );
-        assert_eq!(index.rows[0].folded, 2);
-        assert!(index.rows[0].folded_unread);
-        assert_eq!(
-            index.targets(),
-            [1, 2, 3],
-            "what's done to a folded thread is done to it all"
-        );
-        index.fold_all(false);
-        assert_eq!(shown(&index).len(), 4);
-        assert_eq!(index.targets(), [1]);
-        index.toggle_selected();
-        index.toggle_selected();
-        assert_eq!(
-            (index.targets(), index.current().unwrap().uid),
-            (vec![1, 2], 3)
-        );
-        index.remove(&[2]);
-        assert_eq!(index.targets(), [1], "what's gone isn't selected");
-        assert!(index.clear_selected());
-
-        let at = index.current().unwrap().uid;
         assert!(!index.toggle_threads());
         assert_eq!(
-            index.current().unwrap().uid,
-            at,
-            "the cursor stays on its Message"
-        );
-        assert_eq!(
-            index
-                .rows
-                .iter()
-                .map(|row| row.tree.as_str())
+            rows(&index)
+                .into_iter()
+                .map(|(_, tree)| tree)
                 .collect::<String>(),
             ""
         );
     }
 
     #[test]
-    fn around_the_cursor_it_a_third_of_the_way_down() {
-        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None, false);
-        let day = |uid: u32| i8::try_from(uid).unwrap();
-        index.set(
-            (1..=10)
-                .map(|uid| envelope(uid, day(uid), &format!("m{uid}"), "Ann"))
-                .collect(),
-            10,
-        );
-        let theme = crate::theme::Theme::named("terminal", &Icons::PLAIN).unwrap();
-        // The subjects of the 6 rows drawn, newest first: m10 the first row.
-        let drawn = |index: &mut Index| -> Vec<String> {
-            let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
-            index.draw_around_cursor(
-                buffer.area,
-                &mut buffer,
-                &Draw {
-                    theme: &theme,
-                    icons: &Icons::PLAIN,
-                    focused: false,
-                },
-            );
-            (0..6)
-                .map(|y| {
-                    let row: String = (0..60).map(|x| buffer[(x, y)].symbol()).collect();
-                    row.split_whitespace().last().unwrap_or_default().to_owned()
-                })
-                .collect()
-        };
-        assert_eq!(
-            drawn(&mut index),
-            ["m10", "m9", "m8", "m7", "m6", "m5"],
-            "near the top"
-        );
-        index.move_by(5);
-        assert_eq!(
-            drawn(&mut index),
-            ["m7", "m6", "m5", "m4", "m3", "m2"],
-            "m5, the cursor's, on the third row"
-        );
-        assert!(index.click_around_cursor(0));
-        assert_eq!(
-            index.current().map(|e| e.uid),
-            Some(7),
-            "the row drawn first"
-        );
-        index.move_by(6);
-        assert_eq!(
-            drawn(&mut index),
-            ["m6", "m5", "m4", "m3", "m2", "m1"],
-            "near the end"
-        );
-
-        // The Index itself, drawn whole again, is scrolled as it was, though it was drawn from m9 around m7.
-        index.move_by(-6);
-        assert_eq!(drawn(&mut index)[0], "m9");
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
-        index.draw(
-            buffer.area,
-            &mut buffer,
-            &Draw {
-                theme: &theme,
-                icons: &Icons::PLAIN,
-                focused: true,
-            },
-        );
-        let first: String = (0..60).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(first.trim_end().ends_with("m10"), "{first:?}");
-    }
-
-    #[test]
-    fn selecting_what_a_filter_picks_folded_or_not() {
-        let mut index = Index::new(0, "INBOX".into(), "Inbox".into(), None, true);
+    fn selecting_what_a_filter_picks() {
+        let mut index = index(true);
         index.set(
             vec![
                 envelope(1, 1, "Lunch", "Ann"),
@@ -1175,30 +845,24 @@ mod tests {
             ],
             3,
         );
-        index.fold_all(true);
-        assert_eq!(
-            index.select_where(true, |e| e.uid != 1),
-            (2, 2),
-            "the folded reply too"
-        );
-        assert_eq!(index.targets(), [2, 3]);
+        assert_eq!(index.select_where(true, |e| e.uid != 1), (2, 2));
+        assert_eq!(index.selection(), [2, 3]);
         assert_eq!(
             index.select_where(true, |_| true),
             (3, 1),
             "two were already"
         );
         assert_eq!(index.select_where(false, |e| e.uid == 3), (1, 1));
-        assert_eq!(index.targets(), [1, 2]);
-        assert_eq!(
-            index.select_where(false, |e| e.uid == 3),
-            (1, 0),
-            "not selected now"
-        );
-        assert_eq!(index.select_where(true, |_| false), (0, 0));
+        assert_eq!(index.selection(), [1, 2]);
+        index.toggle_selected(&[1, 2]);
+        assert_eq!(index.selected(), 0);
+        index.toggle_selected(&[3]);
+        index.remove(&[3]);
+        assert_eq!(index.selected(), 0, "what's gone isn't selected");
     }
 
     #[test]
-    fn limited_only_what_the_filter_picks_shows_in_threads_of_its_own() {
+    fn filtered_only_what_the_filter_picks_shows_in_threads_of_its_own() {
         let mut index = index(true);
         index.set(
             vec![
@@ -1209,29 +873,21 @@ mod tests {
             ],
             4,
         );
-        let rows = |index: &Index| -> Vec<(u32, String)> {
-            index
-                .rows
-                .iter()
-                .map(|row| (index.envelopes[row.envelope].uid, row.tree.clone()))
-                .collect()
-        };
-        let shown = index.limit(Some(("from:bob".into(), "from:bob".parse().unwrap())));
+        let shown = index.filter(Some(("from:bob".into(), "from:bob".parse().unwrap())));
         assert_eq!(shown, 2);
         assert_eq!(
             rows(&index),
             [(2, String::new()), (3, "└─".to_owned())],
             "Bob's replies, a thread among themselves"
         );
-        assert_eq!(index.limited(), Some("from:bob"));
+        assert_eq!(index.filtered(), Some("from:bob"));
         assert_eq!(
             index.select_where(true, |_| true),
             (2, 2),
             "only what shows"
         );
-        assert_eq!(index.limit(None), 4);
+        assert_eq!(index.filter(None), 4);
         assert_eq!(rows(&index).len(), 4);
-        assert_eq!(index.limited(), None);
     }
 
     #[test]
@@ -1250,54 +906,21 @@ mod tests {
             ],
             4,
         );
-        let uids = |index: &Index| -> Vec<u32> {
-            index
-                .rows
-                .iter()
-                .map(|row| index.envelopes[row.envelope].uid)
-                .collect()
-        };
         index.sort(Some(Sort::Sender), false);
-        assert_eq!(
-            uids(&index),
-            [4, 3, 2, 1],
-            "ann before Bob, whatever the case; ties newest first"
-        );
+        assert_eq!(index.uids(), [4, 3, 2, 1], "ties newest first");
         assert_eq!(index.sorted(), Some("by sender"));
         index.sort(Some(Sort::Subject), false);
-        assert_eq!(uids(&index), [4, 2, 1, 3], "without Re:");
-        index.sort(Some(Sort::Size), false);
-        assert_eq!(uids(&index), [1, 3, 2, 4]);
+        assert_eq!(index.uids(), [4, 2, 1, 3], "without Re:");
         index.sort(Some(Sort::Size), true);
-        assert_eq!(uids(&index), [4, 2, 3, 1]);
+        assert_eq!(index.uids(), [4, 2, 3, 1]);
         assert_eq!(index.sorted(), Some("smallest first"));
         index.sort(Some(Sort::Date), true);
-        assert_eq!(uids(&index), [1, 2, 3, 4], "oldest first");
-        index.sort(Some(Sort::Date), false);
-        assert_eq!(index.sorted(), None, "as listed");
+        assert_eq!(index.uids(), [1, 2, 3, 4], "oldest first");
         index.sort(None, false);
         assert!(index.threaded);
-        assert_eq!(index.sorted(), None);
-    }
-
-    #[test]
-    fn searching_senders_and_subjects() {
-        let mut index = index(false);
-        index.set(
-            vec![
-                envelope(1, 1, "Lunch", "Ann"),
-                envelope(2, 2, "Report", "Bob"),
-                envelope(3, 3, "lunch?", "Cy"),
-            ],
-            3,
-        );
-        index.search_for("LUNCH".into());
-        assert_eq!(index.current().unwrap().uid, 3);
-        index.next_match(true);
-        assert_eq!(index.current().unwrap().uid, 1);
-        assert_eq!(index.search_status(), Some(("LUNCH".into(), Some(2), 2)));
-        index.search_for("bob@".into());
-        assert_eq!(index.current().unwrap().uid, 2);
+        assert_eq!(Sort::named("z"), Ok(Some(Sort::Size)));
+        assert_eq!(Sort::named("threads"), Ok(None));
+        assert!(Sort::named("colour").is_err());
     }
 
     #[test]
@@ -1309,14 +932,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         index.set(page(40), 100);
-        assert!(!index.wants_more(), "the cursor is far from the end");
-        index.bottom();
-        assert!(index.wants_more());
-        assert!(!index.wants_more(), "asked already");
+        assert!(!index.wants_more(false), "the cursor is far from the end");
+        assert!(index.wants_more(true));
+        assert!(!index.wants_more(true), "asked already");
         index.set(page(80), 100);
-        assert!(index.wants_more(), "more came: ask again");
+        assert!(index.wants_more(true), "more came: ask again");
         index.set(page(80), 100);
-        assert!(!index.wants_more(), "none came: there are none");
+        assert!(!index.wants_more(true), "none came: there are none");
     }
 
     #[test]
@@ -1326,19 +948,8 @@ mod tests {
     }
 
     #[test]
-    fn short_dates() {
-        let now = date(2026, 11, 2)
-            .at(15, 0, 0, 0)
-            .to_zoned(TimeZone::UTC)
-            .unwrap();
-        let at = |y, m, d| {
-            date(y, m, d)
-                .at(9, 5, 0, 0)
-                .to_zoned(TimeZone::UTC)
-                .unwrap()
-        };
-        assert_eq!(short_date(&at(2026, 11, 2), &now), "09:05");
-        assert_eq!(short_date(&at(2026, 3, 14), &now), "Mar 14");
-        assert_eq!(short_date(&at(2025, 12, 31), &now), "2025-12");
+    fn truncating_says_it_cut() {
+        assert_eq!(truncate("Lunch on Thursday", 8), "Lunch o…");
+        assert_eq!(truncate("Lunch", 8), "Lunch");
     }
 }

@@ -1,37 +1,38 @@
 //! muttrs: a terminal mail client after mutt and vim, that renders HTML mail, images included.
 
 mod addresses;
+mod app;
 mod assessment;
 mod compose;
 mod config;
 mod filter;
 mod heatmap;
-mod history;
+mod hl;
 mod icons;
 mod index;
-mod keys;
 mod login;
-mod overlay;
+mod net;
 mod pager;
-mod pictures;
 mod remote;
 mod sidebar;
 mod sign_in;
 mod tasks;
-mod theme;
 mod trust;
-mod ui;
 mod xdg;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use muttrs_gfx::{Colors, Protocol, Terminal};
 use muttrs_mail::Message;
+use muttrs_mail::client::{Client, Connection};
+use wcgw_kit::runtime::{self, Inbox};
 
-use crate::config::{Auto, Config, Images};
-use crate::icons::Icons;
-use crate::theme::Theme;
+use crate::addresses::AddressBook;
+use crate::app::{Msg, Muttrs};
+use crate::config::Config;
+use crate::net::Net;
+use crate::sidebar::AccountState;
 
 const USAGE: &str = "\
 muttrs, a terminal mail client
@@ -118,73 +119,117 @@ fn log() {
         .try_init();
 }
 
-/// The UI's setup, from the configuration and the terminal.
-fn setup() -> anyhow::Result<ui::Setup> {
-    let config = Config::load()?;
-    let terminal = Terminal::detect();
-    let nerd = match config.icons {
-        Auto::On => true,
-        Auto::Off => false,
-        Auto::Detect => terminal.has_nerd_font_symbols,
+/// voight, started on the device the configuration says, if it's on, telling `inbox` what it says: before the
+/// terminal UI takes over the screen, as the first time, it downloads its model, showing its progress.
+#[cfg(feature = "voight")]
+async fn voight(
+    config: &Config,
+    inbox: &Inbox<Msg>,
+) -> anyhow::Result<Option<assessment::Assessor>> {
+    let Some(device) = config.voight.device() else {
+        return Ok(None);
     };
-    let icons = if nerd { Icons::NERD } else { Icons::PLAIN };
-    let theme = Theme::load(&config.theme, &icons, xdg::config_dir().as_deref())?;
-    let protocol = match config.images {
-        Images::Auto => Some(terminal.protocol),
-        Images::Kitty => Some(Protocol::Kitty),
-        Images::Blocks => Some(match terminal.protocol {
-            Protocol::HalfBlocks(colors) => Protocol::HalfBlocks(colors),
-            Protocol::Kitty => Protocol::HalfBlocks(Colors::TrueColor),
-        }),
-        Images::Off => None,
-    };
-    tracing::info!(?terminal, ?protocol, "starting");
-    Ok(ui::Setup {
-        config,
-        theme,
-        icons,
-        protocol,
-        assessor: None,
+    let inbox = inbox.clone();
+    let started = tokio::task::spawn_blocking(move || {
+        assessment::start(device, move |said| {
+            let _ = inbox.send(Msg::Voight(said));
+        })
     })
+    .await
+    .context("fetching voight's model stopped")?;
+    Ok(Some(started.context(
+        "couldn't fetch voight's model; set voight = \"off\" in the configuration to start without it",
+    )?))
 }
 
-/// voight, started on the device the configuration says, if it's on: before the terminal UI takes over the screen,
-/// as the first time, it downloads its model, showing its progress.
-// Built without voight, there's nothing to wait for.
+/// What carries out muttrs' effects, with voight if it's on; and whether it is.
 #[cfg_attr(not(feature = "voight"), allow(clippy::unused_async))]
-async fn voight(config: &Config) -> anyhow::Result<Option<assessment::Assessor>> {
-    match config.voight.device() {
-        #[cfg(feature = "voight")]
-        Some(device) => Ok(Some(assessment::Assessor::start(device).await.context(
-            "couldn't fetch voight's model; set voight = \"off\" in the configuration to start without it",
-        )?)),
-        #[cfg(not(feature = "voight"))]
-        Some(_) => unreachable!("the configuration can't turn voight on in a muttrs built without it"),
-        None => Ok(None),
+async fn net(
+    config: &Config,
+    inbox: &Inbox<Msg>,
+    pictures: &pager::Pictures,
+) -> anyhow::Result<(Net, bool)> {
+    let net = Net::new(inbox.clone(), config.accounts.clone(), Arc::clone(pictures));
+    #[cfg(feature = "voight")]
+    {
+        let assessor = voight(config, inbox).await?;
+        let on = assessor.is_some();
+        Ok((net.with_assessor(assessor), on))
+    }
+    #[cfg(not(feature = "voight"))]
+    {
+        Ok((net, false))
     }
 }
 
 async fn mail() -> anyhow::Result<()> {
-    let mut setup = setup()?;
-    if setup.config.accounts.is_empty() {
+    let config = Config::load()?;
+    if config.accounts.is_empty() {
         bail!(
             "there are no accounts in {}: add an [[account]] (see the README), or `muttrs view FILE` reads a file",
             Config::path().map_or_else(|| "config.toml".into(), |path| path.display().to_string())
         );
     }
-    let accounts = setup
-        .config
+    let accounts = config
         .accounts
         .iter()
         .cloned()
         .map(muttrs_mail::AccountConfig::resolve)
         .collect::<Result<Vec<_>, _>>()?;
-    setup.assessor = voight(&setup.config).await?;
-    Box::pin(ui::mail(setup, accounts)).await
+    let (inbox, mailbox) = runtime::channel();
+    let pictures = pager::Pictures::default();
+    let (net, voight) = net(&config, &inbox, &pictures).await?;
+    let mut states = Vec::new();
+    for (index, account) in accounts.into_iter().enumerate() {
+        let name = account.name.clone();
+        // The address book's contacts, aside, once at the start.
+        if let Some(book) = account.carddav.clone() {
+            let (inbox, name) = (inbox.clone(), name.clone());
+            tokio::spawn(async move {
+                let contacts = muttrs_mail::carddav::contacts(&book, &name)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = inbox.send(Msg::Contacts(name, contacts));
+            });
+        }
+        let sender_of_drafts = account.sender();
+        let cache = muttrs_mail::cache::Cache::new(
+            xdg::cache_dir().map(|cache| cache.join("accounts").join(&name)),
+        );
+        let told = inbox.clone();
+        let client = Client::spawn(
+            account,
+            cache.clone(),
+            Arc::new(move |update| {
+                let _ = told.send(Msg::Account(index, update));
+            }),
+        )
+        .with_context(|| format!("setting up account {name:?}"))?;
+        states.push(AccountState {
+            name,
+            client,
+            connection: Connection::Connecting,
+            // As last listed, until the server lists them.
+            mailboxes: cache.mailboxes().unwrap_or_default(),
+            labels: Vec::new(),
+            counts: std::collections::HashMap::new(),
+            sender: sender_of_drafts,
+            cache,
+            tasks: crate::tasks::Tasks::default(),
+        });
+    }
+    let addresses = AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")));
+    let (muttrs, kit) = Muttrs::mail(config, states, addresses, voight, pictures);
+    tracing::info!("starting");
+    let (mut muttrs, _) = runtime::run_returning("muttrs", muttrs, kit, net, (inbox, mailbox))
+        .await
+        .context("running the terminal")?;
+    muttrs.save();
+    Ok(())
 }
 
 async fn view(path: &str) -> anyhow::Result<()> {
-    let mut setup = setup()?;
+    let config = Config::load()?;
     let bytes = tokio::fs::read(path)
         .await
         .with_context(|| format!("reading {path}"))?;
@@ -192,6 +237,11 @@ async fn view(path: &str) -> anyhow::Result<()> {
         bail!("{path} is empty");
     }
     let message = Message::parse(bytes).with_context(|| format!("reading {path}"))?;
-    setup.assessor = voight(&setup.config).await?;
-    Box::pin(ui::view(setup, message)).await
+    let (inbox, mailbox) = runtime::channel();
+    let pictures = pager::Pictures::default();
+    let (net, voight) = net(&config, &inbox, &pictures).await?;
+    let (muttrs, kit) = Muttrs::view(config, message, voight, pictures);
+    runtime::run("muttrs", muttrs, kit, net, (inbox, mailbox))
+        .await
+        .context("running the terminal")
 }

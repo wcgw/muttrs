@@ -83,13 +83,19 @@ pub(crate) async fn login(name: &str) -> anyhow::Result<()> {
 
 /// The Account called `name` in `config`, resolved.
 pub(crate) fn account(config: &Config, name: &str) -> anyhow::Result<Account> {
-    let names: Vec<&str> = config
-        .accounts
+    resolve(&config.accounts, name)
+}
+
+/// The Account called `name` of `accounts`, resolved.
+pub(crate) fn resolve(
+    accounts: &[muttrs_mail::AccountConfig],
+    name: &str,
+) -> anyhow::Result<Account> {
+    let names: Vec<&str> = accounts
         .iter()
         .map(|account| account.name.as_str())
         .collect();
-    Ok(config
-        .accounts
+    Ok(accounts
         .iter()
         .find(|account| account.name == name)
         .ok_or_else(|| match names.as_slice() {
