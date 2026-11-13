@@ -368,26 +368,11 @@ pub(super) fn add(kit: &mut Kit) {
         })
         .help("delete a Mailbox, and its Messages")
         .complete(mailboxes),
-        Command::new("refresh", 3, |muttrs: &mut Muttrs, kit, line| {
-            if line.bang {
-                muttrs.resync(kit)?;
-            } else {
-                muttrs.refresh();
-            }
-            Ok(Vec::new())
+        // Asking for what's new is the kit's `<C-l>` (`:edit!`), as in every app.
+        Command::new("sync", 2, |muttrs: &mut Muttrs, kit, _| {
+            muttrs.resync(kit).map(|()| Vec::new())
         })
-        .bang()
-        .help("ask for what's new; ! lists the open Mailbox anew"),
-        Command::new("sync", 2, |muttrs: &mut Muttrs, kit, line| {
-            if line.bang {
-                muttrs.resync(kit)?;
-            } else {
-                muttrs.refresh();
-            }
-            Ok(Vec::new())
-        })
-        .bang()
-        .help("ask for what's new; ! lists the open Mailbox anew"),
+        .help("forget what's kept of the open Mailbox, and list it anew"),
         Command::new("login", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs.login(kit, line.args)
         })

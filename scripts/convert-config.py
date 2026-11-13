@@ -32,7 +32,7 @@ COMMANDS = {
     "e": "resume",
     "S": "grep",
     "T": "threads",
-    "$": "refresh",
+    "$": "edit!",
     "?": "help",
     "q": "exit",
     "\\": "sidebar",

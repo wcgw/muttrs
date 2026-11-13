@@ -119,7 +119,7 @@ after a moment. `:help` (or `F1`) lists the keys and the commands.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `:q` closes a window · `:qa`, or `q` where there's nothing to close (the Pager, the Draft, what a search found), quits once what's asked is done; `:qa!` quits now · `<C-l>` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` `:shell CMD` run a command · `\` `:sidebar` go to the sidebar, hide it from within it, or bring it back · `:cd NAME` (or `:e NAME`) open a Mailbox · `:create NAME` `:rename NAME` `:delmailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser |
+| Anywhere | `:q` closes a window · `:qa`, or `q` where there's nothing to close (the Pager, the Draft, what a search found), quits once what's asked is done; `:qa!` quits now · `<C-l>` `:e!` ask for what's new · `:sync` list the open Mailbox anew · `!` `:shell CMD` run a command · `\` `:sidebar` go to the sidebar, hide it from within it, or bring it back · `:cd NAME` (or `:e NAME`) open a Mailbox · `:create NAME` `:rename NAME` `:delmailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `<CR>` open (on an Account, ask what's new) · `zc` `zo` fold an Account, or a Mailbox holding others · `<C-w>l` the Index |
 | Index | `<CR>` (or a double click) read · `/` `?` `n` `N` search what's listed · `S` `:grep` search the server · `od` `of` `os` `oz` `ot` sort by date, sender, subject, size, or in threads; `O` the other way · `za` `zM` `zR` fold the thread, all, none · `x` select, and down · `A` all, or none · `<Esc>` unselect all, or else list all · `s` flag · `U` Unread or read · `<Space>l` Labels · `dd` delete (to Trash) · `a` archive · `<Space>m` move to a Mailbox · `u` undo that · `<Space>j` `<Space>J` `:junk` `:notjunk` to Junk, or out of it · `\|` pipe to a command · `K` the Envelope · `<C-w>h` the sidebar |
 | Pager | the motions scroll · `<C-n>` `<C-p>` the next Message, the previous · `<Space>b` `:body` HTML or plain text · `K` every header, as written · `:raw` the Message as it came · `I` `:remote` load Remote Content · `<Space>h` voight's Heatmap · `<CR>` on a Link, `gx` open it · `gy` copy it · `<Space>o` Links (`<C-y>` copies one) · `<Space>a` Attachments (`<C-s>` saves one) · `s` `U` `<Space>l` `dd` `a` `<Space>m` `u` `\|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
@@ -313,8 +313,8 @@ muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.ca
 you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline. What's
 listed is brought up to date by what changed (Messages new or gone, Flags, Labels), as a Message's headers never
 change: where the server keeps mod-sequences (CONDSTORE, as Dovecot and Gmail do), only the Flags of the Messages
-that changed since are asked for, else every listed one's; should it be kept wrong, `:sync!` forgets what's kept of the open Mailbox and lists it anew, as when it was
-first opened.
+that changed since are asked for, else every listed one's; should it be kept wrong, `:sync` forgets what's kept of the open Mailbox and lists it anew,
+as when it was first opened.
 
 Logs go to `~/.local/state/muttrs/muttrs.log` (or under `$XDG_STATE_HOME`); `MUTTRS_LOG=debug` says more.
 
