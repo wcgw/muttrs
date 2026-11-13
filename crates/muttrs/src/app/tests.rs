@@ -637,6 +637,17 @@ fn filters_select_and_limit_and_complete() {
 }
 
 #[test]
+fn ctrl_l_asks_for_what_s_new_and_sync_lists_the_mailbox_anew() {
+    let mut mail = Mail::new(100, 30);
+    mail.two();
+    let _ = mail.requests();
+    mail.press("<C-l>");
+    assert_eq!(mail.requests(), [Request::Refresh]);
+    mail.press(":sync<CR>");
+    assert_eq!(mail.requests(), [Request::Resync("INBOX".to_owned())]);
+}
+
+#[test]
 fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_limit() {
     let mut mail = Mail::new(100, 30);
     mail.two();
