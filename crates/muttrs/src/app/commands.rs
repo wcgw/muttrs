@@ -46,7 +46,7 @@ const KEYS: [(&str, &str, &str, Topic); 40] = [
     ("<C-n>", "next", "the next Message, older", MAIL),
     ("<C-p>", "previous", "the previous Message, newer", MAIL),
     ("I", "remote", "load Remote Content", MAIL),
-    ("<leader>b", "body", "HTML or plain text", MAIL),
+    ("<leader>t", "body", "HTML or plain text", MAIL),
     ("s", "flag", "flag, or not", MAIL),
     ("U", "unread", "Unread, or read", MAIL),
     ("dd", "delete", "delete, to Trash", MAIL),

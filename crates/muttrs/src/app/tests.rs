@@ -312,6 +312,37 @@ fn leader_ff_finds_a_mailbox_to_open_as_every_app_finds_its_own() {
 }
 
 #[test]
+fn leader_bd_closes_a_mailbox_and_opening_it_again_lists_it_anew_but_an_inbox_stays() {
+    let mut mail = Mail::new(100, 20);
+    mail.press(":e Archive<CR>");
+    assert!(mail.rows()[0].contains("Archive"), "{:#?}", mail.rows());
+    let _ = mail.requests();
+
+    mail.press("<Space>bd");
+    assert!(!mail.rows()[0].contains("Archive"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("home › Inbox"), "{}", mail.winbar());
+
+    mail.press(":e Archive<CR>");
+    assert_eq!(
+        mail.requests(),
+        [Request::Open("Archive".to_owned())],
+        "anew"
+    );
+    assert!(
+        mail.rows()[0].contains("Archive"),
+        "listed again: {:#?}",
+        mail.rows()
+    );
+
+    mail.press(":bd Inbox<CR>");
+    assert!(
+        mail.cmdline().contains("An Inbox stays"),
+        "{}",
+        mail.cmdline()
+    );
+}
+
+#[test]
 fn opening_a_mailbox_from_the_sidebar_lists_its_index_in_the_main_window() {
     let mut mail = Mail::new(100, 20);
     assert!(mail.requests().contains(&Request::Open("INBOX".to_owned())));
@@ -447,7 +478,7 @@ fn an_html_message_opens_in_the_pager_with_its_picture_asked_for() {
             .contains_key("muttrs:1/0")
     );
 
-    mail.press("<Space>b");
+    mail.press("<Space>t");
     assert!(mail.statusline().contains("Plain"), "{}", mail.statusline());
     assert!(line_with(&mail.rows(), "Hello there, in plain text.").is_some());
     mail.press(":raw<CR>");
