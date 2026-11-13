@@ -16,11 +16,14 @@ use crate::xdg;
 // Each bool is a setting of its own, not a state machine folded into bools.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Config {
-    /// The theme: `tokyonight-moon`, `terminal`, or a theme of the user's in `themes/NAME.toml`.
-    pub(crate) theme: String,
+    /// The theme, as muttrs had them before wcgw-kit: `tokyonight-moon`, or `terminal`, the kit's `default`
+    /// colorscheme now. Read to start with that colorscheme; `:colorscheme` in `init.vim` says it now.
+    pub(crate) theme: Option<String>,
     /// Whether to draw Nerd Font icons: `true`, `false`, or `"auto"` for terminals that have the symbols built in.
+    /// Read to start with `:set icons=` as it says; `init.vim` says it now.
     pub(crate) icons: Auto,
-    /// How to draw Pictures: `"auto"`, `"kitty"`, `"blocks"`, or `"off"`.
+    /// How to draw Pictures: `"auto"`, `"kitty"`, `"blocks"`, or `"off"`. Read to start with `:set graphics=` as it
+    /// says; `init.vim` says it now.
     pub(crate) images: Images,
     /// Whether to load Remote Content without being asked. Loading it tells senders their Message was read.
     pub(crate) load_remote_content: bool,
@@ -41,7 +44,7 @@ pub(crate) struct Config {
     pub(crate) pixel_ratio: Option<f32>,
     /// Where Attachments are saved; `~/Downloads` by default.
     pub(crate) download_dir: Option<String>,
-    /// The editor Drafts are written in; `$VISUAL`, `$EDITOR` or `vi` by default.
+    /// The editor Drafts were written in. No longer read: the kit opens `$EDITOR`, else `$VISUAL`.
     pub(crate) editor: Option<String>,
     /// Whether the Index shows Messages in threads, at first; `T` switches.
     pub(crate) threads: bool,
@@ -49,6 +52,7 @@ pub(crate) struct Config {
     /// aside), as mutt's `hide_thread_subject` does.
     pub(crate) hide_thread_subjects: bool,
     /// Whether muttrs takes the mouse: its wheel scrolls, its clicks choose. Terminals then select text with Shift.
+    /// Read to start with `:set mouse=` as it says; `init.vim` says it now.
     pub(crate) mouse: bool,
     /// Where voight assesses the Pager's prose: `"cpu"` (the default, if muttrs was built with voight), `"metal"`,
     /// `"cuda"` or `"wgpu"` in a muttrs built for them, or `"off"`.
@@ -56,9 +60,9 @@ pub(crate) struct Config {
     /// A command that finds addresses to complete with, as mutt's `query_command` (`khard email --parsable %s`,
     /// `abook --mutt-query %s`): `%s` is what's typed.
     pub(crate) query_command: Option<String>,
-    /// Keys of one's own, by where they're pressed: `[keys.index]`, `[keys.sidebar]`, `[keys.pager]`,
-    /// `[keys.draft]` (see [`crate::keys`]).
-    pub(crate) keys: crate::keys::Keymap,
+    /// Keys of one's own, as muttrs had them: no longer read, as `:map` in `init.vim` maps keys now
+    /// (`scripts/convert-config.py` writes them so).
+    pub(crate) keys: Option<toml::Table>,
     /// The Accounts, as `[[account]]` tables, in the sidebar's order.
     #[serde(rename = "account")]
     pub(crate) accounts: Vec<AccountConfig>,
@@ -67,7 +71,7 @@ pub(crate) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: "tokyonight-moon".into(),
+            theme: None,
             icons: Auto::Detect,
             images: Images::Auto,
             load_remote_content: false,
@@ -84,7 +88,7 @@ impl Default for Config {
             mouse: true,
             voight: Voight::default(),
             query_command: None,
-            keys: crate::keys::Keymap::default(),
+            keys: None,
             accounts: Vec::new(),
         }
     }
@@ -194,7 +198,6 @@ impl Config {
     fn parse(text: &str, path: &Path) -> anyhow::Result<Self> {
         let config: Self =
             toml::from_str(text).with_context(|| format!("in {}", path.display()))?;
-        // The theme is checked when it's loaded: it may be a file of the user's.
         if config
             .pixel_ratio
             .is_some_and(|ratio| !(0.25..=8.0).contains(&ratio))
@@ -230,6 +233,44 @@ impl Config {
         Ok(config)
     }
 
+    /// The kit's commands that say what the settings it reads no longer do (`theme`, `icons`, `images`, `mouse`),
+    /// to run at startup, before `init.vim`, which has the last say; and what's said of those it ignores.
+    pub(crate) fn kit_settings(&self) -> (Vec<String>, Vec<String>) {
+        let mut lines = Vec::new();
+        let mut ignored = Vec::new();
+        match self.theme.as_deref() {
+            None | Some("tokyonight-moon") => {}
+            Some("terminal") => lines.push("colorscheme default".to_owned()),
+            Some(name) => lines.push(format!("colorscheme {name}")),
+        }
+        match self.icons {
+            Auto::Detect => {}
+            Auto::On => lines.push("set icons=nerd".to_owned()),
+            Auto::Off => lines.push("set icons=plain".to_owned()),
+        }
+        match self.images {
+            Images::Auto => {}
+            Images::Kitty => lines.push("set graphics=kitty".to_owned()),
+            Images::Blocks => lines.push("set graphics=halfblocks".to_owned()),
+            Images::Off => lines.push("set graphics=off".to_owned()),
+        }
+        if !self.mouse {
+            lines.push("set mouse=".to_owned());
+        }
+        if self.editor.is_some() {
+            ignored.push(
+                "editor = … is no longer read: Drafts open in $EDITOR, else $VISUAL".to_owned(),
+            );
+        }
+        if self.keys.is_some() {
+            ignored.push(
+                "[keys.*] are no longer read: :map keys in ~/.config/muttrs/init.vim (scripts/convert-config.py)"
+                    .to_owned(),
+            );
+        }
+        (lines, ignored)
+    }
+
     /// Where Attachments are saved.
     pub(crate) fn download_dir(&self) -> PathBuf {
         self.download_dir.as_deref().map_or_else(
@@ -250,7 +291,7 @@ mod tests {
     #[test]
     fn everything_is_optional() {
         let config = parse("").unwrap();
-        assert_eq!(config.theme, "tokyonight-moon");
+        assert_eq!(config.theme, None);
         assert_eq!(config.icons, Auto::Detect);
         assert!(!config.load_remote_content);
         assert_eq!((config.pager_index_lines, config.pager_read_delay), (0, 1));
@@ -307,6 +348,27 @@ mod tests {
             .collect();
         assert_eq!(names, ["work", "home"]);
         assert!(parse("[[account]]\nname = \"a\"\nemail = \"a@x\"\n[[account]]\nname = \"a\"\nemail = \"b@x\"").is_err());
+    }
+
+    #[test]
+    fn what_the_kit_says_now_is_said_to_it_at_startup() {
+        let config = parse(
+            "theme = \"terminal\"\nicons = false\nimages = \"blocks\"\nmouse = false\neditor = \"nvim\"\n\
+             [keys.index]\nx = \"a\"\n",
+        )
+        .unwrap();
+        let (lines, ignored) = config.kit_settings();
+        assert_eq!(
+            lines,
+            [
+                "colorscheme default",
+                "set icons=plain",
+                "set graphics=halfblocks",
+                "set mouse="
+            ]
+        );
+        assert_eq!(ignored.len(), 2, "{ignored:?}");
+        assert_eq!(parse("").unwrap().kit_settings(), (Vec::new(), Vec::new()));
     }
 
     #[test]

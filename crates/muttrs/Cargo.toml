@@ -10,10 +10,9 @@ publish.workspace = true
 anyhow.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+image.workspace = true
 jiff.workspace = true
-muttrs-gfx.workspace = true
 muttrs-mail.workspace = true
-muttrs-render.workspace = true
 open.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true
@@ -24,8 +23,15 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-width.workspace = true
-base64.workspace = true
 voight = { workspace = true, optional = true }
+# The editor shell every wcgw app shares, and its rich text; a path into the local checkout until wcgw-kit is
+# published (its D18).
+wcgw-kit = { path = "../../../wcgw-kit/crates/wcgw-kit" }
+wcgw-kit-text = { path = "../../../wcgw-kit/crates/wcgw-kit-text" }
+
+[dev-dependencies]
+base64.workspace = true
+wcgw-kit = { path = "../../../wcgw-kit/crates/wcgw-kit", features = ["testing"] }
 
 [features]
 default = ["voight"]

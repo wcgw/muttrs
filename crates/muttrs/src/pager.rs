@@ -1,22 +1,24 @@
-//! The Pager: one Message, its headers then its body as rendered, with its Pictures, scrolled and searched.
+//! The Pager: one Message as a kit buffer, its headers then its body as rendered, with its Pictures, which the kit
+//! draws as their lines come into view.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
 use muttrs_mail::{Address, Message, Part};
-use muttrs_render::{Document, ImageSource, Link, Options, PictureSlot, TextFormat};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use wcgw_kit::BufferId;
+use wcgw_kit::doc::{BlockKey, Content};
+use wcgw_kit_text::{
+    CellSize, Document, ImageSource, Link, Options, Rendering, Styles, TextFormat,
+};
 
+use crate::app::{Line, Opened, Span, Target};
 use crate::assessment::{self, Window};
 use crate::config::Prefer;
-use crate::heatmap;
-use crate::icons::Icons;
-use crate::pictures::{self, Pictures};
-use crate::theme::Theme;
+use crate::heatmap::{self, Heat};
+use crate::hl::{self, Group};
 
 /// Which of a Message's bodies shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,69 +30,62 @@ pub(crate) enum Body {
 }
 
 /// Where an image of the HTML body stands.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Image {
     /// Remote Content, not loaded.
     Blocked,
     Fetching,
-    Ready {
-        bytes: Arc<Vec<u8>>,
-        pixels: (u32, u32),
-    },
+    /// Its bytes are in the [`Pictures`], and it's this many pixels.
+    Ready((u32, u32)),
     /// Not an image muttrs can draw, or not there: a `cid:` naming no Part, a fetch that failed.
     Broken,
 }
 
-impl Image {
-    fn from_bytes(bytes: Vec<u8>) -> Self {
-        match muttrs_gfx::dimensions(&bytes) {
-            Ok(pixels) => Self::Ready {
-                bytes: Arc::new(bytes),
-                pixels,
-            },
-            Err(_) => Self::Broken,
-        }
-    }
+/// The bytes of the Pictures the Pagers show, by the source their lines name: shared with what gets them for the kit.
+pub(crate) type Pictures = Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>;
+
+/// The size, in pixels, of the image in `bytes`, if it's one muttrs draws.
+pub(crate) fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
-/// The Pager's lines for one width: the headers, then the body.
-struct Laid {
-    width: u16,
-    lines: Vec<Line<'static>>,
-    /// Where Pictures go, their lines counted from the top of the headers.
-    slots: Vec<PictureSlot>,
+/// What the Pager draws with: the kit's styles for bodies and the Heatmap, its icons, the cells' size, and the
+/// configuration's say on Pictures.
+pub(crate) struct Look {
+    pub(crate) styles: Styles,
+    pub(crate) heat: Heat,
+    pub(crate) attachment: String,
+    pub(crate) blocked: String,
+    pub(crate) cell: CellSize,
+    pub(crate) pixel_ratio: Option<f32>,
+    pub(crate) max_picture_rows: u16,
+    /// Whether Pictures are drawn at all.
+    pub(crate) pictures: bool,
 }
 
-/// A search of the Pager's lines.
-#[derive(Debug)]
-struct Search {
-    query: String,
-    matches: Vec<Found>,
-    /// The match the search is at.
-    current: usize,
-}
-
-/// Where a search found its text: a line, and the cells from `start` to before `end`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Found {
-    line: usize,
-    start: u16,
-    end: u16,
-}
-
-/// What the Pager asks of what holds it.
+/// What a Pager wants done after a change.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Request {
-    /// Nothing: the Pager handled it, or it wasn't for the Pager.
+    /// Nothing.
     None,
-    /// Fetch these images' Remote Content: their indices and URLs.
-    Fetch(Vec<(usize, String)>),
+    /// Fetch these images' Remote Content: their sources and URLs.
+    Fetch(Vec<(String, String)>),
 }
 
 pub(crate) struct Pager {
     /// Tells this opening of a Message from any other, for its Pictures.
     id: u64,
     message: Arc<Message>,
+    /// Where it is, if it's an Account's.
+    pub(crate) opened: Option<Opened>,
+    /// The Index it was opened from, to go back to.
+    pub(crate) from: Option<BufferId>,
+    /// The Message that Index's cursor was on when it was opened from there: what `q` goes back to as it was.
+    pub(crate) from_uid: Option<u32>,
     html: Option<Document>,
     plain: Option<Document>,
     /// The body shown, HTML or plain text.
@@ -102,30 +97,23 @@ pub(crate) struct Pager {
     /// The states of the HTML body's images, by index.
     images: Vec<Image>,
     remote_allowed: bool,
-    laid: Option<Laid>,
-    scroll: usize,
-    /// How many lines the Pager last had to draw on.
-    height: usize,
-    search: Option<Search>,
     /// The prose of the body shown, as voight assesses it.
     prose: Option<assessment::Key>,
-    /// The windows of the prose its Heatmap shades, while it shows.
-    heat: Option<Arc<[Window]>>,
 }
 
 impl Pager {
-    /// The Pager on `message`, showing the body `prefer` says when it has both, and its Remote Content if
-    /// `remote_allowed`; `id` tells it from other openings, for their Pictures.
+    /// The Pager on `message`, showing the body `prefer` says when it has both, drawn in `styles`, its Remote
+    /// Content loaded if `remote_allowed`; `id` tells it from other openings, for their Pictures, whose bytes go in
+    /// `pictures`.
     pub(crate) fn new(
         id: u64,
         message: Arc<Message>,
-        theme: &Theme,
+        styles: &Styles,
         prefer: Prefer,
         remote_allowed: bool,
+        pictures: &Pictures,
     ) -> Self {
-        let html = message
-            .html()
-            .map(|html| Document::html(&html, &theme.body));
+        let html = message.html().map(|html| Document::html(&html, styles));
         let plain = message.plain().map(|(text, format)| {
             let format = match format {
                 muttrs_mail::TextFormat::Fixed => TextFormat::Fixed,
@@ -133,27 +121,44 @@ impl Pager {
                     TextFormat::Flowed { delete_space }
                 }
             };
-            Document::plain(&text, format, &theme.body)
+            Document::plain(&text, format, styles)
         });
         let showing = match (&html, &plain, prefer) {
             (Some(_), Some(_), Prefer::Html) | (Some(_), None, _) => Body::Html,
             _ => Body::Plain,
         };
+        let mut stored = pictures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let images = html.as_ref().map_or_else(Vec::new, |html| {
             html.images()
                 .iter()
-                .map(|image| match &image.source {
-                    ImageSource::Cid(id) => message
-                        .by_content_id(id)
-                        .map_or(Image::Broken, |part| Image::from_bytes(message.bytes(part))),
-                    ImageSource::Data(bytes) => Image::from_bytes(bytes.clone()),
-                    ImageSource::Remote(_) => Image::Blocked,
+                .enumerate()
+                .map(|(index, image)| {
+                    let bytes = match &image.source {
+                        ImageSource::Cid(cid) => {
+                            message.by_content_id(cid).map(|part| message.bytes(part))
+                        }
+                        ImageSource::Data(bytes) => Some(bytes.clone()),
+                        ImageSource::Remote(_) => return Image::Blocked,
+                    };
+                    match bytes.and_then(|bytes| Some((dimensions(&bytes)?, bytes))) {
+                        Some((pixels, bytes)) => {
+                            stored.insert(source(id, index), Arc::new(bytes));
+                            Image::Ready(pixels)
+                        }
+                        None => Image::Broken,
+                    }
                 })
                 .collect()
         });
+        drop(stored);
         let mut pager = Self {
             id,
             message,
+            opened: None,
+            from: None,
+            from_uid: None,
             html,
             plain,
             showing,
@@ -161,37 +166,22 @@ impl Pager {
             source: false,
             images,
             remote_allowed,
-            laid: None,
-            scroll: 0,
-            height: 0,
-            search: None,
             prose: None,
-            heat: None,
         };
         pager.prose = pager.prose_shown();
         pager
     }
 
     fn prose_shown(&self) -> Option<assessment::Key> {
+        if self.source {
+            return None;
+        }
         self.document().map(|document| Arc::from(document.prose()))
     }
 
-    /// The prose of the body shown, as voight assesses it; `None` without a body.
+    /// The prose of the body shown, as voight assesses it; `None` without a body, or showing the source.
     pub(crate) fn prose(&self) -> Option<&assessment::Key> {
         self.prose.as_ref()
-    }
-
-    /// Shades the body shown as the Heatmap of `heat`, the windows of its prose's Assessment; with `None`, not.
-    pub(crate) fn shade(&mut self, heat: Option<Arc<[Window]>>) {
-        let same = match (&self.heat, &heat) {
-            (None, None) => true,
-            (Some(shaded), Some(heat)) => Arc::ptr_eq(shaded, heat),
-            _ => false,
-        };
-        if !same {
-            self.heat = heat;
-            self.relayout();
-        }
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -214,22 +204,12 @@ impl Pager {
     /// Shows every header, as written, or only those people read.
     pub(crate) fn toggle_headers(&mut self) {
         self.all_headers = !self.all_headers;
-        self.relayout();
-        self.scroll = 0;
     }
 
     /// Shows the Message's source in place of its headers and body, or them again.
     pub(crate) fn toggle_source(&mut self) {
         self.source = !self.source;
-        // The source isn't prose for voight to assess.
-        self.prose = if self.source {
-            None
-        } else {
-            self.prose_shown()
-        };
-        self.heat = None;
-        self.relayout();
-        self.scroll = 0;
+        self.prose = self.prose_shown();
     }
 
     fn document(&self) -> Option<&Document> {
@@ -249,7 +229,7 @@ impl Pager {
         let shown: Vec<&str> = self
             .html
             .iter()
-            .flat_map(muttrs_render::Document::images)
+            .flat_map(Document::images)
             .filter_map(|image| match &image.source {
                 ImageSource::Cid(id) => Some(id.as_str()),
                 _ => None,
@@ -289,9 +269,6 @@ impl Pager {
         };
         self.showing = other;
         self.prose = self.prose_shown();
-        self.heat = None;
-        self.relayout();
-        self.scroll = 0;
         true
     }
 
@@ -314,129 +291,104 @@ impl Pager {
             if let (Image::Blocked, ImageSource::Remote(url)) =
                 (&image, &html.images()[index].source)
             {
-                fetch.push((index, url.clone()));
+                fetch.push((source(self.id, index), url.clone()));
                 *image = Image::Fetching;
             }
         }
         if fetch.is_empty() {
             Request::None
         } else {
-            self.relayout();
             Request::Fetch(fetch)
         }
     }
 
-    /// Takes the bytes fetched for image `index`, or `None` if they couldn't be.
-    pub(crate) fn fetched(&mut self, index: usize, bytes: Option<Vec<u8>>) {
-        if let Some(image) = self.images.get_mut(index) {
-            *image = bytes.map_or(Image::Broken, Image::from_bytes);
-            self.relayout();
-        }
+    /// Takes the size of the Remote Content fetched for the image at `source`, in the [`Pictures`] now, or `None`
+    /// if it couldn't be had: whether it's one of this Pager's.
+    pub(crate) fn fetched(&mut self, source: &str, pixels: Option<(u32, u32)>) -> bool {
+        let Some(index) = index_of(self.id, source) else {
+            return false;
+        };
+        let Some(image) = self.images.get_mut(index) else {
+            return false;
+        };
+        *image = pixels.map_or(Image::Broken, Image::Ready);
+        true
     }
 
-    fn relayout(&mut self) {
-        self.laid = None;
-    }
-
-    /// Lays the Pager out again, for cells of another size: its Pictures take other rows.
-    pub(crate) fn cell_changed(&mut self) {
-        self.relayout();
-    }
-
-    /// Lays the Pager out `width` cells wide, unless it is already.
-    fn lay_out(&mut self, width: u16, cx: &Cx<'_>) {
-        if self.laid.as_ref().is_some_and(|laid| laid.width == width) {
-            return;
-        }
+    /// The Pager as blocks of a kit document, `width` cells wide: its headers, then its body, each Picture a line
+    /// of its own the kit draws it over; the prose shaded by `heat`, the windows of its Assessment, if given.
+    pub(crate) fn blocks(
+        &self,
+        width: u16,
+        look: &Look,
+        heat: Option<&[Window]>,
+    ) -> Vec<(BlockKey, Content<Target>)> {
         if self.source {
-            self.laid = Some(Laid {
-                width,
-                lines: source_lines(&self.message.source(), width),
-                slots: Vec::new(),
-            });
-            if let Some(search) = self.search.take() {
-                self.search_for(search.query);
-            }
-            return;
+            return vec![(
+                BlockKey::new("source"),
+                Content::from(source_lines(&self.message.source(), width)),
+            )];
         }
-        let mut lines = self.headers(width, cx.theme, cx.icons);
-        let header_lines = lines.len();
-        let sizes: Vec<Option<(u32, u32)>> = if self.showing == Body::Html && cx.pictures.enabled()
-        {
+        let headers = Content::from(self.headers(width, look));
+        let sizes: Vec<Option<(u32, u32)>> = if self.showing == Body::Html && look.pictures {
             self.images
                 .iter()
                 .map(|image| match image {
-                    Image::Ready { pixels, .. } => Some(*pixels),
+                    Image::Ready(pixels) => Some(*pixels),
                     _ => None,
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let cell = cx.pictures.cell();
-        let rendering = self.document().map(|document| {
-            document.render(&Options {
-                width,
-                cell: muttrs_render::CellSize {
-                    width: cell.width,
-                    height: cell.height,
-                },
-                pixel_ratio: cx.pixel_ratio.unwrap_or_else(|| {
-                    muttrs_render::CellSize {
-                        width: cell.width,
-                        height: cell.height,
-                    }
-                    .likely_pixel_ratio()
-                }),
-                max_picture_rows: cx.max_picture_rows,
-                pictures: &sizes,
-            })
-        });
-        let mut slots = Vec::new();
-        match rendering {
-            Some(rendering) => {
-                let mut body = rendering.lines;
-                if let (Some(heat), Some(prose)) = (&self.heat, &self.prose) {
-                    heatmap::shade(&mut body, prose, heat, cx.theme);
+        let body = match self.document() {
+            Some(document) => {
+                let mut rendering = document.render(&Options {
+                    width,
+                    cell: look.cell,
+                    pixel_ratio: look
+                        .pixel_ratio
+                        .unwrap_or_else(|| look.cell.likely_pixel_ratio()),
+                    max_picture_rows: look.max_picture_rows,
+                    pictures: &sizes,
+                });
+                if let (Some(heat), Some(prose)) = (heat, &self.prose) {
+                    heatmap::shade(&mut rendering.lines, prose, heat, &look.heat);
                 }
-                lines.extend(body);
-                slots = rendering
-                    .pictures
-                    .into_iter()
-                    .map(|slot| PictureSlot {
-                        line: slot.line + header_lines,
-                        ..slot
-                    })
-                    .collect();
+                body_lines(&rendering, document.links(), &look.styles, |image| {
+                    source(self.id, image)
+                })
             }
-            None => lines.push(Line::styled(
+            None => vec![Line::Text(vec![Span::new(
                 "This Message has no body to show.",
-                cx.theme.dim,
-            )),
-        }
-        self.laid = Some(Laid {
-            width,
-            lines,
-            slots,
-        });
-        if let Some(search) = self.search.take() {
-            self.search_for(search.query);
-        }
+                hl::DIM,
+            )])],
+        };
+        vec![
+            (BlockKey::new("headers"), headers),
+            (BlockKey::new("body"), Content::from(body)),
+        ]
     }
 
-    /// The headers, laid out `width` cells wide.
-    fn headers(&self, width: u16, theme: &Theme, icons: &Icons) -> Vec<Line<'static>> {
+    /// The headers, laid out `width` cells wide, then a rule.
+    fn headers(&self, width: u16, look: &Look) -> Vec<Line> {
         let message = &self.message;
         let mut lines = Vec::new();
+        let rule = Line::Text(vec![Span::new("─".repeat(usize::from(width)), hl::DIM)]);
         if self.all_headers {
             for (name, value) in message.headers() {
-                let label = Span::styled(format!("{name}: "), theme.dim);
-                lines.extend(wrap_header(&label, &value, Style::new(), width));
+                lines.extend(wrap_header(
+                    &format!("{name}: "),
+                    hl::DIM,
+                    &value,
+                    Group::NORMAL,
+                    width,
+                ));
             }
-            lines.push(Line::styled("─".repeat(usize::from(width)), theme.dim));
+            lines.push(rule);
             return lines;
         }
-        let label = |name: &str| Span::styled(format!("{name:<9}"), theme.dim);
+        let label = |name: &str| format!("{name:<9}");
         let addresses = |list: &[Address]| {
             list.iter()
                 .map(ToString::to_string)
@@ -451,17 +403,21 @@ impl Pager {
             if !list.is_empty() {
                 lines.extend(wrap_header(
                     &label(name),
+                    hl::DIM,
                     &addresses(list),
-                    Style::new(),
+                    Group::NORMAL,
                     width,
                 ));
             }
         }
         if let Some(date) = message.date {
             let local = date.to_zoned(TimeZone::system());
-            lines.push(Line::from(vec![
-                label("Date"),
-                Span::raw(local.strftime("%a %-d %b %Y, %H:%M").to_string()),
+            lines.push(Line::Text(vec![
+                Span::new(label("Date"), hl::DIM),
+                Span::new(
+                    local.strftime("%a %-d %b %Y, %H:%M").to_string(),
+                    Group::NORMAL,
+                ),
             ]));
         }
         let subject = if message.subject.is_empty() {
@@ -471,11 +427,11 @@ impl Pager {
         };
         lines.extend(wrap_header(
             &label("Subject"),
+            hl::DIM,
             subject,
-            theme.subject,
+            hl::SUBJECT,
             width,
         ));
-
         let attachments = self.attachments();
         if !attachments.is_empty() {
             let listed = attachments
@@ -483,249 +439,127 @@ impl Pager {
                 .map(|part| format!("{} ({})", part.file_name(), size(part.size)))
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let mark = Span::styled(
-                format!("{:<9}", icons.attachment.trim_end()),
-                theme.attachment,
-            );
-            lines.extend(wrap_header(&mark, &listed, theme.attachment, width));
+            let mark = format!("{:<9}", look.attachment.trim_end());
+            lines.extend(wrap_header(
+                &mark,
+                hl::ATTACHMENT,
+                &listed,
+                hl::ATTACHMENT,
+                width,
+            ));
         }
         let blocked = self.blocked();
         if blocked > 0 && self.showing == Body::Html {
             let images = if blocked == 1 { "image" } else { "images" };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{}{blocked} remote {images} not loaded: ", icons.blocked),
-                    theme.banner,
+            lines.push(Line::Text(vec![Span::new(
+                format!(
+                    "{}{blocked} remote {images} not loaded: :remote (I) loads them",
+                    look.blocked
                 ),
-                Span::styled("I", theme.keys),
-                Span::styled(" loads them", theme.banner),
-            ]));
+                hl::BANNER,
+            )]));
         }
-        lines.push(Line::styled("─".repeat(usize::from(width)), theme.dim));
+        lines.push(rule);
         lines
-    }
-
-    /// Searches the lines for `query`, ignoring case, going to its first match from the top of what shows.
-    pub(crate) fn search_for(&mut self, query: String) {
-        let Some(laid) = &self.laid else {
-            self.search = Some(Search {
-                query,
-                matches: Vec::new(),
-                current: 0,
-            });
-            return;
-        };
-        let matches = find(&laid.lines, &query);
-        let current = matches
-            .iter()
-            .position(|found| found.line >= self.scroll)
-            .unwrap_or(0);
-        self.search = Some(Search {
-            query,
-            matches,
-            current,
-        });
-        self.show_current_match();
-    }
-
-    /// Goes to the next match, or the previous one, wrapping around.
-    pub(crate) fn next_match(&mut self, forward: bool) {
-        let Some(search) = &mut self.search else {
-            return;
-        };
-        let count = search.matches.len();
-        if count == 0 {
-            return;
-        }
-        search.current = if forward {
-            (search.current + 1) % count
-        } else {
-            (search.current + count - 1) % count
-        };
-        self.show_current_match();
-    }
-
-    pub(crate) fn clear_search(&mut self) -> bool {
-        self.search.take().is_some()
-    }
-
-    /// The query searched for, and how many matches and which it's at.
-    pub(crate) fn search_status(&self) -> Option<(String, usize, usize)> {
-        let search = self.search.as_ref()?;
-        Some((
-            search.query.clone(),
-            search.current + 1,
-            search.matches.len(),
-        ))
-    }
-
-    fn show_current_match(&mut self) {
-        let Some(found) = self
-            .search
-            .as_ref()
-            .and_then(|search| search.matches.get(search.current))
-        else {
-            return;
-        };
-        if found.line < self.scroll || found.line >= self.scroll + self.height.max(1) {
-            self.scroll = found.line.saturating_sub(self.height / 3);
-        }
-    }
-
-    /// Scrolls by `lines`, down if positive.
-    pub(crate) fn scroll_by(&mut self, lines: isize) {
-        self.scroll = self.scroll.saturating_add_signed(lines);
-        self.clamp();
-    }
-
-    /// Scrolls by a fraction of what shows: `pages` pages, down if positive.
-    pub(crate) fn scroll_pages(&mut self, pages: f32) {
-        // A page is at most a few thousand lines; rounding is what's wanted.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-        let lines = (self.height.max(2) as f32 * pages).round() as isize;
-        self.scroll_by(lines);
-    }
-
-    pub(crate) fn top(&mut self) {
-        self.scroll = 0;
-    }
-
-    pub(crate) fn bottom(&mut self) {
-        self.scroll = usize::MAX;
-        self.clamp();
-    }
-
-    fn line_count(&self) -> usize {
-        self.laid.as_ref().map_or(0, |laid| laid.lines.len())
-    }
-
-    fn clamp(&mut self) {
-        self.scroll = self
-            .scroll
-            .min(self.line_count().saturating_sub(self.height.max(1)));
-    }
-
-    /// How far down the Pager is scrolled, as "Top", "Bot", "All" or a percentage, as vim says.
-    pub(crate) fn position(&self) -> String {
-        let total = self.line_count();
-        if total <= self.height {
-            "All".into()
-        } else if self.scroll == 0 {
-            "Top".into()
-        } else if self.scroll + self.height >= total {
-            "Bot".into()
-        } else {
-            format!("{}%", self.scroll * 100 / (total - self.height))
-        }
-    }
-
-    /// Draws the Pager in `area` of `buffer`.
-    pub(crate) fn draw(&mut self, area: Rect, buffer: &mut Buffer, cx: &mut Cx<'_>) {
-        if area.width < 4 || area.height == 0 {
-            return;
-        }
-        let width = (area.width - 2).min(cx.pager_width);
-        self.lay_out(width, cx);
-        self.height = usize::from(area.height);
-        self.clamp();
-        let (x, y) = (area.x + 1, area.y);
-        let Some(laid) = &self.laid else { return };
-        for (row, line) in laid
-            .lines
-            .iter()
-            .skip(self.scroll)
-            .take(self.height)
-            .enumerate()
-        {
-            // Fewer rows than the area's height, a u16.
-            let row = u16::try_from(row).unwrap_or(u16::MAX);
-            buffer.set_line(x, y + row, line, width);
-        }
-
-        // Pictures, over the blank rows left for them.
-        let id = self.id;
-        let wanted: Vec<pictures::Key> = laid
-            .slots
-            .iter()
-            .map(|slot| pictures::Key {
-                message: id,
-                image: slot.image,
-                cols: slot.cols,
-                rows: slot.rows,
-            })
-            .collect();
-        cx.pictures.keep(Some(id), |key| wanted.contains(key));
-        for (slot, key) in laid.slots.iter().zip(&wanted) {
-            let visible = (0..slot.rows).filter_map(|row| {
-                let line = slot.line + usize::from(row);
-                let on_screen = line
-                    .checked_sub(self.scroll)
-                    .filter(|&on| on < self.height)?;
-                Some((row, u16::try_from(on_screen).ok()?))
-            });
-            let visible: Vec<(u16, u16)> = visible.collect();
-            if visible.is_empty() {
-                continue;
-            }
-            let bytes = || match self.images.get(slot.image) {
-                Some(Image::Ready { bytes, .. }) => Some(Arc::clone(bytes)),
-                _ => None,
-            };
-            if let Some(picture) = cx.pictures.get(*key, bytes) {
-                for (row, on_screen) in visible {
-                    let spans = picture.row(row);
-                    buffer.set_line(
-                        x + slot.column,
-                        y + on_screen,
-                        &Line::from(spans),
-                        slot.cols,
-                    );
-                }
-            } else {
-                // Until it's ready: where it goes, and that it's coming.
-                let (_, on_screen) = visible[0];
-                let waiting = Line::styled(format!("{}…", cx.icons.image), cx.theme.dim);
-                buffer.set_line(x + slot.column, y + on_screen, &waiting, slot.cols);
-            }
-        }
-
-        if let Some(search) = &self.search {
-            for (index, found) in search.matches.iter().enumerate() {
-                let Some(row) = found
-                    .line
-                    .checked_sub(self.scroll)
-                    .filter(|&row| row < self.height)
-                else {
-                    continue;
-                };
-                let style = if index == search.current {
-                    cx.theme.found_current
-                } else {
-                    cx.theme.found
-                };
-                let row = u16::try_from(row).unwrap_or(u16::MAX);
-                let start = found.start.min(width);
-                let end = found.end.min(width);
-                buffer.set_style(Rect::new(x + start, y + row, end - start, 1), style);
-            }
-        }
     }
 }
 
-/// What drawing the Pager takes from what holds it.
-pub(crate) struct Cx<'a> {
-    pub(crate) theme: &'a Theme,
-    pub(crate) icons: &'a Icons,
-    pub(crate) pictures: &'a mut Pictures,
-    pub(crate) pager_width: u16,
-    pub(crate) max_picture_rows: u16,
-    /// The terminal's pixels to a CSS pixel, if the configuration says; else guessed from the cells' size.
-    pub(crate) pixel_ratio: Option<f32>,
+/// Where image `index` of the Pager `id` is, as its line names it.
+fn source(id: u64, index: usize) -> String {
+    format!("muttrs:{id}/{index}")
+}
+
+/// The index of the image at `source`, if it's one of the Pager `id`'s.
+fn index_of(id: u64, source: &str) -> Option<usize> {
+    source.strip_prefix(&format!("muttrs:{id}/"))?.parse().ok()
+}
+
+/// The lines of a `rendering` of a body with `links`, drawn in `styles`, as the kit's: each in its own colours, a
+/// Link's text and number referring to it, and each Picture a line of its own, its source named by `source`.
+pub(crate) fn body_lines(
+    rendering: &Rendering,
+    links: &[Link],
+    styles: &Styles,
+    source: impl Fn(usize) -> String,
+) -> Vec<Line> {
+    let mut drawn = Vec::with_capacity(rendering.lines.len());
+    let mut skip = 0;
+    for (index, line) in rendering.lines.iter().enumerate() {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        if let Some(slot) = rendering.pictures.iter().find(|slot| slot.line == index) {
+            drawn.push(Line::Image {
+                rows: slot.rows,
+                cols: slot.cols,
+                source: source(slot.image),
+            });
+            skip = usize::from(slot.rows.saturating_sub(1));
+            continue;
+        }
+        let targets = link_targets(&line.spans, links, styles);
+        let spans = line
+            .spans
+            .iter()
+            .zip(targets)
+            .map(|(span, target)| {
+                let shown = Span::new(span.content.to_string(), Group::NORMAL)
+                    .with_style(line.style.patch(span.style));
+                match target {
+                    Some(url) => shown.with_target(Target::Link(url)),
+                    None => shown,
+                }
+            })
+            .collect();
+        drawn.push(Line::Text(spans));
+    }
+    drawn
+}
+
+/// The Link each of `spans` shows, if it shows one: a URL written out (in plain text), or a Link's number (`[3]`,
+/// in HTML) and the text in the Link's style before it.
+fn link_targets(
+    spans: &[ratatui::text::Span<'_>],
+    links: &[Link],
+    styles: &Styles,
+) -> Vec<Option<String>> {
+    let mut targets: Vec<Option<String>> = vec![None; spans.len()];
+    let is_link = |style: Style| style.patch(styles.link) == style;
+    for (at, span) in spans.iter().enumerate() {
+        let text = span.content.as_ref();
+        if span.style == styles.link_number
+            && let Some(number) = text
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|number| number.parse::<usize>().ok())
+            && let Some(link) = number.checked_sub(1).and_then(|index| links.get(index))
+        {
+            targets[at] = Some(link.url.clone());
+            for before in (0..at).rev() {
+                if !is_link(spans[before].style) {
+                    break;
+                }
+                targets[before] = Some(link.url.clone());
+            }
+        } else if is_link(span.style)
+            && let Some(link) = links.iter().find(|link| link.url == text)
+        {
+            targets[at] = Some(link.url.clone());
+        }
+    }
+    targets
 }
 
 /// A header's lines: its `label`, then `value` wrapped to `width`, indented under the label.
-fn wrap_header(label: &Span<'static>, value: &str, style: Style, width: u16) -> Vec<Line<'static>> {
-    let indent = label.content.width();
+fn wrap_header(
+    label: &str,
+    label_group: Group,
+    value: &str,
+    group: Group,
+    width: u16,
+) -> Vec<Line> {
+    let indent = label.width();
     let room = usize::from(width).saturating_sub(indent).max(10);
     let mut lines = Vec::new();
     let mut line = String::new();
@@ -744,17 +578,17 @@ fn wrap_header(label: &Span<'static>, value: &str, style: Style, width: u16) -> 
         .enumerate()
         .map(|(index, text)| {
             let first = if index == 0 {
-                label.clone()
+                Span::new(label, label_group)
             } else {
-                Span::raw(" ".repeat(indent))
+                Span::new(" ".repeat(indent), Group::NORMAL)
             };
-            Line::from(vec![first, Span::styled(text, style)])
+            Line::Text(vec![first, Span::new(text, group)])
         })
         .collect()
 }
 
 /// The lines of `source`, as written, each cut into `width` cells' worth where it's longer.
-fn source_lines(source: &str, width: u16) -> Vec<Line<'static>> {
+fn source_lines(source: &str, width: u16) -> Vec<Line> {
     let width = usize::from(width).max(1);
     let mut lines = Vec::new();
     for line in source.lines() {
@@ -762,12 +596,12 @@ fn source_lines(source: &str, width: u16) -> Vec<Line<'static>> {
         for character in line.chars() {
             let cells = character.width().unwrap_or(0);
             if piece.width() + cells > width {
-                lines.push(Line::raw(std::mem::take(&mut piece)));
+                lines.push(Line::text(std::mem::take(&mut piece)));
             }
             // Tabs as a space: their width depends on where they fall.
             piece.push(if character == '\t' { ' ' } else { character });
         }
-        lines.push(Line::raw(piece));
+        lines.push(Line::text(piece));
     }
     lines
 }
@@ -786,94 +620,22 @@ pub(crate) fn size(bytes: usize) -> String {
     }
 }
 
-/// Where `query` is in `lines`, ignoring case, in cells.
-fn find(lines: &[Line<'_>], query: &str) -> Vec<Found> {
-    let query: Vec<char> = query.to_lowercase().chars().collect();
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let mut matches = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        // Each character, lower case, with the cell it starts at.
-        let mut chars: Vec<(char, u16)> = Vec::new();
-        let mut column = 0u16;
-        for span in &line.spans {
-            for character in span.content.chars() {
-                for lower in character.to_lowercase() {
-                    chars.push((lower, column));
-                }
-                let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-                column = column.saturating_add(u16::try_from(width).unwrap_or(0));
-            }
-        }
-        let mut at = 0;
-        while at + query.len() <= chars.len() {
-            if chars[at..at + query.len()]
-                .iter()
-                .map(|(c, _)| c)
-                .eq(query.iter())
-            {
-                let start = chars[at].1;
-                let end = chars
-                    .get(at + query.len())
-                    .map_or(column, |(_, next)| *next);
-                matches.push(Found {
-                    line: index,
-                    start,
-                    end,
-                });
-                at += query.len();
-            } else {
-                at += 1;
-            }
-        }
-    }
-    matches
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn searches_find_every_match_ignoring_case_in_cells() {
-        let lines = vec![
-            Line::from(vec![Span::raw("A café, "), Span::raw("CAFÉ!")]),
-            Line::raw("none here"),
-            Line::raw("日本 café"),
-        ];
-        assert_eq!(
-            find(&lines, "Café"),
-            [
-                Found {
-                    line: 0,
-                    start: 2,
-                    end: 6
-                },
-                Found {
-                    line: 0,
-                    start: 8,
-                    end: 12
-                },
-                Found {
-                    line: 2,
-                    start: 5,
-                    end: 9
-                },
-            ]
-        );
+    fn text(line: &Line) -> String {
+        match line {
+            Line::Text(spans) => spans.iter().map(|span| span.text.as_str()).collect(),
+            Line::Image { source, .. } => format!("<{source}>"),
+        }
     }
 
     #[test]
     fn the_source_shows_line_by_line_cut_to_the_width() {
         let lines: Vec<String> = source_lines("ab\r\ncdefg\r\n\r\n\tz", 3)
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect()
-            })
+            .map(text)
             .collect();
         assert_eq!(lines, ["ab", "cde", "fg", "", " z"]);
     }
@@ -881,21 +643,14 @@ mod tests {
     #[test]
     fn long_headers_wrap_under_their_value() {
         let lines = wrap_header(
-            &Span::raw("To       "),
+            "To       ",
+            hl::DIM,
             "a@example.com, b@example.com",
-            Style::new(),
+            Group::NORMAL,
             25,
         );
-        let text: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect()
-            })
-            .collect();
-        assert_eq!(text, ["To       a@example.com,", "         b@example.com"]);
+        let lines: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(lines, ["To       a@example.com,", "         b@example.com"]);
     }
 
     #[test]
@@ -903,5 +658,50 @@ mod tests {
         assert_eq!(size(512), "512 B");
         assert_eq!(size(12_800), "12 KB");
         assert_eq!(size(3 * 1024 * 1024 + 1), "3.0 MB");
+    }
+
+    #[test]
+    fn links_refer_to_their_url_from_their_text_and_number() {
+        let styles = Styles::default();
+        let document = Document::html(
+            "<p>See <a href=\"https://x.example/a\">the page</a> now.</p>",
+            &styles,
+        );
+        let rendering = document.render(&Options {
+            width: 60,
+            cell: CellSize::default(),
+            pixel_ratio: 1.0,
+            max_picture_rows: 0,
+            pictures: &[],
+        });
+        let lines = body_lines(&rendering, document.links(), &styles, |_| String::new());
+        let Line::Text(spans) = &lines[0] else {
+            panic!("a line of text");
+        };
+        let linked: Vec<(&str, bool)> = spans
+            .iter()
+            .map(|span| (span.text.as_str(), span.target.is_some()))
+            .filter(|(text, _)| !text.trim().is_empty())
+            .collect();
+        assert!(linked.contains(&("[1]", true)), "the number: {linked:?}");
+        assert!(
+            linked
+                .iter()
+                .any(|(text, linked)| text.contains("page") && *linked),
+            "the text: {linked:?}"
+        );
+        assert!(
+            linked
+                .iter()
+                .any(|(text, linked)| text.contains("See") && !*linked),
+            "not what's before: {linked:?}"
+        );
+    }
+
+    #[test]
+    fn pictures_are_lines_of_their_own_named_by_the_pager_and_image() {
+        assert_eq!(source(7, 2), "muttrs:7/2");
+        assert_eq!(index_of(7, "muttrs:7/2"), Some(2));
+        assert_eq!(index_of(8, "muttrs:7/2"), None);
     }
 }

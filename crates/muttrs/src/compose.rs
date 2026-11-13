@@ -1,136 +1,118 @@
-//! Writing: a Draft is edited as a file in `$EDITOR`, then shown as it will be sent (headers, Attachments, its
-//! Markdown rendered) until it's sent, postponed or discarded.
-
-use std::path::{Path, PathBuf};
+//! Writing: a Draft is edited in `$EDITOR`, as the kit hands it the terminal, then shown as it will be sent
+//! (headers, Attachments, its Markdown rendered) in a buffer of its own until it's sent, postponed or discarded.
 
 use muttrs_mail::Message;
 use muttrs_mail::compose::{Draft, Source};
-use muttrs_render::{CellSize, Document, Options, Styles};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Modifier;
-use ratatui::text::{Line, Span};
+use wcgw_kit::doc::{BlockKey, Content};
+use wcgw_kit_text::{CellSize, Document, Options, Styles};
 
-use crate::icons::Icons;
-use crate::theme::Theme;
-use crate::xdg;
+use crate::app::{Line, Span, Target};
+use crate::hl::{self, Group};
 
 /// A Draft being written, for an Account.
 pub(crate) struct Compose {
     /// The Account it's sent from, by its place in the sidebar.
     pub(crate) account: usize,
     pub(crate) draft: Draft,
-    /// The file it's edited in.
-    pub(crate) path: PathBuf,
     /// The Message it answers, by its Mailbox and UID, to flag answered once it's sent.
     pub(crate) answers: Option<(String, u32)>,
     /// The Postponed Draft it was resumed from, by its Mailbox and UID, expunged once it's sent or kept again.
     pub(crate) replaces: Option<(String, u32)>,
-    /// Whether discarding it was asked for once, and needs asking again.
-    pub(crate) discarding: bool,
-    /// What its file said before it was first edited, while it's not been edited yet.
+    /// What the editor was first given, until the Draft's edited.
     unedited: Option<String>,
-    scroll: usize,
-    height: usize,
+    /// Whether the editor changed it once: it's a Draft then, whatever the editor does after.
+    edited: bool,
 }
 
 impl Compose {
-    /// A Draft to write, in a file of its own, numbered `serial` among this run's.
-    pub(crate) fn new(
-        account: usize,
-        draft: Draft,
-        answers: Option<(String, u32)>,
-        serial: u64,
-    ) -> std::io::Result<Self> {
-        let directory = xdg::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("drafts");
-        create_private(&directory)?;
-        let path = directory.join(format!("muttrs-{}-{serial}.eml", std::process::id()));
-        let text = draft.to_text();
-        write_private(&path, text.as_bytes())?;
-        Ok(Self {
-            unedited: Some(text),
+    /// A Draft to write.
+    pub(crate) fn new(account: usize, draft: Draft, answers: Option<(String, u32)>) -> Self {
+        Self {
             account,
             draft,
-            path,
             answers,
             replaces: None,
-            discarding: false,
-            scroll: 0,
-            height: 0,
-        })
+            unedited: None,
+            edited: false,
+        }
     }
 
-    /// Reads the file back, as `$EDITOR` left it: `false` if it's as it was before it was first edited, as when
-    /// the editor quit without saving, which drops a new Draft.
-    pub(crate) fn reread(&mut self) -> anyhow::Result<bool> {
-        let text = std::fs::read_to_string(&self.path)?;
-        if self
-            .unedited
-            .take()
-            .is_some_and(|unedited| unedited == text)
-        {
+    /// The text to edit it as: headers, a blank line, then the body.
+    pub(crate) fn text(&mut self) -> String {
+        let text = self.draft.to_text();
+        if !self.edited && self.unedited.is_none() {
+            self.unedited = Some(text.clone());
+        }
+        text
+    }
+
+    /// Whether the editor changed it once: a Draft then, whatever the editor does after.
+    pub(crate) fn was_edited(&self) -> bool {
+        self.edited
+    }
+
+    /// Takes the text the editor saved: `false` if it's as it was before it was first edited, as when the editor
+    /// quit without saving, which drops a new Draft.
+    ///
+    /// # Errors
+    ///
+    /// If its headers don't say what muttrs understands.
+    pub(crate) fn saved(&mut self, text: &str) -> anyhow::Result<bool> {
+        if !self.edited && self.unedited.as_deref() == Some(text) {
             return Ok(false);
         }
-        self.draft = self.draft.edited(&text, xdg::home().as_deref())?;
+        self.draft = self.draft.edited(text, crate::xdg::home().as_deref())?;
+        self.edited = true;
+        self.unedited = None;
         Ok(true)
     }
 
-    /// Writes the Draft to its file again, as after attaching.
-    pub(crate) fn rewrite(&self) -> std::io::Result<()> {
-        write_private(&self.path, self.draft.to_text().as_bytes())
+    /// The Draft as it will be sent, as blocks of a kit document `width` cells wide, its body drawn in `styles`:
+    /// its headers, which open it in the editor again, and its Markdown rendered.
+    pub(crate) fn blocks(
+        &self,
+        width: u16,
+        styles: &Styles,
+        attachment: &str,
+    ) -> Vec<(BlockKey, Content<Target>)> {
+        let mut headers = self.headers(attachment);
+        headers.push(Line::Text(vec![Span::new(
+            "─".repeat(usize::from(width)),
+            hl::DIM,
+        )]));
+        let body = Document::html(&muttrs_mail::compose::html(&self.draft.body), styles);
+        let rendering = body.render(&Options {
+            width,
+            cell: CellSize::default(),
+            pixel_ratio: 1.0,
+            max_picture_rows: 0,
+            pictures: &[],
+        });
+        let body = crate::pager::body_lines(&rendering, body.links(), styles, |_| String::new());
+        vec![
+            (
+                BlockKey::new("headers"),
+                Content {
+                    lines: headers,
+                    folds: Vec::new(),
+                    target: Some(Target::Draft),
+                },
+            ),
+            (
+                BlockKey::new("body"),
+                Content {
+                    lines: body,
+                    folds: Vec::new(),
+                    target: Some(Target::Draft),
+                },
+            ),
+        ]
     }
 
-    /// Deletes its file: it's sent, postponed or discarded.
-    pub(crate) fn finish(self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-
-    pub(crate) fn scroll_by(&mut self, lines: isize) {
-        self.scroll = self.scroll.saturating_add_signed(lines);
-    }
-
-    pub(crate) fn draw(
-        &mut self,
-        area: Rect,
-        buffer: &mut Buffer,
-        theme: &Theme,
-        icons: &Icons,
-        pager_width: u16,
-    ) {
-        if area.width < 4 || area.height == 0 {
-            return;
-        }
-        let width = (area.width - 2).min(pager_width);
-        let mut lines = self.headers(theme, icons);
-        lines.push(Line::styled("─".repeat(usize::from(width)), theme.dim));
-        let body = Document::html(&muttrs_mail::compose::html(&self.draft.body), &theme.body);
-        lines.extend(
-            body.render(&Options {
-                width,
-                cell: CellSize::default(),
-                pixel_ratio: 1.0,
-                max_picture_rows: 0,
-                pictures: &[],
-            })
-            .lines,
-        );
-        self.height = usize::from(area.height);
-        self.scroll = self.scroll.min(lines.len().saturating_sub(self.height));
-        for (row, line) in lines.iter().skip(self.scroll).take(self.height).enumerate() {
-            buffer.set_line(
-                area.x + 1,
-                area.y + u16::try_from(row).unwrap_or(0),
-                line,
-                width,
-            );
-        }
-    }
-
-    fn headers(&self, theme: &Theme, icons: &Icons) -> Vec<Line<'static>> {
+    fn headers(&self, attachment: &str) -> Vec<Line> {
         let draft = &self.draft;
-        let label = |name: &str| Span::styled(format!("{name:<9}"), theme.dim);
+        let label = |name: &str| Span::new(format!("{name:<9}"), hl::DIM);
         let list = |addresses: &[muttrs_mail::Address]| {
             addresses
                 .iter()
@@ -138,39 +120,36 @@ impl Compose {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let mut lines = vec![Line::from(vec![
+        let mut lines = vec![Line::Text(vec![
             label("From"),
-            Span::raw(
-                draft
-                    .from
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
+            Span::new(
+                draft.from.as_ref().map_or_default(ToString::to_string),
+                Group::NORMAL,
             ),
         ])];
         for (name, addresses) in [("To", &draft.to), ("Cc", &draft.cc), ("Bcc", &draft.bcc)] {
             if !addresses.is_empty() || name == "To" {
                 let value = if addresses.is_empty() {
-                    Span::styled("nobody yet: e edits the Draft", theme.error)
+                    Span::new("nobody yet: <CR> edits the Draft", hl::ERROR)
                 } else {
-                    Span::raw(list(addresses))
+                    Span::new(list(addresses), Group::NORMAL)
                 };
-                lines.push(Line::from(vec![label(name), value]));
+                lines.push(Line::Text(vec![label(name), value]));
             }
         }
-        lines.push(Line::from(vec![
+        lines.push(Line::Text(vec![
             label("Subject"),
-            Span::styled(
+            Span::new(
                 if draft.subject.is_empty() {
                     "(no subject)".to_owned()
                 } else {
                     draft.subject.clone()
                 },
-                theme.subject,
+                hl::SUBJECT,
             ),
         ]));
-        for attachment in &draft.attachments {
-            let size = match &attachment.source {
+        for attached in &draft.attachments {
+            let size = match &attached.source {
                 Source::File(path) => match std::fs::metadata(path) {
                     Ok(metadata) => usize::try_from(metadata.len())
                         .map_or_else(|_| String::new(), crate::pager::size),
@@ -178,12 +157,9 @@ impl Compose {
                 },
                 Source::Bytes(bytes) => crate::pager::size(bytes.len()),
             };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{:<9}", icons.attachment.trim_end()),
-                    theme.attachment,
-                ),
-                Span::styled(format!("{} ({size})", attachment.name), theme.attachment),
+            lines.push(Line::Text(vec![
+                Span::new(format!("{:<9}", attachment.trim_end()), hl::ATTACHMENT),
+                Span::new(format!("{} ({size})", attached.name), hl::ATTACHMENT),
             ]));
         }
         lines
@@ -270,56 +246,26 @@ fn unflow(text: &str, delete_space: bool) -> String {
     out
 }
 
-/// The editor to write in: the configuration's, `$VISUAL`, `$EDITOR`, or `vi`.
-pub(crate) fn editor(configured: Option<&str>) -> String {
-    configured
-        .map(str::to_owned)
-        .or_else(|| {
-            std::env::var("VISUAL")
-                .ok()
-                .filter(|editor| !editor.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("EDITOR")
-                .ok()
-                .filter(|editor| !editor.trim().is_empty())
-        })
-        .unwrap_or_else(|| "vi".to_owned())
-}
-
-/// Runs `editor` on `path`, through `sh` so that an editor given with arguments (`code --wait`) works, and waits
-/// for it.
-pub(crate) fn edit(editor: &str, path: &Path) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"$1\""))
-        .arg("muttrs")
-        .arg(path)
-        .status()
-}
-
-fn create_private(directory: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(directory)
-}
-
-/// Writes `bytes` to `path`, readable by the user only.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_new_draft_left_as_it_was_is_dropped_and_edited_once_it_is_not_compared() {
+        let mut compose = Compose::new(0, Draft::default(), None);
+        let text = compose.text();
+        assert!(!compose.saved(&text).unwrap(), "as it was");
+        let mut compose = Compose::new(0, Draft::default(), None);
+        let text = compose.text();
+        let edited = text.replace("Subject:", "Subject: Lunch");
+        assert!(compose.saved(&edited).unwrap());
+        assert_eq!(compose.draft.subject, "Lunch");
+        let again = compose.text();
+        assert!(
+            compose.saved(&again).unwrap(),
+            "edited again, unchanged: still a Draft"
+        );
+    }
     #[test]
     fn html_only_messages_quote_as_text_without_link_numbers() {
         let message = Message::parse(
@@ -337,16 +283,5 @@ mod tests {
             "This is flowed.\n> and so is this\n-- \nAnn\n"
         );
         assert_eq!(unflow("Ver \nbinding\n", true), "Verbinding\n");
-    }
-
-    #[test]
-    fn editors_with_arguments_get_the_path_last() {
-        let path = std::env::temp_dir().join(format!("muttrs-edit-{}", std::process::id()));
-        std::fs::write(&path, "before").unwrap();
-        // An "editor" that appends to the file, given with an argument of its own.
-        let status = edit("sh -c 'echo after >> \"$0\"'", &path).unwrap();
-        assert!(status.success());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "beforeafter\n");
-        std::fs::remove_file(path).unwrap();
     }
 }

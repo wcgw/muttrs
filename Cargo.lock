@@ -823,6 +823,7 @@ version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
 dependencies = [
+ "base64 0.22.1",
  "bitflags 2.13.2",
  "crossterm_winapi",
  "derive_more",
@@ -3030,10 +3031,9 @@ dependencies = [
  "base64 0.23.1",
  "crossterm",
  "futures-util",
+ "image",
  "jiff",
- "muttrs-gfx",
  "muttrs-mail",
- "muttrs-render",
  "open",
  "ratatui",
  "reqwest",
@@ -3045,16 +3045,8 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "voight",
-]
-
-[[package]]
-name = "muttrs-gfx"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "image",
- "ratatui-core",
- "thiserror 2.0.21",
+ "wcgw-kit",
+ "wcgw-kit-text",
 ]
 
 [[package]]
@@ -3081,18 +3073,6 @@ dependencies = [
  "toml 1.2.0+spec-1.1.0",
  "tracing",
  "wiremock",
-]
-
-[[package]]
-name = "muttrs-render"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "ego-tree",
- "ratatui-core",
- "scraper",
- "unicode-segmentation",
- "unicode-width",
 ]
 
 [[package]]
@@ -3187,6 +3167,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -4067,6 +4057,18 @@ checksum = "faf03e0380b7744054d6cb74224fe3adf062a029754933f575ca1e3b4c2ce977"
 dependencies = [
  "ratatui-core",
  "termwiz",
+]
+
+[[package]]
+name = "ratatui-textarea"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cf7263fbb7f37caa4bcfd00fc604ff1409f70456a833fbdff99282e88fdfe92"
+dependencies = [
+ "ratatui-core",
+ "ratatui-widgets",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -5640,7 +5642,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "voight"
 version = "0.1.0"
-source = "git+https://github.com/wcgw/voight?rev=26c88c90f7b971a1700e892332023a6d5771361e#26c88c90f7b971a1700e892332023a6d5771361e"
+source = "git+file:///home/alxs/src/github.com/wcgw/voight?branch=wcgw-kit#ae23138dd8ddb8561a96ec9b69978cc30f5a8e82"
 dependencies = [
  "anyhow",
  "candle-core 0.11.0",
@@ -5764,6 +5766,44 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wcgw-kit"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "futures-util",
+ "nucleo-matcher",
+ "ratatui",
+ "ratatui-textarea",
+ "regex",
+ "tokio",
+ "unicode-segmentation",
+ "unicode-width",
+ "wcgw-kit-gfx",
+]
+
+[[package]]
+name = "wcgw-kit-gfx"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+]
+
+[[package]]
+name = "wcgw-kit-text"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ego-tree",
+ "pulldown-cmark",
+ "ratatui-core",
+ "scraper",
+ "unicode-segmentation",
+ "unicode-width",
+ "wcgw-kit",
 ]
 
 [[package]]

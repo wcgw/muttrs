@@ -1,20 +1,21 @@
-//! The sidebar: each Account, then its Mailboxes, those with a Role first, and their Unread counts.
+//! The sidebar: each Account, then its Mailboxes, those with a Role first, and their Unread counts. It's an unlisted
+//! kit buffer in a window of its own at the left: a block per Account, folded by `zc` into the Account's row, and a
+//! fold over each Mailbox holding others.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use muttrs_mail::client::{Client, Connection, Request, Task};
 use muttrs_mail::{Counts, Mailbox, Role};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
+use wcgw_kit::doc::{BlockKey, Content, Fold};
 
-use crate::icons::Icons;
+use crate::app::{Line, Span, Target};
+use crate::hl::{self, Group};
+use crate::icons;
+use crate::index::truncate;
 use crate::tasks::Tasks;
-use crate::theme::Theme;
-use crate::ui::truncate;
 
 /// An Account, as the UI knows it.
 pub(crate) struct AccountState {
@@ -65,7 +66,7 @@ impl AccountState {
 /// A row of the sidebar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
-    /// The heading of the Accounts' Inboxes, listed first when there are several Accounts: it's not chosen.
+    /// The heading of the Accounts' Inboxes, listed first when there are several Accounts.
     Inboxes,
     /// An Account's Inbox, under `Inboxes`, by the Account's name.
     Inbox(usize),
@@ -73,24 +74,8 @@ pub(crate) enum Row {
     Mailbox(usize, String),
 }
 
-impl Row {
-    /// The Mailbox it opens, by its Account and its name on the server.
-    pub(crate) fn opens(&self, accounts: &[AccountState]) -> Option<(usize, String)> {
-        match self {
-            Self::Mailbox(account, name) => Some((*account, name.clone())),
-            Self::Inbox(account) => Some((*account, inbox_of(accounts.get(*account)?))),
-            Self::Inboxes | Self::Account(_) => None,
-        }
-    }
-
-    /// Whether the cursor can be on it: all but the heading.
-    fn is_chosen(&self) -> bool {
-        !matches!(self, Self::Inboxes)
-    }
-}
-
 /// The name on the server of `account`'s Inbox: `INBOX`, as IMAP names it, until the server lists it.
-fn inbox_of(account: &AccountState) -> String {
+pub(crate) fn inbox_of(account: &AccountState) -> String {
     account
         .with_role(Role::Inbox)
         .map_or_else(|| "INBOX".to_owned(), |inbox| inbox.name.clone())
@@ -156,25 +141,12 @@ fn rows_of(accounts: &[&[Mailbox]]) -> Vec<Row> {
     rows
 }
 
-/// The icon of a Mailbox with `role`.
-pub(crate) fn icon(icons: &Icons, role: Option<Role>) -> &'static str {
-    match role {
-        Some(Role::Inbox) => icons.inbox,
-        Some(Role::Sent) => icons.sent,
-        Some(Role::Drafts) => icons.drafts,
-        Some(Role::Trash) => icons.trash,
-        Some(Role::Junk) => icons.junk,
-        Some(Role::Archive) => icons.archive,
-        Some(Role::All) => icons.all,
-        Some(Role::Flagged) => icons.flagged,
-        None => icons.folder,
+/// The key of the block of `row`'s Account, or of the Inboxes.
+fn block_of(row: &Row) -> String {
+    match row {
+        Row::Inboxes | Row::Inbox(_) => "inboxes".to_owned(),
+        Row::Account(account) | Row::Mailbox(account, _) => format!("account{account}"),
     }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct Sidebar {
-    cursor: usize,
-    top: usize,
 }
 
 /// What drawing the sidebar takes.
@@ -182,173 +154,217 @@ pub(crate) struct Draw<'a> {
     pub(crate) accounts: &'a [AccountState],
     /// The Mailbox the Index shows.
     pub(crate) open: Option<(usize, &'a str)>,
-    pub(crate) focused: bool,
-    pub(crate) theme: &'a Theme,
-    pub(crate) icons: &'a Icons,
+    pub(crate) width: usize,
+    /// The open Mailbox's row's colours.
+    pub(crate) open_style: Style,
+    pub(crate) icon: &'a dyn Fn(&str) -> String,
 }
 
-impl Sidebar {
-    /// The row under the cursor.
-    pub(crate) fn current(&self, accounts: &[AccountState]) -> Option<Row> {
-        let rows = rows(accounts);
-        rows.get(settled(&rows, self.cursor)).cloned()
-    }
-
-    pub(crate) fn move_by(&mut self, accounts: &[AccountState], by: isize) {
-        self.cursor = moved(&rows(accounts), self.cursor, by);
-    }
-
-    pub(crate) fn top(&mut self, accounts: &[AccountState]) {
-        self.cursor = settled(&rows(accounts), 0);
-    }
-
-    pub(crate) fn bottom(&mut self, accounts: &[AccountState]) {
-        let rows = rows(accounts);
-        self.cursor = settled(&rows, rows.len().saturating_sub(1));
-    }
-
-    /// The row drawn `offset` rows down from the top of the sidebar, the cursor put on it; None for the heading,
-    /// which isn't chosen.
-    pub(crate) fn click(&mut self, accounts: &[AccountState], offset: usize) -> Option<Row> {
-        let row = self.top + offset;
-        let found = rows(accounts).into_iter().nth(row)?;
-        if !found.is_chosen() {
-            return None;
-        }
-        self.cursor = row;
-        Some(found)
-    }
-
-    /// Puts the cursor on `row`, if it's listed; unless it's on a row that opens the same Mailbox already, as an
-    /// Account's under the Inboxes does its Inbox.
-    pub(crate) fn select(&mut self, accounts: &[AccountState], row: &Row) {
-        let rows = rows(accounts);
-        let opens = row.opens(accounts);
-        if opens.is_some()
-            && rows
-                .get(settled(&rows, self.cursor))
-                .is_some_and(|current| current.opens(accounts) == opens)
-        {
-            return;
-        }
-        if let Some(at) = rows.iter().position(|listed| listed == row) {
-            self.cursor = at;
+/// The sidebar's blocks: the Inboxes, if there are several Accounts, then each Account with its Mailboxes. Each is
+/// folded into its first row by `zc`, and so is each Mailbox holding others into its own.
+pub(crate) fn blocks(cx: &Draw<'_>) -> Vec<(BlockKey, Content<Target>)> {
+    let rows = rows(cx.accounts);
+    let mut blocks: Vec<(String, Vec<Row>)> = Vec::new();
+    for row in rows {
+        let key = block_of(&row);
+        match blocks.last_mut() {
+            Some((last, rows)) if *last == key => rows.push(row),
+            _ => blocks.push((key, vec![row])),
         }
     }
-
-    pub(crate) fn draw(&mut self, area: Rect, buffer: &mut Buffer, cx: &Draw<'_>) {
-        let rows = rows(cx.accounts);
-        self.cursor = settled(&rows, self.cursor);
-        let height = usize::from(area.height);
-        if self.cursor < self.top {
-            self.top = self.cursor;
-        } else if height > 0 && self.cursor >= self.top + height {
-            self.top = self.cursor + 1 - height;
-        }
-        let width = usize::from(area.width.saturating_sub(1));
-        for (index, row) in rows.iter().enumerate().skip(self.top).take(height) {
-            let y = area.y + u16::try_from(index - self.top).unwrap_or(0);
-            let (line, open) = match row {
-                Row::Inboxes => (
-                    Line::from(Span::styled(
-                        format!("{}Inboxes", cx.icons.inbox),
-                        cx.theme.accent,
-                    )),
-                    false,
-                ),
-                Row::Inbox(account) => {
-                    let state = &cx.accounts[*account];
-                    let inbox = inbox_of(state);
-                    let open = cx.open == Some((*account, inbox.as_str()));
-                    let unread = state.counts.get(&inbox).map_or(0, |counts| counts.unread);
-                    (
-                        entry_line(1, cx.icons.account, &state.name, true, unread, width, cx),
-                        open,
-                    )
-                }
-                Row::Account(account) => (Self::account_line(&cx.accounts[*account], cx), false),
-                Row::Mailbox(account, name) => {
-                    let state = &cx.accounts[*account];
-                    let Some(mailbox) = state.mailbox(name) else {
-                        continue;
-                    };
-                    let open = cx.open == Some((*account, name.as_str()));
-                    (
-                        mailbox_line(mailbox, state.counts.get(name), width, cx),
-                        open,
-                    )
-                }
-            };
-            buffer.set_line(area.x, y, &line, area.width.saturating_sub(1));
-            let row_area = Rect::new(area.x, y, area.width.saturating_sub(1), 1);
-            if index == self.cursor && cx.focused {
-                buffer.set_style(row_area, cx.theme.cursor);
-            } else if open {
-                buffer.set_style(row_area, cx.theme.cursor_unfocused);
+    blocks
+        .into_iter()
+        .map(|(key, rows)| {
+            let lines: Vec<Line> = rows.iter().map(|row| line(row, cx)).collect();
+            let mut folds = Vec::new();
+            if rows.len() > 1 {
+                folds.push(Fold {
+                    lines: 0..rows.len(),
+                    summary: folded(&rows[0], rows.len() - 1, cx),
+                    closed: false,
+                });
             }
-        }
-        // A rule between the sidebar and the Index.
-        for y in area.y..area.y + area.height {
-            buffer.set_string(area.x + area.width.saturating_sub(1), y, "│", cx.theme.dim);
-        }
-    }
-
-    fn account_line(account: &AccountState, cx: &Draw<'_>) -> Line<'static> {
-        let (mark, style) = match &account.connection {
-            Connection::Online => (cx.icons.online, cx.theme.dim),
-            Connection::Connecting => (cx.icons.loading, cx.theme.dim),
-            Connection::Offline(_) => (cx.icons.offline, cx.theme.error),
-            Connection::SignInFailed(_) => (cx.icons.alert, cx.theme.error),
-        };
-        Line::from(vec![
-            Span::styled(
-                format!("{}{}", cx.icons.account, account.name),
-                cx.theme.accent,
-            ),
-            Span::raw(" "),
-            Span::styled(mark.trim_end().to_owned(), style),
-        ])
-    }
+            // A Mailbox holding others, folded into its row.
+            for (at, row) in rows.iter().enumerate() {
+                let Row::Mailbox(account, name) = row else {
+                    continue;
+                };
+                let Some(parent) = cx.accounts[*account].mailbox(name) else {
+                    continue;
+                };
+                if parent.role.is_some() {
+                    continue;
+                }
+                let children = rows[at + 1..]
+                    .iter()
+                    .take_while(|row| match row {
+                        Row::Mailbox(of, child) => {
+                            cx.accounts[*of].mailbox(child).is_some_and(|child| {
+                                child.role.is_none()
+                                    && child.path.len() > parent.path.len()
+                                    && child.path.starts_with(&parent.path)
+                            })
+                        }
+                        _ => false,
+                    })
+                    .count();
+                if children > 0 {
+                    folds.push(Fold {
+                        lines: at..at + 1 + children,
+                        summary: folded(row, children, cx),
+                        closed: false,
+                    });
+                }
+            }
+            let content = Content {
+                lines,
+                folds,
+                target: None,
+            };
+            (BlockKey::new(key), content)
+        })
+        .collect()
 }
 
-fn mailbox_line(
-    mailbox: &Mailbox,
-    counts: Option<&Counts>,
-    width: usize,
-    cx: &Draw<'_>,
-) -> Line<'static> {
-    let indent = if mailbox.role.is_some() {
-        1
-    } else {
-        1 + mailbox.depth() * 2
+/// `row`, folded with the `hidden` rows under it: as it is, saying how many it hides.
+fn folded(row: &Row, hidden: usize, cx: &Draw<'_>) -> Line {
+    let Line::Text(mut spans) = line(row, cx) else {
+        return line(row, cx);
     };
-    entry_line(
-        indent,
-        icon(cx.icons, mailbox.role),
-        mailbox.label(),
-        mailbox.selectable,
-        counts.map_or(0, |counts| counts.unread),
-        width,
-        cx,
+    let more = format!(" +{hidden}");
+    // In place of what pads the row, so it stays as wide.
+    if let Some(padding) = spans
+        .iter()
+        .position(|span| span.text.trim().is_empty() && span.text.len() > more.len())
+    {
+        let width = spans[padding].text.width() - more.width();
+        spans[padding] = Span::new(" ".repeat(width), Group::NORMAL);
+        spans.insert(padding, Span::new(more, hl::DIM));
+    } else {
+        spans.push(Span::new(more, hl::DIM));
+    }
+    Line::Text(spans)
+}
+
+/// The line of `row`, as wide as the sidebar.
+fn line(row: &Row, cx: &Draw<'_>) -> Line {
+    let (spans, open, target) = match row {
+        Row::Inboxes => (
+            vec![Span::new(
+                format!("{}Inboxes", (cx.icon)(icons::INBOX)),
+                hl::ACCENT,
+            )],
+            false,
+            None,
+        ),
+        Row::Inbox(account) => {
+            let state = &cx.accounts[*account];
+            let inbox = inbox_of(state);
+            let open = cx.open == Some((*account, inbox.as_str()));
+            let unread = state.counts.get(&inbox).map_or(0, |counts| counts.unread);
+            (
+                entry(
+                    1,
+                    &(cx.icon)(icons::ACCOUNT),
+                    &state.name,
+                    true,
+                    unread,
+                    cx.width,
+                ),
+                open,
+                Some(Target::Mailbox {
+                    account: *account,
+                    name: inbox,
+                }),
+            )
+        }
+        Row::Account(account) => (
+            account_line(&cx.accounts[*account], cx),
+            false,
+            Some(Target::Account(*account)),
+        ),
+        Row::Mailbox(account, name) => {
+            let state = &cx.accounts[*account];
+            let open = cx.open == Some((*account, name.as_str()));
+            let spans = match state.mailbox(name) {
+                Some(mailbox) => {
+                    let indent = if mailbox.role.is_some() {
+                        1
+                    } else {
+                        1 + mailbox.depth() * 2
+                    };
+                    entry(
+                        indent,
+                        &(cx.icon)(icons::role(mailbox.role)),
+                        mailbox.label(),
+                        mailbox.selectable,
+                        state.counts.get(name).map_or(0, |counts| counts.unread),
+                        cx.width,
+                    )
+                }
+                None => vec![Span::new(name.clone(), hl::DIM)],
+            };
+            (
+                spans,
+                open,
+                Some(Target::Mailbox {
+                    account: *account,
+                    name: name.clone(),
+                }),
+            )
+        }
+    };
+    Line::Text(
+        spans
+            .into_iter()
+            .map(|span| {
+                let span = match &target {
+                    Some(target) => span.with_target(target.clone()),
+                    None => span,
+                };
+                if open {
+                    span.with_style(cx.open_style)
+                } else {
+                    span
+                }
+            })
+            .collect(),
     )
 }
 
+fn account_line(account: &AccountState, cx: &Draw<'_>) -> Vec<Span> {
+    let (mark, group) = match &account.connection {
+        Connection::Online => (icons::ONLINE, hl::DIM),
+        Connection::Connecting => (icons::LOADING, hl::DIM),
+        Connection::Offline(_) => (icons::OFFLINE, hl::ERROR),
+        Connection::SignInFailed(_) => (icons::ALERT, hl::ERROR),
+    };
+    let name = format!("{}{}", (cx.icon)(icons::ACCOUNT), account.name);
+    let mark = (cx.icon)(mark);
+    let used = name.width() + 1 + mark.width();
+    vec![
+        Span::new(name, hl::ACCENT),
+        Span::new(" ", Group::NORMAL),
+        Span::new(mark, group),
+        Span::new(" ".repeat(cx.width.saturating_sub(used)), Group::NORMAL),
+    ]
+}
+
 /// A row of a Mailbox, `indent`ed, `width` cells wide: its icon and `label`, then how many are `unread`, if any.
-fn entry_line(
+fn entry(
     indent: usize,
     icon: &str,
     label: &str,
     selectable: bool,
     unread: u32,
     width: usize,
-    cx: &Draw<'_>,
-) -> Line<'static> {
-    let style = if !selectable {
-        cx.theme.dim
+) -> Vec<Span> {
+    let group = if !selectable {
+        hl::DIM
     } else if unread > 0 {
-        cx.theme.unread
+        hl::UNREAD
     } else {
-        cx.theme.read
+        hl::READ
     };
     let count = if unread > 0 {
         format!(" {unread}")
@@ -359,40 +375,12 @@ fn entry_line(
     let room = width.saturating_sub(indent + count.width());
     let name = truncate(&name, room);
     let padding = width.saturating_sub(indent + name.width() + count.width());
-    Line::from(vec![
-        Span::raw(" ".repeat(indent)),
-        Span::styled(name, style),
-        Span::raw(" ".repeat(padding)),
-        Span::styled(
-            count,
-            if unread > 0 {
-                cx.theme.accent
-            } else {
-                Style::new()
-            },
-        ),
-    ])
-}
-
-/// Where the cursor at `cursor` among `rows` settles: on it, unless it's the heading, then on the row after (or
-/// before, at the end).
-fn settled(rows: &[Row], cursor: usize) -> usize {
-    let cursor = cursor.min(rows.len().saturating_sub(1));
-    (cursor..rows.len())
-        .chain((0..cursor).rev())
-        .find(|&at| rows[at].is_chosen())
-        .unwrap_or(cursor)
-}
-
-/// Where the cursor at `cursor` among `rows` goes, moved `by` rows of those it can be on.
-fn moved(rows: &[Row], cursor: usize, by: isize) -> usize {
-    let chosen: Vec<usize> = (0..rows.len()).filter(|&at| rows[at].is_chosen()).collect();
-    let Some(now) = chosen.iter().position(|&at| at >= settled(rows, cursor)) else {
-        return cursor;
-    };
-    chosen[now
-        .saturating_add_signed(by)
-        .min(chosen.len().saturating_sub(1))]
+    vec![
+        Span::new(" ".repeat(indent), Group::NORMAL),
+        Span::new(name, group),
+        Span::new(" ".repeat(padding), Group::NORMAL),
+        Span::new(count, hl::ACCENT),
+    ]
 }
 
 #[cfg(test)]
@@ -442,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn several_accounts_inboxes_come_first_under_a_heading_the_cursor_passes_over() {
+    fn several_accounts_inboxes_come_first_under_a_heading() {
         let home = listed(&[("INBOX", &[]), ("Archive", &[])]);
         let work = listed(&[("INBOX", &[])]);
         let rows = rows_of(&[home.as_slice(), work.as_slice()]);
@@ -450,11 +438,6 @@ mod tests {
             rows[..4],
             [Row::Inboxes, Row::Inbox(0), Row::Inbox(1), Row::Account(0)]
         );
-        assert_eq!(settled(&rows, 0), 1, "not on the heading");
-        assert_eq!(moved(&rows, 1, -1), 1, "nor up onto it");
-        assert_eq!(moved(&rows, 0, 1), 2);
-        assert_eq!(moved(&rows, 2, 1), 3, "then the Accounts, as before");
-        assert_eq!(moved(&rows, 1, 100), rows.len() - 1);
         assert!(
             !rows_of(&[home.as_slice()]).contains(&Row::Inboxes),
             "one Account: no Inboxes"

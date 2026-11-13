@@ -3,21 +3,54 @@
 
 use std::ops::Range;
 
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::assessment::Window;
-use crate::theme::Theme;
+
+/// The Heatmap's styles, from voight's highlight groups: prose voight scored 0%, 50% and 100%.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Heat {
+    pub(crate) human: Style,
+    pub(crate) even: Style,
+    pub(crate) llm: Style,
+}
+
+impl Heat {
+    /// The style of prose voight scored `share`, between 0 and 1: `human`'s at 0, `even`'s at 0.5 and `llm`'s at 1.
+    /// In between, the nearer one's, with a background blended from both's when they're RGB colours.
+    pub(crate) fn style(&self, share: f64) -> Style {
+        let share = share.clamp(0.0, 1.0);
+        let (from, to, toward) = if share < 0.5 {
+            (self.human, self.even, share * 2.0)
+        } else {
+            (self.even, self.llm, share * 2.0 - 1.0)
+        };
+        let nearer = if toward < 0.5 { from } else { to };
+        let (Some(Color::Rgb(r0, g0, b0)), Some(Color::Rgb(r1, g1, b1))) = (from.bg, to.bg) else {
+            return nearer;
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rounded, between two `u8`s"
+        )]
+        let blend =
+            |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * toward).round() as u8;
+        nearer.bg(Color::Rgb(blend(r0, r1), blend(g0, g1), blend(b0, b1)))
+    }
+}
 
 /// How far past the text found last the next is looked for: far enough for a line's worth of what the drawing left
 /// out, as a quote between two paragraphs, not so far that a word found again much later is taken for it.
 const LOOKAHEAD: usize = 512;
 
-/// Shades `lines`, which draw `text`, by `windows` of it, in `theme`'s heatmap styles; what's outside them, like
+/// Shades `lines`, which draw `text`, by `windows` of it, in `heat`'s styles; what's outside them, like
 /// what's quoted, stays as it is. Nothing is shaded if `windows` aren't of `text`.
 ///
 /// What each line draws is found in `text` in order, span by span. What isn't found nearby, like a list's markers or
 /// a quote's bar, is shaded as the text before it on its line, or else as the text after it.
-pub(crate) fn shade(lines: &mut [Line<'static>], text: &str, windows: &[Window], theme: &Theme) {
+pub(crate) fn shade(lines: &mut [Line<'static>], text: &str, windows: &[Window], heat: &Heat) {
     if windows.is_empty()
         || windows
             .iter()
@@ -39,7 +72,7 @@ pub(crate) fn shade(lines: &mut [Line<'static>], text: &str, windows: &[Window],
         line.spans = pieces
             .into_iter()
             .map(|(span, place)| match place {
-                Place::Found(Some(share)) => span.patch_style(theme.heat(share)),
+                Place::Found(Some(share)) => span.patch_style(heat.style(share)),
                 Place::Found(None) | Place::Added => span,
             })
             .collect();
@@ -171,18 +204,14 @@ impl<'t> Finder<'t> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::{Color, Style};
-
     use super::*;
-    use crate::icons::Icons;
 
-    /// A theme whose heatmap tells apart text an LLM wrote none, half and all of.
-    fn theme() -> Theme {
-        Theme {
-            heatmap_human: Style::new().bg(Color::Green),
-            heatmap_even: Style::new().bg(Color::Yellow),
-            heatmap_llm: Style::new().bg(Color::Red),
-            ..Theme::named("terminal", &Icons::PLAIN).unwrap()
+    /// A heatmap that tells apart text an LLM wrote none, half and all of.
+    fn theme() -> Heat {
+        Heat {
+            human: Style::new().bg(Color::Green),
+            even: Style::new().bg(Color::Yellow),
+            llm: Style::new().bg(Color::Red),
         }
     }
 
@@ -276,8 +305,8 @@ mod tests {
     fn shading_keeps_the_text_style_but_its_colors() {
         let text = "Bold words.";
         let mut lines = vec![Line::from(Span::styled(text, Style::new().blue().bold()))];
-        let theme = Theme {
-            heatmap_llm: Style::new().black().on_red(),
+        let theme = Heat {
+            llm: Style::new().black().on_red(),
             ..theme()
         };
         shade(&mut lines, text, &[window(text, text, 1.0)], &theme);
@@ -296,5 +325,26 @@ mod tests {
         }];
         shade(&mut lines, "Short.", &windows, &theme());
         assert_eq!(shades(&lines), [vec![piece("Short.", None)]]);
+    }
+
+    #[test]
+    fn heat_blends_rgb_backgrounds_and_steps_between_others() {
+        let blended = Heat {
+            human: Style::new().bg(Color::Rgb(0, 0xff, 0)),
+            even: Style::new().bg(Color::Rgb(0xff, 0xff, 0)),
+            llm: Style::new().bg(Color::Rgb(0xff, 0, 0)),
+        };
+        assert_eq!(blended.style(0.0), blended.human);
+        assert_eq!(blended.style(0.5), blended.even);
+        assert_eq!(blended.style(1.0), blended.llm);
+        assert_eq!(blended.style(-1.0), blended.human, "clamped");
+        assert_eq!(
+            blended.style(0.25),
+            Style::new().bg(Color::Rgb(0x80, 0xff, 0))
+        );
+        let stepped = theme();
+        assert_eq!(stepped.style(0.24), stepped.human);
+        assert_eq!(stepped.style(0.26), stepped.even);
+        assert_eq!(stepped.style(0.76), stepped.llm);
     }
 }
