@@ -64,6 +64,6 @@ with ghd.
 - In pickers, `<CR>` opens; `<C-y>` copies a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the
   Labels', `<CR>` adds or takes off a Label and the list stays open, as muttrs' did.
 - `!` and `|` hand the terminal to their command, as the kit does, waiting for Enter after; `|` pipes the Messages
-  byte for byte.
+  byte for byte. `!` and `:shell` (and `:!CMD`) are the kit's now, in every app, as muttrs had them.
 - The Draft is edited in an `.eml` file, in the configuration's `editor`, else the kit's (`$EDITOR`, `$VISUAL`).
 - Building needs wcgw-kit checked out beside muttrs until it's published, as voight is pinned.

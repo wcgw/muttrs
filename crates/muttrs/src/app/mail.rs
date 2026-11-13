@@ -954,19 +954,6 @@ impl Muttrs {
         }
     }
 
-    /// Runs `command` (`:shell`, `!`) with the terminal, which comes back once Enter's pressed after it; the shell
-    /// itself (`$SHELL`) if it's empty.
-    pub(crate) fn shell(command: &str) -> Effects {
-        if command.is_empty() {
-            let shell = std::env::var("SHELL")
-                .ok()
-                .filter(|shell| !shell.trim().is_empty())
-                .unwrap_or_else(|| "sh".to_owned());
-            return vec![Effect::Shell(wcgw_kit::Shell::new(shell))];
-        }
-        vec![Effect::Shell(wcgw_kit::Shell::new(command).wait())]
-    }
-
     /// Opens or saves Attachment `part` of the Pager in `pager`.
     pub(super) fn attachment(
         &self,

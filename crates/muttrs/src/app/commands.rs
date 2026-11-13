@@ -17,7 +17,7 @@ const WRITING: Topic = Topic::new(74, "Writing");
 const LISTING: Topic = Topic::new(76, "Listing");
 
 /// muttrs' default keys: keys, the command each runs, what which-key says of it, and its `:help` topic.
-const KEYS: [(&str, &str, &str, Topic); 40] = [
+const KEYS: [(&str, &str, &str, Topic); 39] = [
     (
         "K",
         "details",
@@ -57,7 +57,6 @@ const KEYS: [(&str, &str, &str, Topic); 40] = [
     ("<leader>j", "junk", "to Junk, as spam", MAIL),
     ("<leader>J", "notjunk", "out of Junk, not spam", MAIL),
     ("|", "pipe", "pipe to a command", MAIL),
-    ("!", "shell", "run a command", MAIL),
     (
         "\\",
         "sidebar",
@@ -257,16 +256,6 @@ pub(super) fn add(kit: &mut Kit) {
             }
         })
         .help("pipe the Message, or those selected as an mbox, to a command"),
-        Command::new("shell", 2, |_: &mut Muttrs, kit, line| match line.args {
-            "" => {
-                kit.prompt("!", false, |_: &mut Muttrs, _, command| {
-                    Muttrs::shell(command.trim())
-                });
-                Ok(Vec::new())
-            }
-            command => Ok(Muttrs::shell(command)),
-        })
-        .help("run a command with the terminal; alone, the shell"),
         Command::new("bounce", 4, |muttrs: &mut Muttrs, kit, line| {
             muttrs.bounce(kit, required(line.args)?)
         })
