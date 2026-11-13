@@ -6,13 +6,17 @@ See [plan.md](plan.md#architecture) for the crates and how they depend on each o
 
 ## Checks
 
-What CI runs, on Linux and macOS:
+What CI runs (`.github/workflows/ci.yml`, the same checks as every wcgw app's): on Linux,
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets     # pedantic, and every warning is an error in CI
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings      # pedantic, every warning an error
+cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+cargo test --workspace --locked
+cargo test --workspace --locked --no-default-features               # without voight
 ```
+
+and on macOS, best effort, `cargo build --workspace --locked`.
 
 ## Trying things out
 

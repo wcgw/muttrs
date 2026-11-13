@@ -5,33 +5,50 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
+# The checks every wcgw app runs, as wcgw-kit does: format, lints as errors and tests on Linux, against the
+# locked dependencies; a build on macOS, which is best effort.
 jobs:
-  check:
-    name: Format, lints and tests (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # Linux is where muttrs is used; macOS is where it must keep building.
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  lint:
+    name: Format and lints
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
       - name: Lints
-        run: cargo clippy --workspace --all-targets
-      - name: Tests
-        run: cargo test --workspace
-      # As ghd checks it: muttrs builds, and its tests pass, with voight left out too.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # voight is optional: the app builds, and its lints and tests pass, without it too.
       - name: Lints without voight
-        run: cargo clippy --workspace --all-targets --no-default-features
+        run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        run: cargo test --workspace --locked
       - name: Tests without voight
-        run: cargo test --workspace --no-default-features
+        run: cargo test --workspace --locked --no-default-features
+
+  macos:
+    name: Build on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --locked
