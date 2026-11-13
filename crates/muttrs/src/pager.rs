@@ -310,8 +310,8 @@ impl Pager {
 
     /// The Pager as a kit document, `width` cells wide: its headers, then its body, a Link's text and number opening
     /// it, each Picture a line of its own the kit draws it over; the prose shaded by `heat`, the windows of its
-    /// Assessment, if given. (Shaded, a Link's text no longer has the Link's colour, which is how it's found: its
-    /// number still opens it.)
+    /// Assessment, if given. Shaded, a Link isn't found: the kit finds them by their styles, which the Heatmap
+    /// changes, so `<CR>` doesn't open those, and the Links' list (`<Space>o`) is the way to them.
     pub(crate) fn shown(
         &self,
         width: u16,
