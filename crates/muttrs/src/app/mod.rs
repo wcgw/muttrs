@@ -1773,6 +1773,26 @@ impl wcgw_kit::App for Muttrs {
         Some(self.settle(kit))
     }
 
+    /// `:bd` (`<leader>bd`, a middle click on its tab): a Mailbox's Index goes, with what muttrs keeps of it; opening
+    /// the Mailbox again lists it anew. An Inbox stays: it's what an Account opens on.
+    fn deleting(&mut self, _kit: &mut Kit, buffer: BufferId) -> Result<Effects, String> {
+        let Some(index) = self.indexes.get(&buffer) else {
+            return Ok(Vec::new());
+        };
+        if index.mailbox.eq_ignore_ascii_case("INBOX") {
+            return Err("An Inbox stays: it's what its Account opens on".to_owned());
+        }
+        self.indexes.remove(&buffer);
+        self.mailboxes.retain(|_, &mut shown| shown != buffer);
+        self.searched.retain(|_, &mut shown| shown != buffer);
+        self.widths.remove(&buffer);
+        self.dirty.remove(&buffer);
+        if self.last_index == Some(buffer) {
+            self.last_index = None;
+        }
+        Ok(Vec::new())
+    }
+
     fn shown(&mut self, kit: &mut Kit, buffer: BufferId) -> Effects {
         if self.pagers.contains_key(&buffer) {
             self.kept(kit, buffer);
