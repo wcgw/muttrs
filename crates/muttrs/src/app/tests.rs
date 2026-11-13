@@ -187,6 +187,12 @@ impl Mail {
         self.harness.screen().rows
     }
 
+    /// The windows' first row, under the tabline (the kit shows it always): the Index's or the Pager's winbar,
+    /// beside the sidebar's first.
+    fn winbar(&self) -> String {
+        self.rows()[1].clone()
+    }
+
     fn screen(&self) -> String {
         self.rows().join("\n")
     }
@@ -251,6 +257,7 @@ fn the_sidebar_lists_the_account_and_its_mailboxes_roles_first_and_folds() {
     let rows = mail.rows();
     let sidebar: Vec<&str> = rows
         .iter()
+        .skip(1)
         .take(8)
         .map(|row| row.split('│').next().unwrap_or("").trim())
         .collect();
@@ -268,10 +275,10 @@ fn the_sidebar_lists_the_account_and_its_mailboxes_roles_first_and_folds() {
     mail.press("<C-w>hggzc");
     let rows = mail.rows();
     assert!(
-        rows[0].contains("home") && rows[0].contains("+6"),
+        rows[1].contains("home") && rows[1].contains("+6"),
         "{rows:#?}"
     );
-    assert!(line_with(&rows[1..], "Drafts").is_none(), "{rows:#?}");
+    assert!(line_with(&rows[2..], "Drafts").is_none(), "{rows:#?}");
     mail.press("zo");
     assert!(line_with(&mail.rows(), "Drafts").is_some());
 }
@@ -338,7 +345,7 @@ fn the_index_shows_its_columns_and_its_winbar_counts() {
     mail.inbox(vec![lunch, report]);
     let rows = mail.rows();
     assert!(
-        rows[0].contains("home › Inbox · 2 Messages, 1 Unread"),
+        rows[1].contains("home › Inbox · 2 Messages, 1 Unread"),
         "{rows:#?}"
     );
     let lunch = line_with(&rows, "Lunch").expect("Lunch is listed");
@@ -409,7 +416,7 @@ fn an_html_message_opens_in_the_pager_with_its_picture_asked_for() {
     let effects = mail.read(1, html_message("Lunch"));
     let rows = mail.rows();
     assert!(
-        rows[0].contains("Lunch"),
+        rows[1].contains("Lunch"),
         "the winbar says the subject: {rows:#?}"
     );
     assert!(
@@ -471,7 +478,7 @@ fn a_plain_message_shows_with_its_headers_and_q_goes_back_to_the_index() {
     );
     mail.press("q");
     let rows = mail.rows();
-    assert!(rows[0].contains("home › Inbox"), "{rows:#?}");
+    assert!(rows[1].contains("home › Inbox"), "{rows:#?}");
     assert!(mail.harness.kit.cursor_row_text().contains("Report"));
 }
 
@@ -489,7 +496,7 @@ fn stepping_through_messages_in_the_pager_and_back_to_the_last_one_read() {
         }]
     );
     mail.body(2, plain_message("Report", "The numbers."));
-    assert!(mail.rows()[0].contains("Report"));
+    assert!(mail.winbar().contains("Report"));
     mail.press("<C-n>");
     assert!(
         mail.cmdline().contains("No older Message"),
@@ -539,7 +546,7 @@ fn replying_opens_the_editor_then_the_draft_shows_until_it_is_sent() {
     let text = text.replace("\n\n", "\n\nThursday works.\n\n");
     mail.harness.update(wcgw_kit::Msg::Edited(Ok(text)));
     let rows = mail.rows();
-    assert!(rows[0].contains("Draft"), "{rows:#?}");
+    assert!(rows[1].contains("Draft"), "{rows:#?}");
     assert!(line_with(&rows, "Thursday works.").is_some(), "{rows:#?}");
     // <CR> on it edits it again.
     assert!(edited(&mail.press("gg<CR>")).is_some());
@@ -555,7 +562,7 @@ fn replying_opens_the_editor_then_the_draft_shows_until_it_is_sent() {
     });
     assert!(sent, "sent, answering Lunch");
     assert!(
-        !mail.rows()[0].contains("Draft"),
+        !mail.winbar().contains("Draft"),
         "put away: {:#?}",
         mail.rows()
     );
@@ -622,7 +629,7 @@ fn filters_select_and_narrow_and_complete() {
         "{}",
         mail.cmdline()
     );
-    assert!(mail.rows()[0].contains("1 selected"));
+    assert!(mail.winbar().contains("1 selected"));
     assert!(
         line_with(&mail.rows(), "▌").is_some(),
         "the Selection's mark"
@@ -638,7 +645,7 @@ fn filters_select_and_narrow_and_complete() {
     );
     mail.press(":filter from:ann<CR>");
     assert!(
-        mail.rows()[0].contains("filter from:a"),
+        mail.winbar().contains("filter from:a"),
         "{:#?}",
         mail.rows()
     );
@@ -663,31 +670,31 @@ fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_filter() {
     mail.two();
     // The second `x` selects the next Message, not the first again.
     mail.press("xx");
-    assert!(mail.rows()[0].contains("2 selected"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("2 selected"), "{:#?}", mail.rows());
     mail.press(":unselect<CR>");
-    assert!(!mail.rows()[0].contains("selected"));
+    assert!(!mail.winbar().contains("selected"));
     // A selects all listed, or none once they all are, as ghd's does.
     mail.press("ggxA");
-    assert!(mail.rows()[0].contains("2 selected"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("2 selected"), "{:#?}", mail.rows());
     mail.press("A");
-    assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
+    assert!(!mail.winbar().contains("selected"), "{:#?}", mail.rows());
 
     // A search's matches go first, as the kit's <Esc>.
     mail.press("x/Lunch<CR><Esc>");
-    assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("1 selected"), "{:#?}", mail.rows());
     mail.press("<Esc>");
-    assert!(!mail.rows()[0].contains("selected"));
+    assert!(!mail.winbar().contains("selected"));
 
     // Lunch, from Ann, selected, then left out of what's listed.
     mail.press("ggx:filter from:bob<CR>");
-    assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());
-    assert!(mail.rows()[0].contains("filter from:bob"));
+    assert!(mail.winbar().contains("1 selected"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("filter from:bob"));
     // `<Esc>` unselects what isn't listed too, and leaves the filter for the next one.
     mail.press("<Esc>");
-    assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
-    assert!(mail.rows()[0].contains("filter from:bob"));
+    assert!(!mail.winbar().contains("selected"), "{:#?}", mail.rows());
+    assert!(mail.winbar().contains("filter from:bob"));
     mail.press("<Esc>");
-    assert!(!mail.rows()[0].contains("filter"), "{:#?}", mail.rows());
+    assert!(!mail.winbar().contains("filter"), "{:#?}", mail.rows());
     assert!(mail.cmdline().contains("All show again"));
 }
 
@@ -868,13 +875,13 @@ fn searching_the_server_asks_at_a_prompt_and_lists_what_it_found() {
         count: 1,
     });
     assert!(
-        mail.rows()[0].contains("“lunch” · 1 found"),
+        mail.winbar().contains("“lunch” · 1 found"),
         "{:#?}",
         mail.rows()
     );
     mail.press("q");
     assert!(
-        mail.rows()[0].contains("2 Messages"),
+        mail.winbar().contains("2 Messages"),
         "back: {:#?}",
         mail.rows()
     );
@@ -1269,11 +1276,7 @@ fn q_closes_help_s_window_and_goes_back_from_signing_in() {
         .add_buffer("login", super::Document::new(), false);
     mail.harness.kit.show_buffer(sign_in);
     mail.press("q");
-    assert!(
-        mail.rows()[0].contains("home › Inbox"),
-        "{:#?}",
-        mail.rows()
-    );
+    assert!(mail.winbar().contains("home › Inbox"), "{:#?}", mail.rows());
 }
 
 #[test]
