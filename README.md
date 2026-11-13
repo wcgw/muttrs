@@ -23,9 +23,9 @@ words used here, and in the code, are defined in [CONTEXT.md](CONTEXT.md); what'
 cargo install --locked --path crates/muttrs
 ```
 
-muttrs runs in [wcgw-kit](https://github.com/wcgw/wcgw-kit), the editor shell the wcgw apps share: until the kit is
-published, it's built from a checkout of it beside muttrs' (`../wcgw-kit`), and voight from the `wcgw-kit` branch of
-a local checkout of voight.
+muttrs runs in [wcgw-kit](https://github.com/wcgw/wcgw-kit), the editor shell the wcgw apps share, at its `v0.1.0`
+tag, which cargo fetches; voight is built from the `wcgw-kit` branch of a local checkout of voight, until that's
+pushed.
 
 That builds [voight](https://github.com/wcgw/voight) in, as ghd does, running on the CPU: it estimates how much of
 the prose the Pager shows an LLM wrote (below). Add `--features cuda` to run it on an NVIDIA GPU (this needs the CUDA

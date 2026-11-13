@@ -6,7 +6,7 @@ See [plan.md](plan.md#architecture) for the crates and how they depend on each o
 
 ## Checks
 
-What CI runs, on Linux and macOS (with wcgw-kit checked out beside muttrs, until it's published):
+What CI runs, on Linux and macOS (voight from a local checkout, until its `wcgw-kit` branch is pushed):
 
 ```sh
 cargo fmt --all --check
