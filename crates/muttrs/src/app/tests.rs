@@ -698,7 +698,7 @@ fn links_open_from_the_cursor_or_a_picker_and_copy_from_another() {
         mail.screen().contains("Links"),
         "copying leaves the picker open"
     );
-    // On the Link itself, <CR> opens it, as gx does, and gy copies it.
+    // On the Link itself, <CR> opens it, as gx does, and gy yanks it.
     mail.press("<Esc>/menu<CR>");
     for keys in ["<CR>", "gx"] {
         let effects = mail.press(keys);

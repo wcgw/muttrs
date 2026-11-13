@@ -30,11 +30,11 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
         "open the Link in the browser",
         Topic::OPENING,
     ),
-    ("gy", "yanklink", "copy the Link", Topic::OPENING),
+    ("gy", "yanklink", "yank the Link", Topic::OPENING),
     (
         "<leader>o",
         "pick links",
-        "Links: <C-y> copies",
+        "Links: <C-y> yanks",
         Topic::OPENING,
     ),
     (
@@ -195,7 +195,7 @@ pub(super) fn add(kit: &mut Kit) {
         Command::new("yanklink", 5, |muttrs: &mut Muttrs, kit, _| {
             muttrs.browse(kit, true)
         })
-        .help("copy the Link under the cursor; without one, list them"),
+        .help("yank the Link under the cursor; without one, list them"),
         Command::new("unsubscribe", 5, |muttrs: &mut Muttrs, kit, _| {
             muttrs.unsubscribe(kit)
         })

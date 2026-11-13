@@ -42,7 +42,7 @@ with ghd.
   (selecting is `x`), `s` flags (moving is `<Space>m`), `$` is the end of the line (refreshing is `<C-l>`), `J` and
   `K` don't step through Messages (`<C-n>` and `<C-p>` do), `h` is a motion (every header is `K`), `H` is a motion
   (the Heatmap is `<Space>h`), and a Draft's keys are commands (`:send`, `:postpone`, `:attach`, `:detach`).
-- `gx` is `:browse link`, and `gy` copies what it opens, as in the other apps, where `:browse` alone opens the thing
+- `gx` is `:browse link`, and `gy` yanks what it opens, as in the other apps, where `:browse` alone opens the thing
   itself on the web: a Message has no page there, so `:browse` alone says so.
 - Selecting is as in ghd: `x` selects, or unselects, and moves down, as `<Space>` did and ghd's `x` does; `A` selects
   all listed, or none, as ghd's; `<Esc>` (`:clear`) unselects every Message, or else lists them all again, as ghd's
@@ -61,7 +61,7 @@ with ghd.
 - `:limit` is `:filter`, as ghd's: it narrows the Index to what a Filter picks, and the winbar says `filter …`.
 - The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.
 - Quitting with Tasks left waits for them, through the kit's quit hook; `:qa!` doesn't.
-- In pickers, `<CR>` opens; `<C-y>` copies a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the
+- In pickers, `<CR>` opens; `<C-y>` yanks a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the
   Labels', `<CR>` adds or takes off a Label and the list stays open, as muttrs' did.
 - `!` and `|` hand the terminal to their command, as the kit does, waiting for Enter after; `|` pipes the Messages
   byte for byte. `!` and `:shell` (and `:!CMD`) are the kit's now, in every app, as muttrs had them.

@@ -1577,7 +1577,7 @@ fn sign_in_text(name: &str, url: Option<&str>, _rejected: Option<&str>) -> Docum
             ));
             lines.push(Line::text(""));
             lines.push(Line::Text(vec![Span::new(
-                "The page to sign in at (<CR> opens it, yy copies it):",
+                "The page to sign in at (<CR> opens it, yy yanks it):",
                 hl::DIM,
             )]));
             lines.push(Line::Text(vec![

@@ -104,7 +104,7 @@ one runs out, `:login gmail` signs in again without leaving muttrs. With an
 Once you've signed in, the browser comes back to muttrs, at an address on `127.0.0.1`. A browser on another machine
 (muttrs over SSH, say) can't: it shows an error page instead. Copy that page's address, from the address bar, and
 paste it into muttrs, which takes the code from it. `muttrs login` prints the address to sign in at, and `:login`
-shows it, for `yy` to copy, and asks for the address pasted.
+shows it, for `yy` to yank, and asks for the address pasted.
 
 Gmail's labels are Mailboxes; deleting moves to its Trash, archiving (`a`) takes a Message out of the Inbox, and
 what's sent isn't copied to Sent, as Gmail does that itself. `provider = "outlook"` does the same for Outlook and
@@ -122,7 +122,7 @@ after a moment. `:help` (or `F1`) lists the keys and the commands.
 | Anywhere | `:q` closes a window · `:qa`, or `q` where there's nothing to close (the Pager, the Draft, what a search found), quits once what's asked is done; `:qa!` quits now · `<C-l>` `:e!` ask for what's new · `:sync` list the open Mailbox anew · `!` `:shell CMD` run a command · `\` `:sidebar` go to the sidebar, hide it from within it, or bring it back · `:e NAME` open a Mailbox · `:create NAME` `:rename NAME` `:delmailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `<CR>` open (on an Account, ask what's new) · `zc` `zo` fold an Account, or a Mailbox holding others · `<C-w>l` the Index |
 | Index | `<CR>` (or a double click) read · `/` `?` `n` `N` search what's listed · `S` `:grep` search the server · `od` `of` `os` `oz` `ot` sort by date, sender, subject, size, or in threads; `O` the other way · `za` `zM` `zR` fold the thread, all, none · `x` select, and down · `A` all, or none · `<Esc>` unselect all, or else list all · `s` flag · `U` Unread or read · `<Space>l` Labels · `dd` delete (to Trash) · `a` archive · `<Space>m` move to a Mailbox · `u` undo that · `<Space>j` `<Space>J` `:junk` `:notjunk` to Junk, or out of it · `\|` pipe to a command · `K` the Envelope · `<C-w>h` the sidebar |
-| Pager | the motions scroll · `<C-n>` `<C-p>` the next Message, the previous · `<Space>b` `:body` HTML or plain text · `K` every header, as written · `:raw` the Message as it came · `I` `:remote` load Remote Content · `<Space>h` voight's Heatmap · `<CR>` on a Link, `gx` open it · `gy` copy it · `<Space>o` Links (`<C-y>` copies one) · `<Space>a` Attachments (`<C-s>` saves one) · `s` `U` `<Space>l` `dd` `a` `<Space>m` `u` `\|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
+| Pager | the motions scroll · `<C-n>` `<C-p>` the next Message, the previous · `<Space>b` `:body` HTML or plain text · `K` every header, as written · `:raw` the Message as it came · `I` `:remote` load Remote Content · `<Space>h` voight's Heatmap · `<CR>` on a Link, `gx` open it · `gy` yank it · `<Space>o` Links (`<C-y>` yanks one) · `<Space>a` Attachments (`<C-s>` saves one) · `s` `U` `<Space>l` `dd` `a` `<Space>m` `u` `\|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
 | Writing, in the Index or the Pager | `c` a new Message · `r` reply · `R` reply to all · `<Space>L` reply to the mailing list · `<Space>f` forward · `:forward attached` forward as an Attachment · `:bounce TO` send it on as it is · `:resume` resume a Postponed Draft, in Drafts |
 | A Draft | `<CR>` `:draft` edit again · `<Space>s` `:send` send · `:attach FILE` attach a file · `:detach` detach the last · `<Space>p` `:postpone` postpone to Drafts · `q` discard, once you say so |
 
@@ -277,7 +277,7 @@ muttrs view message.eml
 
 opens the Pager on a Message saved as a file, without any Account: its headers, then its HTML body as well as the
 terminal can draw it (or its plain text, `<Space>b`), Inline Images included. Remote Content stays blocked until `I`
-loads it, since loading it tells the sender you read the Message. `<Space>o` lists its Links to open (`<C-y>` copies
+loads it, since loading it tells the sender you read the Message. `<Space>o` lists its Links to open (`<C-y>` yanks
 one, as `gy` does the one at the cursor), `<Space>a` its Attachments to open (`<C-s>` saves one), `/` searches it, `:help` shows the keys,
 and `q` quits.
 

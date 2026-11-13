@@ -1,5 +1,5 @@
 //! The lists muttrs opens over its windows as the kit's pickers (its D14), narrowed as what's typed matches: the
-//! Links of the Message shown (`<CR>` opens one, `<C-y>` copies it), its Attachments (`<CR>` opens one, `<C-s>`
+//! Links of the Message shown (`<CR>` opens one, `<C-y>` yanks it), its Attachments (`<CR>` opens one, `<C-s>`
 //! saves it), the Mailboxes to move to, the Labels, and where a search of every Mailbox found Messages.
 
 use wcgw_kit::hl::Group;
@@ -28,7 +28,7 @@ pub(super) fn add(kit: &mut Kit) {
 
 /// Copies `url`, saying so.
 pub(super) fn copy(kit: &mut Kit, url: String) -> Effects {
-    kit.info(format!("Copied {url}"));
+    kit.info(format!("Yanked {url}"));
     vec![Effect::Copy(url)]
 }
 
@@ -64,7 +64,7 @@ impl Muttrs {
             .collect();
         Ok(Picker::list("Links", choices, "No Link matches").verb(
             "<C-y>",
-            "copy",
+            "yank",
             |_, kit, pick| match pick {
                 Pick::Target(Target::Link(url)) => copy(kit, url),
                 _ => Vec::new(),
