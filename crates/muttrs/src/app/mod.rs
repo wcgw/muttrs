@@ -472,26 +472,31 @@ impl Muttrs {
         }
     }
 
-    /// Shows or hides the sidebar (`\`).
+    /// `:sidebar` (`\`): hides the sidebar from within it, goes to it from anywhere else, and brings it back, as
+    /// slackers' does.
     pub(crate) fn toggle_sidebar(&mut self, kit: &mut Kit) {
         let Some(sidebar) = &mut self.sidebar else {
             return;
         };
-        match sidebar.window.take() {
-            Some(window) if kit.window_buffer(window).is_some() => {
-                if !kit.close_window_id(window) {
-                    sidebar.window = Some(window);
+        match sidebar
+            .window
+            .filter(|&window| kit.window_buffer(window).is_some())
+        {
+            Some(window) if kit.current_window() == window => {
+                if kit.close_window_id(window) {
+                    sidebar.window = None;
                 }
             }
-            _ => {
-                let current = kit.current_window();
+            Some(window) => {
+                kit.focus_window(window);
+            }
+            None => {
                 let window = kit.open_window(
                     Placement::FarLeft,
                     Size::Cells(sidebar.width),
                     sidebar.buffer,
                 );
                 sidebar.window = Some(window);
-                kit.focus_window(current);
             }
         }
     }

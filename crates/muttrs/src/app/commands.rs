@@ -58,7 +58,12 @@ const KEYS: [(&str, &str, &str, Topic); 40] = [
     ("<leader>J", "notjunk", "out of Junk, not spam", MAIL),
     ("|", "pipe", "pipe to a command", MAIL),
     ("!", "shell", "run a command", MAIL),
-    ("\\", "sidebar", "show or hide the sidebar", Topic::WINDOWS),
+    (
+        "\\",
+        "sidebar",
+        "the sidebar: go, hide, bring back",
+        Topic::WINDOWS,
+    ),
     (
         "<Esc>",
         "clear",
@@ -402,7 +407,7 @@ pub(super) fn add(kit: &mut Kit) {
             muttrs.toggle_sidebar(kit);
             Ok(Vec::new())
         })
-        .help("show or hide the sidebar"),
+        .help("hide the sidebar from within it, go to it from anywhere else, or bring it back"),
         // Writing.
         Command::new("compose", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs.compose(kit, line.args)

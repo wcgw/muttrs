@@ -277,6 +277,24 @@ fn the_sidebar_lists_the_account_and_its_mailboxes_roles_first_and_folds() {
 }
 
 #[test]
+fn backslash_goes_to_the_sidebar_hides_it_from_within_and_brings_it_back() {
+    let mut mail = Mail::new(100, 20);
+    let sidebar = mail.harness.app.sidebar_window();
+    assert!(sidebar.is_some());
+    assert_ne!(Some(mail.harness.kit.current_window()), sidebar);
+
+    mail.press("\\");
+    assert_eq!(Some(mail.harness.kit.current_window()), sidebar, "gone to");
+    mail.press("\\");
+    assert_eq!(mail.harness.app.sidebar_window(), None, "hidden");
+    assert!(!mail.screen().contains('│'), "{}", mail.screen());
+    mail.press("\\");
+    let back = mail.harness.app.sidebar_window();
+    assert!(back.is_some(), "brought back");
+    assert_eq!(Some(mail.harness.kit.current_window()), back, "and gone to");
+}
+
+#[test]
 fn opening_a_mailbox_from_the_sidebar_lists_its_index_in_the_main_window() {
     let mut mail = Mail::new(100, 20);
     assert!(mail.requests().contains(&Request::Open("INBOX".to_owned())));
@@ -945,18 +963,6 @@ fn drafts_are_edited_as_mail_in_the_editor_the_configuration_says() {
         )),
         "the user's editor, without one configured"
     );
-}
-
-#[test]
-fn the_sidebar_hides_and_shows_with_backslash() {
-    let mut mail = Mail::new(100, 20);
-    mail.two();
-    assert!(mail.rows()[1].contains('│'));
-    mail.press("\\");
-    assert!(!mail.rows()[1].contains('│'), "{:#?}", mail.rows());
-    assert!(mail.rows()[1].starts_with('▌') || mail.rows()[1].starts_with(' '));
-    mail.press("\\");
-    assert!(mail.rows()[1].contains('│'));
 }
 
 #[test]
