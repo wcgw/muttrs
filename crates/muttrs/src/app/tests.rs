@@ -672,6 +672,12 @@ fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_filter() {
     mail.press("A");
     assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
 
+    // A search's matches go first, as the kit's <Esc>.
+    mail.press("x/Lunch<CR><Esc>");
+    assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());
+    mail.press("<Esc>");
+    assert!(!mail.rows()[0].contains("selected"));
+
     // Lunch, from Ann, selected, then left out of what's listed.
     mail.press("ggx:filter from:bob<CR>");
     assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());

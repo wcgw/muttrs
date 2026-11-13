@@ -565,9 +565,12 @@ impl Muttrs {
         Ok(())
     }
 
-    /// `:clear` (`<Esc>`): unselects every Message of the Index, listed or not, or else lists them all again, as
-    /// `:filter` alone does. Elsewhere, nothing.
+    /// `:clear` (`<Esc>`): hides the search's matches, as the kit's `<Esc>` does; else unselects every Message of
+    /// the Index, listed or not, or else lists them all again, as `:filter` alone does.
     pub(crate) fn clear(&mut self, kit: &mut Kit) -> Result<(), String> {
+        if kit.nohlsearch() {
+            return Ok(());
+        }
         let current = kit.current_buffer();
         let Some(index) = self.indexes.get_mut(&current) else {
             return Ok(());

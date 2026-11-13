@@ -66,7 +66,7 @@ const KEYS: [(&str, &str, &str, Topic); 40] = [
     (
         "<Esc>",
         "clear",
-        "clear the Selection, or else the filter",
+        "clear the search, Selection or filter",
         LISTING,
     ),
     ("A", "toggle!", "select all listed, or none", LISTING),
@@ -286,7 +286,7 @@ pub(super) fn add(kit: &mut Kit) {
         Command::new("clear", 3, |muttrs: &mut Muttrs, kit, _| {
             muttrs.clear(kit).map(|()| Vec::new())
         })
-        .help("clear the Selection, or else the filter"),
+        .help("hide the search's matches, or clear the Selection, or else the filter"),
         Command::new("filter", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs.filter_to(kit, line.args).map(|()| Vec::new())
         })

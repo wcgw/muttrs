@@ -46,8 +46,8 @@ with ghd.
   itself on the web: a Message has no page there, so `:browse` alone says so.
 - Selecting is as in ghd: `x` selects, or unselects, and moves down, as `<Space>` did and ghd's `x` does; `A` selects
   all listed, or none, as ghd's; `<Esc>` (`:clear`) unselects every Message, or else lists them all again, as ghd's
-  clears its Selection, or else its filter. It no longer clears a search of the Index (`:nohlsearch` is the kit's),
-  nor goes back from what the server found (`q` does).
+  clears its Selection, or else its filter. Before either, it hides the search's matches, as the kit's `<Esc>`
+  (`:nohlsearch`) does in every app. It no longer goes back from what the server found (`q` does).
 - `\` is slackers': from the sidebar, it hides it; from anywhere else, it goes to it, bringing it back if hidden.
 - `config.toml` keeps what's muttrs' own. Themes (`themes/*.toml`) and keys (`[keys.*]`) are no longer read:
   `init.vim` says them, as `:hi` and `:map` lines, which `scripts/convert-config.py` writes from them. `theme`,
