@@ -304,7 +304,7 @@ impl Muttrs {
     ) -> (Self, Kit) {
         let (mut muttrs, mut kit) = Self::new(config, accounts, false, voight, pictures);
         muttrs.addresses = addresses;
-        let width = sidebar_width(kit.size().0);
+        let width = wcgw_kit::shell::sidebar_width(kit.size().0);
         let buffer = kit.add_buffer("mailboxes", Document::new(), false);
         kit.buffer_mut(buffer).set_cursorline(CursorLine::Row);
         let window = kit.open_window(Placement::FarLeft, Size::Cells(width), buffer);
@@ -1613,11 +1613,6 @@ fn connecting() -> Document {
     doc
 }
 
-/// The sidebar's width on a screen `width` cells wide.
-fn sidebar_width(width: u16) -> u16 {
-    (width / 4).clamp(18, 32).min(width / 2)
-}
-
 /// A Message's subject as a buffer's name: short, and something when it's empty.
 fn truncate_name(subject: &str) -> String {
     let subject = subject.trim();
@@ -1827,7 +1822,7 @@ impl wcgw_kit::App for Muttrs {
 
     fn resized(&mut self, kit: &mut Kit, width: u16, _height: u16) -> Effects {
         if let Some(sidebar) = &mut self.sidebar {
-            sidebar.width = sidebar_width(width);
+            sidebar.width = wcgw_kit::shell::sidebar_width(width);
             if let Some(window) = sidebar.window {
                 kit.set_window_size(window, Size::Cells(sidebar.width));
             }

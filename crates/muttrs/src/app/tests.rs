@@ -610,7 +610,8 @@ fn compose_completes_addresses_seen() {
 
 #[test]
 fn filters_select_and_narrow_and_complete() {
-    let mut mail = Mail::new(100, 30);
+    // As wide as the author's terminal: the winbar says the filter and the Selection beside a 35-cell sidebar.
+    let mut mail = Mail::new(120, 30);
     mail.two();
     let completed = mail
         .harness
@@ -666,7 +667,8 @@ fn ctrl_l_asks_for_what_s_new_and_sync_lists_the_mailbox_anew() {
 
 #[test]
 fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_filter() {
-    let mut mail = Mail::new(100, 30);
+    // As wide as the author's terminal: the winbar says the filter and the Selection beside a 35-cell sidebar.
+    let mut mail = Mail::new(120, 30);
     mail.two();
     // The second `x` selects the next Message, not the first again.
     mail.press("xx");
@@ -1183,7 +1185,8 @@ fn view_shows_a_message_alone_and_q_quits() {
 
 #[test]
 fn help_lists_muttrs_commands_and_keys() {
-    let mut mail = Mail::new(100, 40);
+    // As wide as the author's terminal: help beside a 35-cell sidebar shows the command after the description.
+    let mut mail = Mail::new(120, 40);
     mail.press(":help<CR>/reply to all<CR>");
     assert!(
         mail.harness.kit.cursor_row_text().contains("reply all"),
