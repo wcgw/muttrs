@@ -582,6 +582,18 @@ impl Muttrs {
         }
     }
 
+    /// `:toggle!` (`A`): selects every Message listed, folded ones too, or unselects them if they all are, as ghd's
+    /// `A` does what its View shows.
+    pub(crate) fn toggle_all(&mut self, kit: &Kit) -> Result<(), String> {
+        let (buffer, index) = self.index_here(kit)?;
+        let (picked, selected) = index.select_where(true, |_| true);
+        if picked > 0 && selected == 0 {
+            index.select_where(false, |_| true);
+        }
+        self.dirty.insert(buffer);
+        Ok(())
+    }
+
     /// `:toggle` (`x`, which then moves down): selects the Message at the cursor, with its thread when that's folded
     /// into it, or unselects it.
     pub(crate) fn toggle_selected(&mut self, kit: &mut Kit) -> Result<(), String> {

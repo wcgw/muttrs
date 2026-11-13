@@ -627,6 +627,11 @@ fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_limit() {
     assert!(mail.rows()[0].contains("2 selected"), "{:#?}", mail.rows());
     mail.press(":unselect<CR>");
     assert!(!mail.rows()[0].contains("selected"));
+    // A selects all listed, or none once they all are, as ghd's does.
+    mail.press("ggxA");
+    assert!(mail.rows()[0].contains("2 selected"), "{:#?}", mail.rows());
+    mail.press("A");
+    assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
 
     // Lunch, from Ann, selected, then left out of what's listed.
     mail.press("ggx:limit from:bob<CR>");

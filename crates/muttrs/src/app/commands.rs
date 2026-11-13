@@ -17,7 +17,7 @@ const WRITING: Topic = Topic::new(74, "Writing");
 const LISTING: Topic = Topic::new(76, "Listing");
 
 /// muttrs' default keys: keys, the command each runs, what which-key says of it, and its `:help` topic.
-const KEYS: [(&str, &str, &str, Topic); 39] = [
+const KEYS: [(&str, &str, &str, Topic); 40] = [
     (
         "K",
         "details",
@@ -65,6 +65,7 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
         "clear the Selection, or else the limit",
         LISTING,
     ),
+    ("A", "toggle!", "select all listed, or none", LISTING),
     ("S", "grep", "search the server", LISTING),
     ("od", "sort date", "sort newest first", LISTING),
     ("of", "sort from", "sort by sender", LISTING),
@@ -267,10 +268,16 @@ pub(super) fn add(kit: &mut Kit) {
         .help("send the Message on, as it is, to TO")
         .complete(addresses),
         // Listing.
-        Command::new("toggle", 3, |muttrs: &mut Muttrs, kit, _| {
-            muttrs.toggle_selected(kit).map(|()| Vec::new())
+        Command::new("toggle", 3, |muttrs: &mut Muttrs, kit, line| {
+            if line.bang {
+                muttrs.toggle_all(kit)
+            } else {
+                muttrs.toggle_selected(kit)
+            }
+            .map(|()| Vec::new())
         })
-        .help("select the Message at the cursor, or not"),
+        .bang()
+        .help("select the Message at the cursor, or not; with !, all listed, or none"),
         Command::new("select", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs.select_by(kit, true, line.args).map(|()| Vec::new())
         })
