@@ -1684,15 +1684,8 @@ impl wcgw_kit::App for Muttrs {
     }
 
     fn start(&mut self, kit: &mut Kit) -> Effects {
-        let (lines, ignored) = self.config.kit_settings();
         let mut effects = Vec::new();
-        for line in lines {
-            match kit.run_ex(self, &line) {
-                Ok(more) => effects.extend(more),
-                Err(error) => kit.error(format!("config.toml: {error}")),
-            }
-        }
-        for said in ignored {
+        for said in self.config.ignored() {
             kit.warn(format!("config.toml: {said}"));
         }
         self.everything_dirty();

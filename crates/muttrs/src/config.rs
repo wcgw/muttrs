@@ -16,15 +16,12 @@ use crate::xdg;
 // Each bool is a setting of its own, not a state machine folded into bools.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Config {
-    /// The theme, as muttrs had them before wcgw-kit: `tokyonight-moon`, or `terminal`, the kit's `default`
-    /// colorscheme now. Read to start with that colorscheme; `:colorscheme` in `init.vim` says it now.
-    pub(crate) theme: Option<String>,
-    /// Whether to draw Nerd Font icons: `true`, `false`, or `"auto"` for terminals that have the symbols built in.
-    /// Read to start with `:set icons=` as it says; `init.vim` says it now.
-    pub(crate) icons: Auto,
-    /// How to draw Pictures: `"auto"`, `"kitty"`, `"blocks"`, or `"off"`. Read to start with `:set graphics=` as it
-    /// says; `init.vim` says it now.
-    pub(crate) images: Images,
+    /// Read no more, as ghd's: `:colorscheme` in `init.vim` says how muttrs looks.
+    pub(crate) theme: Option<toml::Value>,
+    /// Read no more: `:set icons=` in `init.vim` says how icons are drawn.
+    pub(crate) icons: Option<toml::Value>,
+    /// Read no more: `:set graphics=` in `init.vim` says how Pictures are drawn.
+    pub(crate) images: Option<toml::Value>,
     /// Whether to load Remote Content without being asked. Loading it tells senders their Message was read.
     pub(crate) load_remote_content: bool,
     /// Which body to show of a Message that has both: `"html"` or `"plain"`.
@@ -51,9 +48,8 @@ pub(crate) struct Config {
     /// Whether a reply in a thread leaves its subject out, as an arrow, where it's what it replies to's (`Re:`
     /// aside), as mutt's `hide_thread_subject` does.
     pub(crate) hide_thread_subjects: bool,
-    /// Whether muttrs takes the mouse: its wheel scrolls, its clicks choose. Terminals then select text with Shift.
-    /// Read to start with `:set mouse=` as it says; `init.vim` says it now.
-    pub(crate) mouse: bool,
+    /// Read no more: `:set mouse=` in `init.vim` says whether muttrs takes the mouse.
+    pub(crate) mouse: Option<toml::Value>,
     /// Where voight assesses the Pager's prose: `"cpu"` (the default, if muttrs was built with voight), `"metal"`,
     /// `"cuda"` or `"wgpu"` in a muttrs built for them, or `"off"`.
     pub(crate) voight: Voight,
@@ -72,8 +68,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: None,
-            icons: Auto::Detect,
-            images: Images::Auto,
+            icons: None,
+            images: None,
             load_remote_content: false,
             prefer: Prefer::Html,
             pager_width: 100,
@@ -85,7 +81,7 @@ impl Default for Config {
             editor: None,
             threads: true,
             hide_thread_subjects: false,
-            mouse: true,
+            mouse: None,
             voight: Voight::default(),
             query_command: None,
             keys: None,
@@ -127,43 +123,6 @@ impl Voight {
             Self::Wgpu => Some(Device::Wgpu),
         }
     }
-}
-
-/// `true`, `false`, or `"auto"`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Auto {
-    /// As suits the terminal.
-    Detect,
-    On,
-    Off,
-}
-
-impl<'de> Deserialize<'de> for Auto {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Written {
-            Bool(bool),
-            Word(String),
-        }
-        match Written::deserialize(deserializer)? {
-            Written::Bool(true) => Ok(Self::On),
-            Written::Bool(false) => Ok(Self::Off),
-            Written::Word(word) if word == "auto" => Ok(Self::Detect),
-            Written::Word(word) => Err(serde::de::Error::custom(format!(
-                "expected true, false or \"auto\", not {word:?}"
-            ))),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Images {
-    Auto,
-    Kitty,
-    Blocks,
-    Off,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -233,29 +192,29 @@ impl Config {
         Ok(config)
     }
 
-    /// The kit's commands that say what the settings it reads no longer do (`theme`, `icons`, `images`, `mouse`),
-    /// to run at startup, before `init.vim`, which has the last say; and what's said of those it ignores.
-    pub(crate) fn kit_settings(&self) -> (Vec<String>, Vec<String>) {
-        let mut lines = Vec::new();
+    /// What's said of the settings it has that are read no more: the look's, which `init.vim` says, as in ghd, and
+    /// `[keys.*]`, which `:map` says.
+    pub(crate) fn ignored(&self) -> Vec<String> {
         let mut ignored = Vec::new();
-        match self.theme.as_deref() {
-            None | Some("tokyonight-moon") => {}
-            Some("terminal") => lines.push("colorscheme default".to_owned()),
-            Some(name) => lines.push(format!("colorscheme {name}")),
-        }
-        match self.icons {
-            Auto::Detect => {}
-            Auto::On => lines.push("set icons=nerd".to_owned()),
-            Auto::Off => lines.push("set icons=plain".to_owned()),
-        }
-        match self.images {
-            Images::Auto => {}
-            Images::Kitty => lines.push("set graphics=kitty".to_owned()),
-            Images::Blocks => lines.push("set graphics=halfblocks".to_owned()),
-            Images::Off => lines.push("set graphics=off".to_owned()),
-        }
-        if !self.mouse {
-            lines.push("set mouse=".to_owned());
+        let look: Vec<&str> = [
+            ("theme", self.theme.is_some()),
+            ("icons", self.icons.is_some()),
+            ("images", self.images.is_some()),
+            ("mouse", self.mouse.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect();
+        if let Some((last, rest)) = look.split_last() {
+            let keys = if rest.is_empty() {
+                (*last).to_owned()
+            } else {
+                format!("{} and {last}", rest.join(", "))
+            };
+            ignored.push(format!(
+                "{keys} read no more: :colorscheme and :set icons= graphics= mouse= go in \
+                 ~/.config/muttrs/init.vim (scripts/convert-config.py writes them)"
+            ));
         }
         if self.keys.is_some() {
             ignored.push(
@@ -263,7 +222,7 @@ impl Config {
                     .to_owned(),
             );
         }
-        (lines, ignored)
+        ignored
     }
 
     /// Where Attachments are saved.
@@ -286,8 +245,7 @@ mod tests {
     #[test]
     fn everything_is_optional() {
         let config = parse("").unwrap();
-        assert_eq!(config.theme, None);
-        assert_eq!(config.icons, Auto::Detect);
+        assert_eq!(config.ignored(), Vec::<String>::new());
         assert!(!config.load_remote_content);
         assert_eq!((config.pager_index_lines, config.pager_read_delay), (0, 1));
         assert_eq!(
@@ -304,8 +262,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!((config.pager_index_lines, config.pager_read_delay), (8, 0));
-        assert_eq!(config.icons, Auto::Off);
-        assert_eq!(config.images, Images::Blocks);
         assert_eq!(config.prefer, Prefer::Plain);
         assert_eq!(config.pager_width, 80);
     }
@@ -346,34 +302,29 @@ mod tests {
     }
 
     #[test]
-    fn what_the_kit_says_now_is_said_to_it_at_startup() {
+    fn the_look_is_read_no_more_but_still_loads_as_in_ghd() {
         let config = parse(
-            "theme = \"terminal\"\nicons = false\nimages = \"blocks\"\nmouse = false\neditor = \"nvim\"\n\
+            "theme = \"terminal\"\nicons = \"sometimes\"\nimages = \"blocks\"\nmouse = false\neditor = \"nvim\"\n\
              [keys.index]\nx = \"a\"\n",
         )
         .unwrap();
-        let (lines, ignored) = config.kit_settings();
-        assert_eq!(
-            lines,
-            [
-                "colorscheme default",
-                "set icons=plain",
-                "set graphics=halfblocks",
-                "set mouse="
-            ]
+        let ignored = config.ignored();
+        assert_eq!(ignored.len(), 2, "the look's, and [keys.*]: {ignored:?}");
+        assert!(
+            ignored[0].starts_with("theme, icons, images and mouse read no more"),
+            "{ignored:?}"
         );
-        assert_eq!(ignored.len(), 1, "[keys.*]: {ignored:?}");
+        assert!(parse("mouse = false").unwrap().ignored()[0].starts_with("mouse read no more"));
         assert_eq!(
             config.editor.as_deref(),
             Some("nvim"),
             "the editor is muttrs' own again"
         );
-        assert_eq!(parse("").unwrap().kit_settings(), (Vec::new(), Vec::new()));
+        assert_eq!(parse("").unwrap().ignored(), Vec::<String>::new());
     }
 
     #[test]
     fn mistakes_are_errors() {
-        assert!(parse("icons = \"sometimes\"").is_err());
         assert!(parse("colour = 1").is_err(), "unknown keys aren't ignored");
     }
 }

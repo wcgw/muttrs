@@ -306,9 +306,8 @@ What's on screen is the kit's, and `~/.config/muttrs/init.vim` says it, after `~
 `:set icons=auto|nerd|plain`, `:set graphics=auto|kitty|halfblocks|off` and `:set mouse=`, `:hi` for any group, and
 `:map` for keys. muttrs' groups are named `Muttrs…` (`MuttrsUnread`, `MuttrsFlagged`, `MuttrsLabel`, …) and link to
 the standard ones, with colours of their own in tokyonight-moon; `MuttrsPage` has the background authors' colours
-are judged against. `theme`, `icons`, `images` and `mouse` in config.toml still say how muttrs starts, before
-init.vim, and will go; themes in `themes/` are no longer read: `scripts/convert-config.py` writes a theme's file as
-`:hi` lines.
+are judged against. `theme`, `icons`, `images` and `mouse` in config.toml, and themes in `themes/`, are no longer
+read: `scripts/convert-config.py` writes them as `:colorscheme`, `:set` and `:hi` lines.
 
 muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.cache/muttrs/accounts/`, readable by
 you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline. What's

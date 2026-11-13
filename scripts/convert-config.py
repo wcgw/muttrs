@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Writes the init.vim lines that say what muttrs' themes and keys said before wcgw-kit.
+"""Writes the init.vim lines that say what muttrs' themes, keys and look said before wcgw-kit.
 
-muttrs no longer reads `[keys.*]` in config.toml, nor themes in themes/*.toml: the kit's init.vim says both, as
-`:map` and `:hi` lines (wcgw-kit's D6). Run it once, and put what it prints in ~/.config/muttrs/init.vim:
+muttrs no longer reads `[keys.*]`, `theme`, `icons`, `images` and `mouse` in config.toml, nor themes in
+themes/*.toml: the kit's init.vim says them, as `:map`, `:colorscheme`, `:set` and `:hi` lines (wcgw-kit's D6). Run it once, and put what it prints in ~/.config/muttrs/init.vim:
 
     scripts/convert-config.py ~/.config/muttrs/config.toml ~/.config/muttrs/themes/mine.toml >> init.vim
 
@@ -99,6 +99,23 @@ ATTRIBUTES = {
 }
 
 
+def settings(config):
+    """The `:colorscheme` and `:set` lines of config.toml's `theme`, `icons`, `images` and `mouse`."""
+    lines = []
+    theme = config.get("theme")
+    if theme and theme != "tokyonight-moon":
+        lines.append(f"colorscheme {'default' if theme == 'terminal' else theme}")
+    icons = {True: "nerd", False: "plain"}.get(config.get("icons"))
+    if icons:
+        lines.append(f"set icons={icons}")
+    graphics = {"kitty": "kitty", "blocks": "halfblocks", "off": "off"}.get(config.get("images"))
+    if graphics:
+        lines.append(f"set graphics={graphics}")
+    if config.get("mouse") is False:
+        lines.append("set mouse=")
+    return lines
+
+
 def keys(config):
     """The `:nnoremap` lines of config.toml's `[keys.*]`."""
     lines = []
@@ -160,7 +177,10 @@ def main(paths):
         with open(path, "rb") as file:
             text = tomllib.load(file)
         print(f'" From {path}')
-        print("\n".join(keys(text) if "keys" in text or "account" in text else theme(text)))
+        if any(section in text for section in ("base", "page", "ui", "body")):
+            print("\n".join(theme(text)))
+        else:
+            print("\n".join(settings(text) + keys(text)))
 
 
 if __name__ == "__main__":

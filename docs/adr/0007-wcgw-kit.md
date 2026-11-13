@@ -51,7 +51,8 @@ with ghd.
 - `\` is slackers': from the sidebar, it hides it; from anywhere else, it goes to it, bringing it back if hidden.
 - `config.toml` keeps what's muttrs' own. Themes (`themes/*.toml`) and keys (`[keys.*]`) are no longer read:
   `init.vim` says them, as `:hi` and `:map` lines, which `scripts/convert-config.py` writes from them. `theme`,
-  `icons`, `images` and `mouse` still say how muttrs starts, as `:colorscheme` and `:set` lines before `init.vim`.
+  `icons`, `images` and `mouse` are read no more either, as ghd's `theme` and `icons`: a warning says so, and the
+  script writes them as `:colorscheme` and `:set` lines.
 - `:` commands are named as vim's are, letters only: `:not-junk` is `:notjunk`, `:delete-mailbox` `:delmailbox`,
   `:forward-attached` `:forward attached`, and `:source` (the Message as it came) `:raw`, as `:source` is vim's.
 - The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.

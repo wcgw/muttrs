@@ -1032,13 +1032,18 @@ fn icons_come_from_the_kit_and_set_icons_plain_draws_them_plain() {
 }
 
 #[test]
-fn the_configuration_s_ui_settings_start_as_the_kit_s() {
+fn the_configuration_s_look_is_read_no_more_and_says_so_as_ghd_s() {
     let config = Config {
-        theme: Some("terminal".to_owned()),
+        theme: Some(toml::Value::String("terminal".to_owned())),
         ..Config::default()
     };
     let mail = Mail::with(config, false, 100, 20);
-    assert_eq!(mail.harness.kit.theme().name(), "default");
+    assert_eq!(mail.harness.kit.theme().name(), "tokyonight-moon");
+    assert!(
+        mail.cmdline().contains("theme read no more"),
+        "{}",
+        mail.cmdline()
+    );
 }
 
 #[cfg(feature = "voight")]
