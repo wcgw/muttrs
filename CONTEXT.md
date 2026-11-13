@@ -70,7 +70,7 @@ _Avoid_: tagged, marked
 
 **Filter**:
 A line of `qualifier:value` terms, as Gmail's search writes them (`from:ann is:unread`), that picks Messages of the
-Index; `:select` and `:unselect` act on what it picks.
+Index; `:select` and `:unselect` act on what it picks, and `:filter` lists only that.
 _Avoid_: pattern, query (that's what `S` sends the server)
 
 **Task**:

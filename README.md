@@ -179,7 +179,7 @@ a folded thread whole), several as an mbox, the oldest first, as `git am` and `b
 `|git am -3`. The command has the terminal until `Enter` brings muttrs back. `!` runs a command so, or the shell. The
 Messages are piped byte for byte, an 8bit part in Latin-1 as it came.
 
-`:limit` lists only the Messages a filter picks, in threads among themselves, until `:limit` alone lists them all
+`:filter` lists only the Messages a filter picks, in threads among themselves, until `:filter` alone lists them all
 again; `:select` then picks among those. `<Esc>` (`:clear`) unselects every Message, listed or not, or with none
 selected, lists them all again.
 

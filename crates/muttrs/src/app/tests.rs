@@ -592,7 +592,7 @@ fn compose_completes_addresses_seen() {
 }
 
 #[test]
-fn filters_select_and_limit_and_complete() {
+fn filters_select_and_narrow_and_complete() {
     let mut mail = Mail::new(100, 30);
     mail.two();
     let completed = mail
@@ -603,7 +603,7 @@ fn filters_select_and_limit_and_complete() {
     let completed = mail
         .harness
         .kit
-        .ex_completions(&mail.harness.app, "limit from:b");
+        .ex_completions(&mail.harness.app, "filter from:b");
     assert_eq!(completed.candidates, ["from:bob@example.com"]);
 
     mail.press(":select from:bob<CR>");
@@ -626,13 +626,13 @@ fn filters_select_and_limit_and_complete() {
             uids: vec![2]
         }]
     );
-    mail.press(":limit from:ann<CR>");
+    mail.press(":filter from:ann<CR>");
     assert!(
-        mail.rows()[0].contains("limited to from:a"),
+        mail.rows()[0].contains("filter from:a"),
         "{:#?}",
         mail.rows()
     );
-    mail.press(":limit<CR>");
+    mail.press(":filter<CR>");
     assert!(mail.cmdline().contains("All show again"));
 }
 
@@ -648,7 +648,7 @@ fn ctrl_l_asks_for_what_s_new_and_sync_lists_the_mailbox_anew() {
 }
 
 #[test]
-fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_limit() {
+fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_filter() {
     let mut mail = Mail::new(100, 30);
     mail.two();
     // The second `x` selects the next Message, not the first again.
@@ -663,15 +663,15 @@ fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_limit() {
     assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
 
     // Lunch, from Ann, selected, then left out of what's listed.
-    mail.press("ggx:limit from:bob<CR>");
+    mail.press("ggx:filter from:bob<CR>");
     assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());
-    assert!(mail.rows()[0].contains("limited to from:bob"));
-    // `<Esc>` unselects what isn't listed too, and leaves the limit for the next one.
+    assert!(mail.rows()[0].contains("filter from:bob"));
+    // `<Esc>` unselects what isn't listed too, and leaves the filter for the next one.
     mail.press("<Esc>");
     assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
-    assert!(mail.rows()[0].contains("limited to from:bob"));
+    assert!(mail.rows()[0].contains("filter from:bob"));
     mail.press("<Esc>");
-    assert!(!mail.rows()[0].contains("limited"), "{:#?}", mail.rows());
+    assert!(!mail.rows()[0].contains("filter"), "{:#?}", mail.rows());
     assert!(mail.cmdline().contains("All show again"));
 }
 

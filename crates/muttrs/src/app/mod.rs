@@ -636,13 +636,13 @@ impl Muttrs {
                 0 => String::new(),
                 count => format!(" · {count} selected"),
             };
-            let limited = index
-                .limited()
-                .map_or_else(String::new, |filter| format!(" · limited to {filter}"));
+            let filtered = index
+                .filtered()
+                .map_or_else(String::new, |filter| format!(" · filter {filter}"));
             let sorted = index
                 .sorted()
                 .map_or_else(String::new, |sorted| format!(" · {sorted}"));
-            format!(" · {messages}, {unread} Unread{listed}{sorted}{limited}{selected}")
+            format!(" · {messages}, {unread} Unread{listed}{sorted}{filtered}{selected}")
         } else {
             String::new()
         };

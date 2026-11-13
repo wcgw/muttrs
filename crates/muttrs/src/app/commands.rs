@@ -67,7 +67,7 @@ const KEYS: [(&str, &str, &str, Topic); 40] = [
     (
         "<Esc>",
         "clear",
-        "clear the Selection, or else the limit",
+        "clear the Selection, or else the filter",
         LISTING,
     ),
     ("A", "toggle!", "select all listed, or none", LISTING),
@@ -296,11 +296,11 @@ pub(super) fn add(kit: &mut Kit) {
         Command::new("clear", 3, |muttrs: &mut Muttrs, kit, _| {
             muttrs.clear(kit).map(|()| Vec::new())
         })
-        .help("clear the Selection, or else the limit"),
-        Command::new("limit", 3, |muttrs: &mut Muttrs, kit, line| {
-            muttrs.limit_to(kit, line.args).map(|()| Vec::new())
+        .help("clear the Selection, or else the filter"),
+        Command::new("filter", 3, |muttrs: &mut Muttrs, kit, line| {
+            muttrs.filter_to(kit, line.args).map(|()| Vec::new())
         })
-        .help("list only what a filter picks; alone, all")
+        .help("narrow the Index to what a filter picks; alone, all again")
         .complete(filters),
         Command::new("sort", 3, |muttrs: &mut Muttrs, kit, line| {
             let sort = Sort::named(if line.args.is_empty() {

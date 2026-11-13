@@ -516,8 +516,8 @@ impl Muttrs {
         Ok((buffer, index))
     }
 
-    /// Limits the Index to the Messages `filter` picks; to none, all show again, if it's empty.
-    pub(crate) fn limit_to(&mut self, kit: &mut Kit, filter: &str) -> Result<(), String> {
+    /// `:filter`: narrows the Index to the Messages `filter` picks; all show again, if it's empty.
+    pub(crate) fn filter_to(&mut self, kit: &mut Kit, filter: &str) -> Result<(), String> {
         let parsed = if filter.is_empty() {
             None
         } else {
@@ -529,7 +529,7 @@ impl Muttrs {
             ))
         };
         let (buffer, index) = self.index_here(kit)?;
-        let shown = index.limit(parsed);
+        let shown = index.filter(parsed);
         self.dirty.insert(buffer);
         kit.info(match (filter, shown) {
             ("", _) => "All show again".to_owned(),
@@ -566,7 +566,7 @@ impl Muttrs {
     }
 
     /// `:clear` (`<Esc>`): unselects every Message of the Index, listed or not, or else lists them all again, as
-    /// `:limit` alone does. Elsewhere, nothing.
+    /// `:filter` alone does. Elsewhere, nothing.
     pub(crate) fn clear(&mut self, kit: &mut Kit) -> Result<(), String> {
         let current = kit.current_buffer();
         let Some(index) = self.indexes.get_mut(&current) else {
@@ -575,8 +575,8 @@ impl Muttrs {
         if index.clear_selected() {
             self.dirty.insert(current);
             Ok(())
-        } else if index.limited().is_some() {
-            self.limit_to(kit, "")
+        } else if index.filtered().is_some() {
+            self.filter_to(kit, "")
         } else {
             Ok(())
         }

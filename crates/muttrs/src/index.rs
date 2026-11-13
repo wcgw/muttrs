@@ -121,8 +121,8 @@ pub(crate) struct Index {
     more: More,
     /// What a search on the server found, if that's what this lists: its query, and how many it found.
     pub(crate) found: Option<(String, usize)>,
-    /// The Filter the rows are limited to, as written and read: only the Messages it picks show.
-    limit: Option<(String, Filter)>,
+    /// The Filter the rows are narrowed to (`:filter`), as written and read: only the Messages it picks show.
+    filter: Option<(String, Filter)>,
     /// What the rows are ordered by when they aren't in threads, and whether the other way.
     sort: Sort,
     reverse: bool,
@@ -150,7 +150,7 @@ impl Index {
             loaded: false,
             more: More::Idle,
             found: None,
-            limit: None,
+            filter: None,
             sort: Sort::Date,
             reverse: false,
         }
@@ -197,7 +197,7 @@ impl Index {
     /// Lays the rows out again.
     fn arrange(&mut self) {
         let mut shown: Vec<usize> = (0..self.envelopes.len())
-            .filter(|&envelope| self.within_limit(&self.envelopes[envelope]))
+            .filter(|&envelope| self.within_filter(&self.envelopes[envelope]))
             .collect();
         if !self.threaded {
             self.order(&mut shown);
@@ -366,7 +366,7 @@ impl Index {
         let shown: Vec<&Envelope> = self
             .envelopes
             .iter()
-            .filter(|envelope| self.within_limit(envelope) && picks(envelope))
+            .filter(|envelope| self.within_filter(envelope) && picks(envelope))
             .collect();
         for envelope in shown {
             picked += 1;
@@ -380,24 +380,24 @@ impl Index {
         (picked, changed)
     }
 
-    /// Limits the rows to the Messages `limit` picks, as written and read; or not, if it's None. How many show.
-    pub(crate) fn limit(&mut self, limit: Option<(String, Filter)>) -> usize {
-        self.limit = limit;
+    /// Narrows the rows to the Messages `filter` picks, as written and read; or not, if it's None. How many show.
+    pub(crate) fn filter(&mut self, filter: Option<(String, Filter)>) -> usize {
+        self.filter = filter;
         self.arrange();
         self.envelopes
             .iter()
-            .filter(|envelope| self.within_limit(envelope))
+            .filter(|envelope| self.within_filter(envelope))
             .count()
     }
 
-    /// The Filter the rows are limited to, as written, if they are.
-    pub(crate) fn limited(&self) -> Option<&str> {
-        self.limit.as_ref().map(|(written, _)| written.as_str())
+    /// The Filter the rows are narrowed to, as written, if they are.
+    pub(crate) fn filtered(&self) -> Option<&str> {
+        self.filter.as_ref().map(|(written, _)| written.as_str())
     }
 
-    /// Whether `envelope` shows, within the limit, if there's one.
-    fn within_limit(&self, envelope: &Envelope) -> bool {
-        self.limit
+    /// Whether `envelope` shows, as the Filter the rows are narrowed to picks it, if there's one.
+    fn within_filter(&self, envelope: &Envelope) -> bool {
+        self.filter
             .as_ref()
             .is_none_or(|(_, filter)| filter.matches(envelope))
     }
@@ -862,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn limited_only_what_the_filter_picks_shows_in_threads_of_its_own() {
+    fn filtered_only_what_the_filter_picks_shows_in_threads_of_its_own() {
         let mut index = index(true);
         index.set(
             vec![
@@ -873,20 +873,20 @@ mod tests {
             ],
             4,
         );
-        let shown = index.limit(Some(("from:bob".into(), "from:bob".parse().unwrap())));
+        let shown = index.filter(Some(("from:bob".into(), "from:bob".parse().unwrap())));
         assert_eq!(shown, 2);
         assert_eq!(
             rows(&index),
             [(2, String::new()), (3, "└─".to_owned())],
             "Bob's replies, a thread among themselves"
         );
-        assert_eq!(index.limited(), Some("from:bob"));
+        assert_eq!(index.filtered(), Some("from:bob"));
         assert_eq!(
             index.select_where(true, |_| true),
             (2, 2),
             "only what shows"
         );
-        assert_eq!(index.limit(None), 4);
+        assert_eq!(index.filter(None), 4);
         assert_eq!(rows(&index).len(), 4);
     }
 
