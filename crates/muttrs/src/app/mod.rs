@@ -659,7 +659,6 @@ impl Muttrs {
     fn pager_look(&self, kit: &Kit) -> pager::Look {
         let (width, height) = kit.cell_size();
         pager::Look {
-            styles: Self::body_styles(kit),
             heat: crate::heatmap::Heat {
                 human: kit.style(hl::HEAT_HUMAN),
                 even: kit.style(hl::HEAT_EVEN),
@@ -701,14 +700,14 @@ impl Muttrs {
         };
         let look = self.pager_look(kit);
         let heat = self.heat(pager);
-        let blocks = pager.blocks(width, &look, heat.as_deref());
+        let shown = pager.shown(width, &look, heat.as_deref());
         let subject = if pager.message().subject.is_empty() {
             "(no subject)".to_owned()
         } else {
             pager.message().subject.clone()
         };
         let buffer = kit.buffer_mut(buffer);
-        buffer.doc_mut().set_blocks(blocks);
+        *buffer.doc_mut() = shown;
         buffer.set_winbar(Some(vec![(format!(" {subject}"), hl::SUBJECT)]));
     }
 

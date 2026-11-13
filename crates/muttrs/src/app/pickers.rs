@@ -111,7 +111,9 @@ impl Muttrs {
             "<C-s>",
             "save",
             |muttrs: &mut Self, kit, pick| match pick {
+                // Saved, the list goes, as muttrs' did; copying a Link leaves the Links listed, for more.
                 Pick::Target(Target::Attachment { pager, part }) => {
+                    kit.close_picker();
                     muttrs.attachment(pager, part, true).unwrap_or_else(|why| {
                         kit.error(why);
                         Vec::new()

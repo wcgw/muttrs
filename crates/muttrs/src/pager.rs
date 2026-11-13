@@ -6,13 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use jiff::tz::TimeZone;
 use muttrs_mail::{Address, Message, Part};
-use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 use wcgw_kit::BufferId;
-use wcgw_kit::doc::{BlockKey, Content};
-use wcgw_kit_text::{
-    CellSize, Document, ImageSource, Link, Options, Rendering, Styles, TextFormat,
-};
+use wcgw_kit::doc::Content;
+use wcgw_kit_text::{CellSize, Document, ImageSource, Link, Options, Styles, TextFormat};
 
 use crate::app::{Line, Opened, Span, Target};
 use crate::assessment::{self, Window};
@@ -56,7 +53,6 @@ pub(crate) fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// What the Pager draws with: the kit's styles for bodies and the Heatmap, its icons, the cells' size, and the
 /// configuration's say on Pictures.
 pub(crate) struct Look {
-    pub(crate) styles: Styles,
     pub(crate) heat: Heat,
     pub(crate) attachment: String,
     pub(crate) blocked: String,
@@ -312,19 +308,23 @@ impl Pager {
         true
     }
 
-    /// The Pager as blocks of a kit document, `width` cells wide: its headers, then its body, each Picture a line
-    /// of its own the kit draws it over; the prose shaded by `heat`, the windows of its Assessment, if given.
-    pub(crate) fn blocks(
+    /// The Pager as a kit document, `width` cells wide: its headers, then its body, a Link's text and number opening
+    /// it, each Picture a line of its own the kit draws it over; the prose shaded by `heat`, the windows of its
+    /// Assessment, if given. (Shaded, a Link's text no longer has the Link's colour, which is how it's found: its
+    /// number still opens it.)
+    pub(crate) fn shown(
         &self,
         width: u16,
         look: &Look,
         heat: Option<&[Window]>,
-    ) -> Vec<(BlockKey, Content<Target>)> {
+    ) -> wcgw_kit::doc::Document<Target> {
+        let mut shown = wcgw_kit::doc::Document::new();
         if self.source {
-            return vec![(
-                BlockKey::new("source"),
+            shown.push_back(
+                "source",
                 Content::from(source_lines(&self.message.source(), width)),
-            )];
+            );
+            return shown;
         }
         let headers = Content::from(self.headers(width, look));
         let sizes: Vec<Option<(u32, u32)>> = if self.showing == Body::Html && look.pictures {
@@ -338,7 +338,7 @@ impl Pager {
         } else {
             Vec::new()
         };
-        let body = match self.document() {
+        match self.document() {
             Some(document) => {
                 let mut rendering = document.render(&Options {
                     width,
@@ -352,19 +352,25 @@ impl Pager {
                 if let (Some(heat), Some(prose)) = (heat, &self.prose) {
                     heatmap::shade(&mut rendering.lines, prose, heat, &look.heat);
                 }
-                body_lines(&rendering, document.links(), &look.styles, |image| {
-                    source(self.id, image)
-                })
+                // A Link's text and number open it.
+                shown = wcgw_kit_text::kit::linked_document(
+                    document,
+                    &rendering,
+                    "body",
+                    |image| source(self.id, image),
+                    |_, link| Some(Target::Link(link.url.clone())),
+                );
             }
-            None => vec![Line::Text(vec![Span::new(
-                "This Message has no body to show.",
-                hl::DIM,
-            )])],
-        };
-        vec![
-            (BlockKey::new("headers"), headers),
-            (BlockKey::new("body"), Content::from(body)),
-        ]
+            None => shown.push_back(
+                "body",
+                vec![Line::Text(vec![Span::new(
+                    "This Message has no body to show.",
+                    hl::DIM,
+                )])],
+            ),
+        }
+        shown.push_front("headers", headers);
+        shown
     }
 
     /// The headers, laid out `width` cells wide, then a rule.
@@ -469,83 +475,6 @@ fn source(id: u64, index: usize) -> String {
 /// The index of the image at `source`, if it's one of the Pager `id`'s.
 fn index_of(id: u64, source: &str) -> Option<usize> {
     source.strip_prefix(&format!("muttrs:{id}/"))?.parse().ok()
-}
-
-/// The lines of a `rendering` of a body with `links`, drawn in `styles`, as the kit's: each in its own colours, a
-/// Link's text and number referring to it, and each Picture a line of its own, its source named by `source`.
-pub(crate) fn body_lines(
-    rendering: &Rendering,
-    links: &[Link],
-    styles: &Styles,
-    source: impl Fn(usize) -> String,
-) -> Vec<Line> {
-    let mut drawn = Vec::with_capacity(rendering.lines.len());
-    let mut skip = 0;
-    for (index, line) in rendering.lines.iter().enumerate() {
-        if skip > 0 {
-            skip -= 1;
-            continue;
-        }
-        if let Some(slot) = rendering.pictures.iter().find(|slot| slot.line == index) {
-            drawn.push(Line::Image {
-                rows: slot.rows,
-                cols: slot.cols,
-                source: source(slot.image),
-            });
-            skip = usize::from(slot.rows.saturating_sub(1));
-            continue;
-        }
-        let targets = link_targets(&line.spans, links, styles);
-        let spans = line
-            .spans
-            .iter()
-            .zip(targets)
-            .map(|(span, target)| {
-                let shown = Span::new(span.content.to_string(), Group::NORMAL)
-                    .with_style(line.style.patch(span.style));
-                match target {
-                    Some(url) => shown.with_target(Target::Link(url)),
-                    None => shown,
-                }
-            })
-            .collect();
-        drawn.push(Line::Text(spans));
-    }
-    drawn
-}
-
-/// The Link each of `spans` shows, if it shows one: a URL written out (in plain text), or a Link's number (`[3]`,
-/// in HTML) and the text in the Link's style before it.
-fn link_targets(
-    spans: &[ratatui::text::Span<'_>],
-    links: &[Link],
-    styles: &Styles,
-) -> Vec<Option<String>> {
-    let mut targets: Vec<Option<String>> = vec![None; spans.len()];
-    let is_link = |style: Style| style.patch(styles.link) == style;
-    for (at, span) in spans.iter().enumerate() {
-        let text = span.content.as_ref();
-        if span.style == styles.link_number
-            && let Some(number) = text
-                .strip_prefix('[')
-                .and_then(|rest| rest.strip_suffix(']'))
-                .and_then(|number| number.parse::<usize>().ok())
-            && let Some(link) = number.checked_sub(1).and_then(|index| links.get(index))
-        {
-            targets[at] = Some(link.url.clone());
-            for before in (0..at).rev() {
-                if !is_link(spans[before].style) {
-                    break;
-                }
-                targets[before] = Some(link.url.clone());
-            }
-        } else if is_link(span.style)
-            && let Some(link) = links.iter().find(|link| link.url == text)
-        {
-            targets[at] = Some(link.url.clone());
-        }
-    }
-    targets
 }
 
 /// A header's lines: its `label`, then `value` wrapped to `width`, indented under the label.
@@ -655,44 +584,6 @@ mod tests {
         assert_eq!(size(512), "512 B");
         assert_eq!(size(12_800), "12 KB");
         assert_eq!(size(3 * 1024 * 1024 + 1), "3.0 MB");
-    }
-
-    #[test]
-    fn links_refer_to_their_url_from_their_text_and_number() {
-        let styles = Styles::default();
-        let document = Document::html(
-            "<p>See <a href=\"https://x.example/a\">the page</a> now.</p>",
-            &styles,
-        );
-        let rendering = document.render(&Options {
-            width: 60,
-            cell: CellSize::default(),
-            pixel_ratio: 1.0,
-            max_picture_rows: 0,
-            pictures: &[],
-        });
-        let lines = body_lines(&rendering, document.links(), &styles, |_| String::new());
-        let Line::Text(spans) = &lines[0] else {
-            panic!("a line of text");
-        };
-        let linked: Vec<(&str, bool)> = spans
-            .iter()
-            .map(|span| (span.text.as_str(), span.target.is_some()))
-            .filter(|(text, _)| !text.trim().is_empty())
-            .collect();
-        assert!(linked.contains(&("[1]", true)), "the number: {linked:?}");
-        assert!(
-            linked
-                .iter()
-                .any(|(text, linked)| text.contains("page") && *linked),
-            "the text: {linked:?}"
-        );
-        assert!(
-            linked
-                .iter()
-                .any(|(text, linked)| text.contains("See") && !*linked),
-            "not what's before: {linked:?}"
-        );
     }
 
     #[test]

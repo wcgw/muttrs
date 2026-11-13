@@ -679,6 +679,11 @@ fn attachments_open_or_save_from_pickers() {
         effect,
         wcgw_kit::Effect::App(Io::Save { name, .. }) if name == "notes.txt"
     )));
+    assert!(
+        !mail.screen().contains("Attachments"),
+        "saved, the list goes: {}",
+        mail.screen()
+    );
 }
 
 #[test]

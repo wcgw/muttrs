@@ -89,7 +89,22 @@ impl Compose {
             max_picture_rows: 0,
             pictures: &[],
         });
-        let body = crate::pager::body_lines(&rendering, body.links(), styles, |_| String::new());
+        // Each line in its own colours, as laid out; there are no Pictures to draw in a Draft.
+        let body: Vec<Line> = rendering
+            .lines
+            .iter()
+            .map(|line| {
+                Line::Text(
+                    line.spans
+                        .iter()
+                        .map(|span| {
+                            Span::new(span.content.to_string(), Group::NORMAL)
+                                .with_style(line.style.patch(span.style))
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
         vec![
             (
                 BlockKey::new("headers"),
