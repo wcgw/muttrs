@@ -24,8 +24,7 @@ cargo install --locked --path crates/muttrs
 ```
 
 muttrs runs in [wcgw-kit](https://github.com/wcgw/wcgw-kit), the editor shell the wcgw apps share, at its `v0.1.0`
-tag, which cargo fetches; voight is built from the `wcgw-kit` branch of a local checkout of voight, until that's
-pushed.
+tag, and voight at its `v0.2.0` tag, both of which cargo fetches.
 
 That builds [voight](https://github.com/wcgw/voight) in, as ghd does, running on the CPU: it estimates how much of
 the prose the Pager shows an LLM wrote (below). Add `--features cuda` to run it on an NVIDIA GPU (this needs the CUDA

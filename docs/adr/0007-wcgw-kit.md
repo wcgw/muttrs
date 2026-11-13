@@ -71,5 +71,4 @@ with ghd.
 - `!` and `|` hand the terminal to their command, as the kit does, waiting for Enter after; `|` pipes the Messages
   byte for byte. `!` and `:shell` (and `:!CMD`) are the kit's now, in every app, as muttrs had them.
 - The Draft is edited in an `.eml` file, in the configuration's `editor`, else the kit's (`$EDITOR`, `$VISUAL`).
-- wcgw-kit comes from its `v0.1.0` tag; voight is still pinned to a local checkout's `wcgw-kit` branch until that's
-  pushed.
+- wcgw-kit comes from its `v0.1.0` tag, and voight from its `v0.2.0` tag.

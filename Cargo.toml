@@ -55,8 +55,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 unicode-width = "0.2.3"
 wiremock = "0.6.5"
 
-# voight's shared Assessor (wcgw-kit's D17), on its `wcgw-kit` branch in the local checkout until it's pushed.
-voight = { git = "file:///home/alxs/src/github.com/wcgw/voight", branch = "wcgw-kit", default-features = false }
+# voight's shared Assessor (wcgw-kit's D17), at its release tag.
+voight = { git = "https://github.com/wcgw/voight", tag = "v0.2.0", default-features = false }
 
 muttrs-mail = { path = "crates/muttrs-mail" }
 
