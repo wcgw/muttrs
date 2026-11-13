@@ -42,6 +42,8 @@ with ghd.
   (selecting is `x`), `s` flags (moving is `<Space>m`), `$` is the end of the line (refreshing is `<C-l>`), `J` and
   `K` don't step through Messages (`<C-n>` and `<C-p>` do), `h` is a motion (every header is `K`), `H` is a motion
   (the Heatmap is `<Space>h`), and a Draft's keys are commands (`:send`, `:postpone`, `:attach`, `:detach`).
+- `gx` is `:browse link`, and `gy` copies what it opens, as in the other apps, where `:browse` alone opens the thing
+  itself on the web: a Message has no page there, so `:browse` alone says so.
 - Selecting is as in ghd: `x` selects, or unselects, and moves down, as `<Space>` did and ghd's `s` does; `<Esc>`
   (`:clear`) unselects every Message, or else lists them all again, as ghd's clears its Selection, or else its
   filter. It no longer clears a search of the Index (`:nohlsearch` is the kit's), nor goes back from what the

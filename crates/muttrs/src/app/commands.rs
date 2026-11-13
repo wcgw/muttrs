@@ -26,7 +26,7 @@ const KEYS: [(&str, &str, &str, Topic); 39] = [
     ),
     (
         "gx",
-        "browse",
+        "browse link",
         "open the Link in the browser",
         Topic::OPENING,
     ),
@@ -176,10 +176,17 @@ pub(super) fn add(kit: &mut Kit) {
             muttrs.load_remote(kit)
         })
         .help("load the Message's Remote Content"),
-        Command::new("browse", 3, |muttrs: &mut Muttrs, kit, _| {
-            muttrs.browse(kit, false)
+        // As in the other apps, `:browse` alone is the thing itself on the web, `:browse link` the link under the
+        // cursor: a Message has no page of its own.
+        Command::new("browse", 3, |muttrs: &mut Muttrs, kit, line| {
+            match line.args {
+                "link" => muttrs.browse(kit, false),
+                "" => Err("A Message has no page on the web: :browse link opens a Link".to_owned()),
+                args => Err(format!("E475: Invalid argument: {args}")),
+            }
         })
-        .help("open the Link under the cursor; without one, list them"),
+        .help("with link, open the Link under the cursor; without one, list them")
+        .complete(one_of(&["link"])),
         Command::new("yanklink", 5, |muttrs: &mut Muttrs, kit, _| {
             muttrs.browse(kit, true)
         })

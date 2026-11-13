@@ -664,14 +664,31 @@ fn links_open_from_the_cursor_or_a_picker_and_copy_from_another() {
         mail.screen().contains("Links"),
         "copying leaves the picker open"
     );
-    // On the Link itself, <CR> opens it.
+    // On the Link itself, <CR> opens it, as gx does, and gy copies it.
     mail.press("<Esc>/menu<CR>");
-    let effects = mail.press("<CR>");
+    for keys in ["<CR>", "gx"] {
+        let effects = mail.press(keys);
+        assert!(
+            effects.contains(&wcgw_kit::Effect::OpenUrl(
+                "https://example.com/menu".to_owned()
+            )),
+            "{keys}: {effects:?}"
+        );
+    }
+    let effects = mail.press("gy");
     assert!(
-        effects.contains(&wcgw_kit::Effect::OpenUrl(
+        effects.contains(&wcgw_kit::Effect::Copy(
             "https://example.com/menu".to_owned()
         )),
         "{effects:?}"
+    );
+    // :browse alone is the Message's own page, as in the other apps, which mail hasn't.
+    let effects = mail.press(":browse<CR>");
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        mail.cmdline().contains(":browse link opens a Link"),
+        "{}",
+        mail.cmdline()
     );
 }
 
