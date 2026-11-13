@@ -251,15 +251,13 @@ impl Muttrs {
         }
         let text = compose.text();
         self.compose = Some(compose);
-        vec![Effect::Edit { text }]
+        vec![Effect::Edit(wcgw_kit::Edit::new(text))]
     }
 
     /// `<CR>` on the Draft, `:draft`: edits it again.
     pub(crate) fn edit_draft(&mut self) -> Effects {
         match &mut self.compose {
-            Some(compose) => vec![Effect::Edit {
-                text: compose.text(),
-            }],
+            Some(compose) => vec![Effect::Edit(wcgw_kit::Edit::new(compose.text()))],
             None => Vec::new(),
         }
     }

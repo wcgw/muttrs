@@ -495,7 +495,7 @@ fn a_message_shown_a_while_is_marked_read() {
 /// The text the editor was handed.
 fn edited(effects: &Effects) -> Option<String> {
     effects.iter().find_map(|effect| match effect {
-        wcgw_kit::Effect::Edit { text } => Some(text.clone()),
+        wcgw_kit::Effect::Edit(edit) => Some(edit.text.clone()),
         _ => None,
     })
 }
