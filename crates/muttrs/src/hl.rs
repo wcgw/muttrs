@@ -7,9 +7,7 @@ pub(crate) use wcgw_kit::hl::{Group, Theme};
 pub(crate) const DIM: Group = Group::new("MuttrsDim");
 /// What wants attention without alarm: the Unread mark, counts, the Selection's mark, an Account's name.
 pub(crate) const ACCENT: Group = Group::new("MuttrsAccent");
-/// The Index's row under the cursor.
-pub(crate) const CURSOR_LINE: Group = Group::new("MuttrsCursorLine");
-/// The open Mailbox, in the sidebar.
+/// The open Mailbox, in the sidebar; the row under the cursor is the kit's `CursorLine`.
 pub(crate) const OPEN: Group = Group::new("MuttrsOpen");
 /// Unread Messages, and Mailboxes with Unread Messages.
 pub(crate) const UNREAD: Group = Group::new("MuttrsUnread");
@@ -27,6 +25,10 @@ pub(crate) const ATTACHMENT: Group = Group::new("MuttrsAttachment");
 pub(crate) const BANNER: Group = Group::new("MuttrsBanner");
 /// What's wrong: an Account offline, a Draft with nobody to send to.
 pub(crate) const ERROR: Group = Group::new("MuttrsError");
+/// The Task being done, and its spinner, on the statusline.
+pub(crate) const WORKING: Group = Group::new("MuttrsWorking");
+/// voight's Assessment, on the statusline.
+pub(crate) const VOIGHT: Group = Group::new("MuttrsVoight");
 /// The background authors' colours are judged against, kept only where they read on it: the terminal's, which
 /// muttrs can't ask. Without one, bodies are drawn in the colorscheme's colours alone.
 pub(crate) const PAGE: Group = Group::new("MuttrsPage");
@@ -38,11 +40,12 @@ pub(crate) const HEAT_EVEN: Group = Group::new("VoightHeatEven");
 pub(crate) const HEAT_LLM: Group = Group::new("VoightHeatLlm");
 
 /// muttrs' groups, and the standard ones they're drawn as when a colorscheme says nothing of them.
-const GROUPS: [(Group, Group); 16] = [
+const GROUPS: [(Group, Group); 17] = [
     (DIM, Group::COMMENT),
     (ACCENT, Group::FUNCTION),
-    (CURSOR_LINE, Group::VISUAL),
-    (OPEN, Group::CURSOR_LINE),
+    (OPEN, Group::VISUAL),
+    (WORKING, Group::FUNCTION),
+    (VOIGHT, Group::IDENTIFIER),
     (UNREAD, Group::BOLD),
     (READ, Group::NORMAL),
     (FLAGGED, Group::DIAGNOSTIC_WARN),
@@ -66,8 +69,6 @@ const OVERRIDES: [(&str, &str); 6] = [
         "\
          hi MuttrsDim guifg=#636da6\n\
          hi MuttrsAccent guifg=#82aaff\n\
-         hi MuttrsCursorLine guibg=#2d3f76\n\
-         hi MuttrsOpen guibg=#2f334d\n\
          hi MuttrsUnread gui=bold guifg=#c8d3f5\n\
          hi MuttrsRead guifg=#828bb8\n\
          hi MuttrsFlagged guifg=#ff966c\n\
@@ -91,8 +92,9 @@ const OVERRIDES: [(&str, &str); 6] = [
         "\
          hi MuttrsDim guifg=darkgray\n\
          hi MuttrsAccent gui=bold\n\
-         hi MuttrsCursorLine gui=reverse\n\
-         hi MuttrsOpen gui=underline\n\
+         hi MuttrsOpen gui=reverse\n\
+         hi MuttrsWorking guifg=blue\n\
+         hi MuttrsVoight guifg=magenta\n\
          hi MuttrsUnread gui=bold\n\
          hi MuttrsRead NONE\n\
          hi MuttrsFlagged guifg=yellow\n\
@@ -135,9 +137,11 @@ mod tests {
         assert_eq!(theme.name(), "tokyonight-moon");
         assert_eq!(theme.style(READ).fg, Some(Color::Rgb(0x82, 0x8b, 0xb8)));
         assert_eq!(
-            theme.style(CURSOR_LINE).bg,
-            Some(Color::Rgb(0x2d, 0x3f, 0x76))
+            theme.style(OPEN).bg,
+            Some(Color::Rgb(0x2d, 0x3f, 0x76)),
+            "Visual's: the row under the cursor is CursorLine's"
         );
+        assert_eq!(theme.style(VOIGHT).fg, Some(Color::Rgb(0xc0, 0x99, 0xff)));
         assert!(theme.style(UNREAD).add_modifier.contains(Modifier::BOLD));
         assert_eq!(theme.style(PAGE).bg, Some(Color::Rgb(0x22, 0x24, 0x36)));
     }

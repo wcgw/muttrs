@@ -9,7 +9,6 @@ use jiff::Zoned;
 use jiff::tz::TimeZone;
 use muttrs_mail::thread::{self, Branch};
 use muttrs_mail::{Envelope, Role};
-use ratatui::style::Style;
 use unicode_width::UnicodeWidthStr as _;
 use wcgw_kit::doc::{BlockKey, Content, Fold};
 
@@ -73,13 +72,12 @@ impl Sort {
     pub(crate) const NAMES: [&str; 5] = ["date", "from", "subject", "size", "threads"];
 }
 
-/// What the Index draws with, from the kit: its icons, the cursor's row's colours, and the time now.
+/// What the Index draws with, from the kit: its icons, and the time now.
 pub(crate) struct Look {
     unread: String,
     flagged: String,
     answered: String,
     attachment: String,
-    cursor: Style,
     now: Zoned,
 }
 
@@ -90,7 +88,6 @@ impl Look {
             flagged: kit.icon(icons::FLAGGED),
             answered: kit.icon(icons::ANSWERED),
             attachment: kit.icon(icons::ATTACHMENT),
-            cursor: kit.style(hl::CURSOR_LINE),
             now: Zoned::now(),
         }
     }
@@ -129,8 +126,6 @@ pub(crate) struct Index {
     /// What the rows are ordered by when they aren't in threads, and whether the other way.
     sort: Sort,
     reverse: bool,
-    /// The Message the cursor is on, as the kit last said: its row is drawn as the cursor's.
-    pub(crate) cursor: Option<u32>,
 }
 
 impl Index {
@@ -158,7 +153,6 @@ impl Index {
             limit: None,
             sort: Sort::Date,
             reverse: false,
-            cursor: None,
         }
     }
 
@@ -490,12 +484,15 @@ impl Index {
         uids.get(next).copied()
     }
 
-    /// The key of the block showing Message `uid`: its thread's.
-    pub(crate) fn block_of(&self, uid: u32) -> Option<String> {
-        self.rows
+    /// Where Message `uid` is: the key of its thread's block, and its line there.
+    pub(crate) fn place_of(&self, uid: u32) -> Option<(String, usize)> {
+        let at = self
+            .rows
             .iter()
-            .find(|row| self.envelopes[row.envelope].uid == uid)
-            .map(|row| block_key(row.head))
+            .position(|row| self.envelopes[row.envelope].uid == uid)?;
+        let head = self.rows[at].head;
+        let first = self.rows.iter().position(|row| row.head == head)?;
+        Some((block_key(head), at - first))
     }
 
     /// The rows as blocks of a kit document, `width` cells wide: a block per thread, its rows its lines, with a fold
@@ -533,30 +530,6 @@ impl Index {
         blocks
     }
 
-    /// The block of the thread Message `uid` is in, `width` cells wide, by its key: to lay it out again alone, as when
-    /// the cursor comes or goes.
-    pub(crate) fn block(
-        &self,
-        uid: u32,
-        width: usize,
-        look: &Look,
-    ) -> Option<(BlockKey, Content<Target>)> {
-        let head = self
-            .rows
-            .iter()
-            .find(|row| self.envelopes[row.envelope].uid == uid)?
-            .head;
-        let start = self.rows.iter().position(|row| row.head == head)?;
-        let len = self.rows[start..]
-            .iter()
-            .take_while(|row| row.head == head)
-            .count();
-        Some((
-            BlockKey::new(block_key(head)),
-            self.thread(&self.rows[start..start + len], width, look),
-        ))
-    }
-
     /// The rows of a thread, `width` cells wide, with a fold over them whose summary is the head's row saying how many
     /// it holds.
     fn thread(&self, thread: &[Row], width: usize, look: &Look) -> Content<Target> {
@@ -576,27 +549,6 @@ impl Index {
             });
         }
         content
-    }
-
-    /// The text of the row the thread Message `uid` heads is folded into, `width` cells wide: what the kit shows of
-    /// it while it's folded.
-    pub(crate) fn folded_text(&self, uid: u32, width: usize, look: &Look) -> Option<String> {
-        let thread = self.thread_of(uid);
-        if thread.len() < 2 {
-            return None;
-        }
-        let row = self
-            .rows
-            .iter()
-            .find(|row| self.envelopes[row.envelope].uid == thread[0])?;
-        let unread = thread
-            .iter()
-            .filter_map(|&uid| self.find(uid))
-            .any(|envelope| !envelope.flags.seen);
-        match self.line(row, Some((thread.len(), unread)), width, look) {
-            Line::Text(spans) => Some(spans.iter().map(|span| span.text.as_str()).collect()),
-            Line::Image { .. } => None,
-        }
     }
 
     /// The line of `row`, `width` cells wide; or of its thread folded into it, of `folded` Messages, any Unread.
@@ -677,23 +629,15 @@ impl Index {
             };
             spans.push(Span::new(truncate(subject, room), text));
         }
-        // To the window's edge, so the cursor's row is drawn across it.
+        // To the window's edge, as wide as the window.
         let used: usize = spans.iter().map(|span| span.text.width()).sum();
         if used < width {
             spans.push(Span::new(" ".repeat(width - used), Group::NORMAL));
         }
-        let on_cursor = self.cursor == Some(envelope.uid);
         Line::Text(
             spans
                 .into_iter()
-                .map(|span| {
-                    let span = span.with_target(target.clone());
-                    if on_cursor {
-                        span.with_style(look.cursor)
-                    } else {
-                        span
-                    }
-                })
+                .map(|span| span.with_target(target.clone()))
                 .collect(),
         )
     }
@@ -863,27 +807,26 @@ mod tests {
             ]
         );
         assert_eq!(index.thread_of(2), [1, 2, 3]);
-        assert_eq!(index.block_of(3).as_deref(), Some("t1"));
+        assert_eq!(index.place_of(3), Some(("t1".to_owned(), 2)));
+        assert_eq!(index.place_of(4), Some(("t4".to_owned(), 0)));
         let look = Look {
             unread: "● ".into(),
             flagged: "★ ".into(),
             answered: "↩ ".into(),
             attachment: "+ ".into(),
-            cursor: Style::new(),
             now: Zoned::now(),
         };
         let blocks = index.blocks(100, &look);
         assert_eq!(blocks.len(), 2, "two threads");
         assert_eq!(blocks[0].1.lines.len(), 3);
         assert_eq!(blocks[0].1.folds[0].lines, 0..3);
-        let folded = index.folded_text(1, 100, &look).unwrap();
+        let Line::Text(folded) = &blocks[0].1.folds[0].summary else {
+            panic!("a row of text");
+        };
+        let folded: String = folded.iter().map(|span| span.text.as_str()).collect();
         assert!(folded.contains("(3) Lunch"), "{folded:?}");
         assert!(folded.contains('●'), "Unread replies: {folded:?}");
-        assert_eq!(
-            index.folded_text(4, 100, &look),
-            None,
-            "one Message: no fold"
-        );
+        assert!(blocks[1].1.folds.is_empty(), "one Message: no fold");
 
         assert!(!index.toggle_threads());
         assert_eq!(

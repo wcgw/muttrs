@@ -119,10 +119,10 @@ after a moment. `:help` (or `F1`) lists the keys and the commands.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `:q` closes a window, `:qa` quits now · `q` closes the Pager, the Draft or what a search found, else quits once what's asked is done · `<C-l>` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` `:shell CMD` run a command · `\` `:sidebar` show or hide the sidebar · `:cd NAME` (or `:e NAME`) open a Mailbox · `:create NAME` `:rename NAME` `:delmailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser |
+| Anywhere | `:q` closes a window · `:qa`, or `q` where there's nothing to close (the Pager, the Draft, what a search found), quits once what's asked is done; `:qa!` quits now · `<C-l>` `:refresh` ask for what's new · `:sync!` list the open Mailbox anew · `!` `:shell CMD` run a command · `\` `:sidebar` show or hide the sidebar · `:cd NAME` (or `:e NAME`) open a Mailbox · `:create NAME` `:rename NAME` `:delmailbox NAME` make, rename (the open one), or delete a Mailbox · `:login NAME` sign in again, in the browser |
 | Sidebar | `<CR>` open (on an Account, ask what's new) · `zc` `zo` fold an Account, or a Mailbox holding others · `<C-w>l` the Index |
 | Index | `<CR>` (or a double click) read · `/` `?` `n` `N` search what's listed · `S` `:grep` search the server · `od` `of` `os` `oz` `ot` sort by date, sender, subject, size, or in threads; `O` the other way · `za` `zM` `zR` fold the thread, all, none · `x` select · `s` flag · `U` Unread or read · `<Space>l` Labels · `dd` delete (to Trash) · `a` archive · `<Space>m` move to a Mailbox · `u` undo that · `<Space>j` `<Space>J` `:junk` `:notjunk` to Junk, or out of it · `\|` pipe to a command · `K` the Envelope · `<C-w>h` the sidebar |
-| Pager | the motions scroll · `<C-n>` `<C-p>` the next Message, the previous · `<Space>b` `:body` HTML or plain text · `K` every header, as written · `:raw` the Message as it came · `I` `:remote` load Remote Content · `<Space>h` voight's Heatmap · `<CR>` on a Link, `gx` open it · `gy` copy it · `<Space>o` Links · `<Space>a` Attachments, `<Space>A` to save · `s` `U` `<Space>l` `dd` `a` `<Space>m` `u` `\|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
+| Pager | the motions scroll · `<C-n>` `<C-p>` the next Message, the previous · `<Space>b` `:body` HTML or plain text · `K` every header, as written · `:raw` the Message as it came · `I` `:remote` load Remote Content · `<Space>h` voight's Heatmap · `<CR>` on a Link, `gx` open it · `gy` copy it · `<Space>o` Links (`<C-y>` copies one) · `<Space>a` Attachments (`<C-s>` saves one) · `s` `U` `<Space>l` `dd` `a` `<Space>m` `u` `\|` as in the Index · `:unsubscribe` from its mailing list · `q` back |
 | Writing, in the Index or the Pager | `c` a new Message · `r` reply · `R` reply to all · `<Space>L` reply to the mailing list · `<Space>f` forward · `:forward attached` forward as an Attachment · `:bounce TO` send it on as it is · `:resume` resume a Postponed Draft, in Drafts |
 | A Draft | `<CR>` `:draft` edit again · `<Space>s` `:send` send · `:attach FILE` attach a file · `:detach` detach the last · `<Space>p` `:postpone` postpone to Drafts · `q` discard, once you say so |
 
@@ -153,7 +153,7 @@ What muttrs asks of the server, it asks in the background, one Task at a time, i
 first): what you flag, delete, archive, move or label shows done at once, and stays so while the server catches up.
 Once a Task takes a while, the statusline says it, with how many more wait: `⠹ Archiving 3 Messages  2 more`.
 `:send` sends a Draft in the background too: it goes at once, and comes back, with why, if it couldn't be sent. `q`
-with Tasks left quits once they're done, unless you press a key first; `:qa` quits now
+and `:qa` with Tasks left quit once they're done, unless you press a key first; `:qa!` quits now
 ([docs/adr/0006-tasks.md](docs/adr/0006-tasks.md)).
 
 `:select` and `:unselect` select, or unselect, the Messages listed that a filter picks, folded or not (all of them,
@@ -182,8 +182,9 @@ what they write shows in a buffer of its own, and a command that needs the termi
 `:limit` lists only the Messages a filter picks, in threads among themselves, until `:limit` alone lists them all
 again; `:select` then picks among those.
 
-After `:`, `Up` and `Down` go back through what was typed before that starts with what's typed, as in vim. It's kept
-while muttrs runs, for now.
+After `:` and `/`, `Up` and `Down` go back through what was typed before that starts with what's typed, as in vim.
+wcgw-kit keeps it in `~/.local/state/muttrs/history` (or under `$XDG_STATE_HOME`), the newest 200 of each, where it's
+always been, so what was typed before carries over; what `!` and `|` ran is no longer kept.
 
 ## Labels
 
@@ -191,7 +192,7 @@ A Label is a Mailbox a Message can be in as well as the one it's listed in: on G
 Mailboxes under `Labels`, as Proton Mail's Bridge keeps them. The Index shows a Message's Labels before its subject,
 and `:select label:NAME` picks by them. `<Space>l` lists the Account's Labels, marked `✓` where the Messages it acts
 on all have one and `–` where some do; `<CR>` adds a Label to all of them, or takes it off all of them if they all
-have it, and lists them again. Typing narrows the list, as `<Space>m`'s.
+have it, the list staying open for more, until `<Esc>`. Typing narrows the list, as `<Space>m`'s.
 
 On Gmail, the Labels come with the Messages (`X-GM-LABELS`). Elsewhere, a Message is labelled by copying it to the
 Label's Mailbox, and its Label taken off by expunging that copy; muttrs finds which Messages each Label's Mailbox
@@ -218,8 +219,8 @@ there, as `S` does.
 
 ## Writing
 
-`c` asks whom the Message is to, then its subject, as mutt does; `:compose ADDRESS` says whom to at once, and `Tab`
-completes addresses there, from those muttrs has seen. Then `c`, `r`, `R` and `<Space>f` open a Draft in your editor
+`c` asks whom the Message is to (`Tab` completes addresses, from those muttrs has seen), then its subject, as mutt
+does; `:compose ADDRESS` says whom to at once, and completes the same. Then `c`, `r`, `R` and `<Space>f` open a Draft in your editor
 (`$EDITOR`, else `$VISUAL`, else `nvim` or `vi`) as a file of headers, a blank line, then the body:
 
 ```
@@ -273,8 +274,8 @@ muttrs view message.eml
 
 opens the Pager on a Message saved as a file, without any Account: its headers, then its HTML body as well as the
 terminal can draw it (or its plain text, `<Space>b`), Inline Images included. Remote Content stays blocked until `I`
-loads it, since loading it tells the sender you read the Message. `<Space>o` lists its Links to open (`gy` copies the
-one at the cursor), `<Space>a` its Attachments to open (`<Space>A` to save), `/` searches it, `:help` shows the keys,
+loads it, since loading it tells the sender you read the Message. `<Space>o` lists its Links to open (`<C-y>` copies
+one, as `gy` does the one at the cursor), `<Space>a` its Attachments to open (`<C-s>` saves one), `/` searches it, `:help` shows the keys,
 and `q` quits.
 
 ## Configuration

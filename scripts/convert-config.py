@@ -63,7 +63,7 @@ DRAFT = {
 UI = {
     "dim": "MuttrsDim",
     "accent": "MuttrsAccent",
-    "cursor": "MuttrsCursorLine",
+    "cursor": "CursorLine",
     "cursor_unfocused": "MuttrsOpen",
     "unread": "MuttrsUnread",
     "read": "MuttrsRead",
@@ -76,6 +76,8 @@ UI = {
     "found_current": "CurSearch",
     "status": "StatusLine",
     "error": "MuttrsError",
+    "voight": "MuttrsVoight",
+    "working": "MuttrsWorking",
     "heatmap_human": "VoightHeatHuman",
     "heatmap_even": "VoightHeatEven",
     "heatmap_llm": "VoightHeatLlm",

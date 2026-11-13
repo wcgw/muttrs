@@ -14,8 +14,8 @@ Filters, Tasks, Drafts, contacts, the cache) and says what it shows as the kit's
   its row, and a Mailbox holding others into its own. `\` (`:sidebar`) shows or hides it.
 - **An Index per open Mailbox**: a listed buffer, its rows laid out for the window's width as before. A block per
   thread (per Message, out of threads), so that the cursor stays on its thread as Envelopes come and go, and a fold
-  over each thread's rows, so that `za`, `zM` and `zR` are the kit's. The row under the cursor is drawn as before,
-  as the kit has no `'cursorline'` yet.
+  over each thread's rows, so that `za`, `zM` and `zR` are the kit's; the kit highlights the row under the cursor
+  (its `'cursorline'`).
 - **A Pager per Message read**: headers, then the body as wcgw-kit-text (once muttrs-render) lays it out for the
   width, its Pictures lines the kit draws over; Links refer to their URL, so `<CR>` on one opens it.
 - **The Draft**, as it will be sent, until it's sent, postponed or discarded; it's written in `$EDITOR`, which the
@@ -47,13 +47,13 @@ with ghd.
   `icons`, `images` and `mouse` still say how muttrs starts, as `:colorscheme` and `:set` lines before `init.vim`.
 - `:` commands are named as vim's are, letters only: `:not-junk` is `:notjunk`, `:delete-mailbox` `:delmailbox`,
   `:forward-attached` `:forward attached`, and `:source` (the Message as it came) `:raw`, as `:source` is vim's.
+- The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.
+- Quitting with Tasks left waits for them, through the kit's quit hook; `:qa!` doesn't.
+- In pickers, `<CR>` opens; `<C-y>` copies a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the
+  Labels', `<CR>` adds or takes off a Label and the list stays open, as muttrs' did.
 - What the kit can't do yet, muttrs does without, until it can:
   - `!` and `|` run their command without the terminal, showing what it writes in a buffer: the kit has no way to
     hand the terminal to a command but `$EDITOR`.
-  - The History is the kit's, kept while muttrs runs, not on disk.
-  - Prompts don't complete: `:compose ADDRESS` completes addresses, `c`'s To: prompt doesn't.
-  - Quitting with Tasks left waits for them on `q` only: `:q` and `:qa` are the kit's, and quit at once.
-  - The kit puts a window's cursor on a block only the first time it shows a buffer: to go back to the Index on the
-    Message read last, or keep the mini-index on it, muttrs opens a window in place of the one it had.
-  - Pickers have one verb: copying a Link and saving an Attachment are pickers of their own.
+  - The Draft is edited in a file the kit names (`.md`), in `$EDITOR`: muttrs' `editor` setting and the `.eml` name
+    that had vim take it for mail are gone.
 - Building needs wcgw-kit checked out beside muttrs until it's published, as voight is pinned.

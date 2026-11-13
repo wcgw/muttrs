@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use muttrs_mail::client::{self, Connection, Task, Update};
 use muttrs_mail::{Message, Role};
 use wcgw_kit::BufferId;
-use wcgw_kit::doc::Cursor;
-use wcgw_kit::shell::{Placement, Size, WindowId};
+use wcgw_kit::doc::{Cursor, Motion};
+use wcgw_kit::shell::{CursorLine, Placement, Size, WindowId};
 
 use crate::addresses::AddressBook;
 use crate::assessment::{self, Assessments};
@@ -85,14 +85,8 @@ pub(crate) enum Target {
         query: String,
         mailbox: String,
     },
-    /// Copying a Link.
-    Copy(String),
-    /// An Attachment of the Pager in `pager`, by its place, opened or saved.
-    Attachment {
-        pager: BufferId,
-        part: usize,
-        save: bool,
-    },
+    /// An Attachment of the Pager in `pager`, by its place: opening it opens it as the system does.
+    Attachment { pager: BufferId, part: usize },
 }
 
 /// What muttrs' own work tells it.
@@ -183,15 +177,13 @@ struct Opening {
     opened: Opened,
     /// The Index it was opened from.
     from: Option<BufferId>,
-    /// The Message the Index's cursor was on, which `q` goes back to as it is.
-    from_uid: Option<u32>,
     /// What's written once it's come, if that's what it's for.
     writing: Option<Writing>,
 }
 
-/// Whether quitting waits for the Accounts' Tasks.
+/// Whether muttrs quits once the Accounts' Tasks are done, as quitting with some left asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Quitting {
+enum Leaving {
     No,
     /// Asked by the key just pressed.
     Asked,
@@ -295,13 +287,13 @@ pub(crate) struct Muttrs {
     started: Instant,
     /// Whether a tick is asked for.
     ticking: bool,
-    quitting: Quitting,
+    leaving: Leaving,
     /// The buffers to lay out again before the screen's drawn.
     dirty: HashSet<BufferId>,
-    /// The width the Indexes and Pagers were last laid out for.
-    width: u16,
-    /// The Message `muttrs view` shows, until the runtime starts.
-    to_view: Option<Message>,
+    /// The width each Index, Pager and Draft was last laid out for.
+    widths: HashMap<BufferId, u16>,
+    /// What of the kit's options the buffers were laid out with: icons, and how Pictures are drawn.
+    look: Option<(String, wcgw_kit::shell::Graphics)>,
     /// The Index shown last, to go back to.
     last_index: Option<BufferId>,
 }
@@ -320,6 +312,7 @@ impl Muttrs {
         muttrs.addresses = addresses;
         let width = sidebar_width(kit.size().0);
         let buffer = kit.add_buffer("mailboxes", Document::new(), false);
+        kit.buffer_mut(buffer).set_cursorline(CursorLine::Row);
         let window = kit.open_window(Placement::FarLeft, Size::Cells(width), buffer);
         kit.focus_window(muttrs.main);
         muttrs.sidebar = Some(Sidebar {
@@ -347,9 +340,8 @@ impl Muttrs {
         voight: bool,
         pictures: Pictures,
     ) -> (Self, Kit) {
-        let (mut muttrs, kit) = Self::new(config, Vec::new(), true, voight, pictures);
-        // Shown once the runtime starts: the kit asks for Pictures as they come into view after that.
-        muttrs.to_view = Some(message);
+        let (mut muttrs, mut kit) = Self::new(config, Vec::new(), true, voight, pictures);
+        let _ = muttrs.show_message(&mut kit, Arc::new(message), None, None);
         (muttrs, kit)
     }
 
@@ -365,11 +357,12 @@ impl Muttrs {
         crate::icons::define(&mut kit);
         commands::add(&mut kit);
         voight::install(&mut kit);
-        kit.add_segment(wcgw_kit::shell::Segment::new(
-            wcgw_kit::shell::Side::Right,
-            3,
-            |muttrs: &Self, _| muttrs.tasks_said(),
-        ));
+        kit.add_segment(
+            wcgw_kit::shell::Segment::new(wcgw_kit::shell::Side::Right, 3, |muttrs: &Self, _| {
+                muttrs.tasks_said()
+            })
+            .with_group(hl::WORKING),
+        );
         kit.add_segment(wcgw_kit::shell::Segment::new(
             wcgw_kit::shell::Side::Right,
             1,
@@ -415,10 +408,10 @@ impl Muttrs {
             next_sign_in: 1,
             started: Instant::now(),
             ticking: false,
-            quitting: Quitting::No,
+            leaving: Leaving::No,
             dirty: HashSet::new(),
-            width: 0,
-            to_view: None,
+            widths: HashMap::new(),
+            look: None,
             last_index: None,
         };
         (muttrs, kit)
@@ -462,15 +455,32 @@ impl Muttrs {
         kit.show_buffer(buffer);
     }
 
-    /// Shows `buffer` in a window in place of `window`, its cursor on the block `key`: a fresh window, as the kit
-    /// lets a window start on a block only the first time it shows a buffer. Returns the window.
-    fn reopen(&self, kit: &mut Kit, window: WindowId, buffer: BufferId, key: &str) -> WindowId {
-        kit.focus_window(window);
-        let fresh = kit.open_window(Placement::Above, Size::Shared, self.home);
-        kit.show_buffer_at(buffer, Cursor::on_block(key));
-        kit.close_window_id(window);
-        kit.focus_window(fresh);
-        fresh
+    /// Puts the cursor of `window` on line `line` of the block `key`, or on the block's row while it's folded.
+    fn put_cursor(kit: &mut Kit, window: WindowId, key: &str, line: usize) {
+        let current = kit.current_window();
+        if !kit.focus_window(window) {
+            return;
+        }
+        kit.set_cursor(window, Cursor::on_block(key));
+        if line > 0
+            && !kit.on_closed_fold()
+            && let Some(mut cursor) = kit.window_cursor(window).cloned()
+        {
+            cursor.apply(&kit.current_layout(), Motion::Down, line);
+            kit.set_cursor(window, cursor);
+        }
+        kit.focus_window(current);
+    }
+
+    /// Puts the cursor of `window`, showing the Index in `buffer`, on Message `uid`.
+    fn put_cursor_on_message(&self, kit: &mut Kit, window: WindowId, buffer: BufferId, uid: u32) {
+        if let Some((key, line)) = self
+            .indexes
+            .get(&buffer)
+            .and_then(|index| index.place_of(uid))
+        {
+            Self::put_cursor(kit, window, &key, line);
+        }
     }
 
     /// Shows or hides the sidebar (`\`).
@@ -495,22 +505,6 @@ impl Muttrs {
                 kit.focus_window(current);
             }
         }
-        self.everything_dirty();
-    }
-
-    /// The width Indexes and Pagers are laid out for: the screen's, but the sidebar's while it shows.
-    fn main_width(&self, kit: &Kit) -> u16 {
-        let (width, _) = kit.size();
-        match &self.sidebar {
-            Some(sidebar)
-                if sidebar
-                    .window
-                    .is_some_and(|id| kit.window_buffer(id).is_some()) =>
-            {
-                width.saturating_sub(sidebar.width + 1)
-            }
-            _ => width,
-        }
     }
 
     // --- Laying buffers out. ---
@@ -528,11 +522,25 @@ impl Muttrs {
     /// Lays out again what changed, and what's to follow from a change: the spinner's turns, voight's next
     /// Assessment, a Draft that couldn't be sent.
     fn settle(&mut self, kit: &mut Kit) -> Effects {
-        let width = self.main_width(kit);
-        if width != self.width {
-            self.width = width;
+        // What the kit's options change of what's drawn: icons are in the text, and Pictures take room or not.
+        let look = (kit.icon(crate::icons::UNREAD), kit.graphics());
+        if self.look.as_ref() != Some(&look) {
+            self.look = Some(look);
             self.everything_dirty();
         }
+        // Laid out again for the width they're shown at now.
+        let shown: Vec<BufferId> = self
+            .indexes
+            .keys()
+            .chain(self.pagers.keys())
+            .chain(self.draft.iter())
+            .copied()
+            .filter(|&buffer| {
+                !kit.windows_showing(buffer).is_empty()
+                    && self.widths.get(&buffer) != Some(&kit.text_width(buffer))
+            })
+            .collect();
+        self.dirty.extend(shown);
         self.bring_back_unsent(kit);
         for buffer in std::mem::take(&mut self.dirty) {
             if self.indexes.contains_key(&buffer) {
@@ -584,12 +592,14 @@ impl Muttrs {
         kit.buffer_mut(sidebar.buffer).doc_mut().set_blocks(blocks);
     }
 
-    fn render_index(&self, kit: &mut Kit, buffer: BufferId) {
+    fn render_index(&mut self, kit: &mut Kit, buffer: BufferId) {
         let Some(index) = self.indexes.get(&buffer) else {
             return;
         };
         let look = index::Look::of(kit);
-        let blocks = index.blocks(usize::from(self.width.max(20)), &look);
+        let width = kit.text_width(buffer);
+        self.widths.insert(buffer, width);
+        let blocks = index.blocks(usize::from(width.max(20)), &look);
         let winbar = self.index_winbar(index);
         let buffer = kit.buffer_mut(buffer);
         buffer.doc_mut().set_blocks(blocks);
@@ -663,7 +673,7 @@ impl Muttrs {
             },
             pixel_ratio: self.config.pixel_ratio,
             max_picture_rows: self.config.max_picture_rows,
-            pictures: self.config.images != crate::config::Images::Off,
+            pictures: kit.graphics() != wcgw_kit::shell::Graphics::Off,
         }
     }
 
@@ -677,18 +687,21 @@ impl Muttrs {
         styles
     }
 
-    /// The width a Pager lays bodies out for.
-    fn pager_width(&self) -> u16 {
-        self.width.clamp(20, self.config.pager_width.max(20))
+    /// The width the Pager or the Draft in `buffer` lays bodies out for: its window's, up to `pager_width`.
+    fn pager_width(&mut self, kit: &Kit, buffer: BufferId) -> u16 {
+        let width = kit.text_width(buffer);
+        self.widths.insert(buffer, width);
+        width.clamp(20, self.config.pager_width.max(20))
     }
 
-    fn render_pager(&self, kit: &mut Kit, buffer: BufferId) {
+    fn render_pager(&mut self, kit: &mut Kit, buffer: BufferId) {
+        let width = self.pager_width(kit, buffer);
         let Some(pager) = self.pagers.get(&buffer) else {
             return;
         };
         let look = self.pager_look(kit);
         let heat = self.heat(pager);
-        let blocks = pager.blocks(self.pager_width(), &look, heat.as_deref());
+        let blocks = pager.blocks(width, &look, heat.as_deref());
         let subject = if pager.message().subject.is_empty() {
             "(no subject)".to_owned()
         } else {
@@ -699,13 +712,17 @@ impl Muttrs {
         buffer.set_winbar(Some(vec![(format!(" {subject}"), hl::SUBJECT)]));
     }
 
-    fn render_draft(&self, kit: &mut Kit) {
-        let (Some(compose), Some(buffer)) = (&self.compose, self.draft) else {
+    fn render_draft(&mut self, kit: &mut Kit) {
+        let Some(buffer) = self.draft else {
+            return;
+        };
+        let width = self.pager_width(kit, buffer);
+        let Some(compose) = &self.compose else {
             return;
         };
         let styles = Self::body_styles(kit);
         let attachment = kit.icon(crate::icons::ATTACHMENT);
-        let blocks = compose.blocks(self.pager_width(), &styles, &attachment);
+        let blocks = compose.blocks(width, &styles, &attachment);
         let buffer = kit.buffer_mut(buffer);
         buffer.doc_mut().set_blocks(blocks);
         buffer.set_winbar(Some(vec![(
@@ -752,11 +769,20 @@ impl Muttrs {
                 mailbox.label().to_owned()
             };
             let buffer = kit.add_buffer(shown, Document::new(), true);
+            kit.buffer_mut(buffer).set_cursorline(CursorLine::Row);
             self.indexes.insert(buffer, index);
             self.mailboxes.insert(key, buffer);
             buffer
         };
         self.accounts[account].ask(client::Request::Open(name.to_owned()));
+        // Opened from elsewhere than the sidebar, the sidebar's cursor goes to it too.
+        if let Some(window) = self
+            .sidebar_window()
+            .filter(|&id| id != kit.current_window())
+            && let Some((key, line)) = sidebar::place_of(&self.accounts, account, name)
+        {
+            Self::put_cursor(kit, window, &key, line);
+        }
         self.close_mini(kit);
         self.show_in_main(kit, buffer);
         self.dirty.insert(buffer);
@@ -765,7 +791,6 @@ impl Muttrs {
         }
     }
 
-    /// The Index the current buffer is, or the Pager's came from, with its buffer.
     /// The Index the current buffer is, or the Pager's came from; from the sidebar, the main window's.
     fn current_index(&self, kit: &Kit) -> Option<(BufferId, &Index)> {
         let mut current = kit.current_buffer();
@@ -874,8 +899,8 @@ impl Muttrs {
             Update::Finished(task) => {
                 state.tasks.finished(task);
                 self.not_undone(kit, account, task);
-                if self.quitting != Quitting::No && self.tasks_done() {
-                    return self.quit();
+                if self.leaving != Leaving::No && self.tasks_done() {
+                    return vec![Effect::Quit];
                 }
             }
             Update::MovedBack(task) => self
@@ -929,7 +954,6 @@ impl Muttrs {
         kit: &mut Kit,
         opened: Opened,
         from: Option<BufferId>,
-        from_uid: Option<u32>,
         writing: Option<Writing>,
     ) {
         let Some(state) = self.accounts.get_mut(opened.account) else {
@@ -950,7 +974,6 @@ impl Muttrs {
         self.opening = Some(Opening {
             opened,
             from,
-            from_uid,
             writing,
         });
     }
@@ -993,7 +1016,6 @@ impl Muttrs {
                             message,
                             Some(wanted),
                             opening.from,
-                            opening.from_uid,
                         )),
                     }
                 }
@@ -1004,15 +1026,13 @@ impl Muttrs {
         effects
     }
 
-    /// Shows `message` in a Pager, in the main window: `opened`, opened from the Index in `from`, whose cursor was
-    /// on `from_uid`.
+    /// Shows `message` in a Pager, in the main window: `opened`, opened from the Index in `from`.
     fn show_message(
         &mut self,
         kit: &mut Kit,
         message: Arc<Message>,
         opened: Option<Opened>,
         from: Option<BufferId>,
-        from_uid: Option<u32>,
     ) -> Effects {
         self.addresses.learn(
             message
@@ -1049,7 +1069,6 @@ impl Muttrs {
         };
         pager.opened = opened;
         pager.from = from;
-        pager.from_uid = from_uid;
         let fetch = pager.remote_to_fetch();
         self.pagers.insert(buffer, pager);
         self.kept(kit, buffer);
@@ -1117,20 +1136,21 @@ impl Muttrs {
         if lines < 2 {
             return;
         }
-        let Some(key) = self
-            .indexes
-            .get(&from)
-            .and_then(|index| index.block_of(uid))
-        else {
-            return;
-        };
-        self.close_mini(kit);
         let main = self.main_window(kit);
-        kit.focus_window(main);
-        // A window's own row, between it and the Pager, is the mini-index's status line, as mutt has it.
-        let window = kit.open_window(Placement::Above, Size::Cells(lines), self.home);
-        kit.show_buffer_at(from, Cursor::on_block(key.as_str()));
-        self.mini = Some(window);
+        let open = self
+            .mini
+            .filter(|&mini| kit.window_buffer(mini) == Some(from));
+        let window = if let Some(mini) = open {
+            mini
+        } else {
+            self.close_mini(kit);
+            kit.focus_window(main);
+            // A window's own row, between it and the Pager, is the mini-index's status line, as mutt has it.
+            let window = kit.open_window(Placement::Above, Size::Cells(lines), from);
+            self.mini = Some(window);
+            window
+        };
+        self.put_cursor_on_message(kit, window, from, uid);
         kit.focus_window(main);
     }
 
@@ -1205,22 +1225,17 @@ impl Muttrs {
         let Some(pager) = self.pagers.get(&buffer) else {
             return Vec::new();
         };
-        let (from, from_uid) = (pager.from, pager.from_uid);
         let shown = pager.opened.as_ref().map(|opened| opened.uid);
-        let Some(from) = from.filter(|from| self.indexes.contains_key(from)) else {
+        let Some(from) = pager.from.filter(|from| self.indexes.contains_key(from)) else {
             kit.show_buffer(self.home);
             return Vec::new();
         };
         let main = self.main_window(kit);
-        // The Index's cursor elsewhere, it goes back to the Message shown last; else, as it was.
-        let elsewhere = shown
-            .filter(|&uid| Some(uid) != from_uid)
-            .and_then(|uid| self.indexes.get(&from)?.block_of(uid));
-        if let Some(key) = elsewhere {
-            self.main = self.reopen(kit, main, from, &key);
-        } else {
-            kit.focus_window(main);
-            kit.show_buffer(from);
+        kit.focus_window(main);
+        kit.show_buffer(from);
+        // On the Message shown last, which `<C-n>` may have gone on to.
+        if let Some(uid) = shown {
+            self.put_cursor_on_message(kit, main, from, uid);
         }
         self.dirty.insert(from);
         Vec::new()
@@ -1235,7 +1250,6 @@ impl Muttrs {
         let (Some(opened), Some(from)) = (pager.opened.clone(), pager.from) else {
             return Err("That's for a Message of a Mailbox".to_owned());
         };
-        let from_uid = pager.from_uid;
         let Some(index) = self.indexes.get(&from) else {
             return Ok(Vec::new());
         };
@@ -1250,7 +1264,7 @@ impl Muttrs {
             uid: next,
             ..opened
         };
-        self.open_message(kit, opened, Some(from), from_uid, None);
+        self.open_message(kit, opened, Some(from), None);
         Ok(self.more_if_wanted(from, true))
     }
 
@@ -1307,19 +1321,21 @@ impl Muttrs {
         self.accounts.iter().all(|state| state.tasks.is_empty())
     }
 
-    /// Quits, keeping the addresses seen.
-    fn quit(&mut self) -> Effects {
-        self.addresses.save();
-        vec![Effect::Quit]
+    /// `q` where there's nothing to close: `:qa`, which quits once the Accounts' Tasks are done.
+    fn ask_to_quit(&mut self, kit: &mut Kit) -> Effects {
+        kit.run_ex(self, "qa").unwrap_or_else(|why| {
+            kit.error(why);
+            Vec::new()
+        })
     }
 
-    /// `q` where there's nothing to close: quits once the Accounts' Tasks are done, at once if none's left, else
-    /// once the last is finished, unless a key is pressed first.
-    fn ask_to_quit(&mut self, kit: &mut Kit) -> Effects {
+    /// Whether to quit now, or once the Accounts' Tasks are done, unless a key is pressed first: what's flagged,
+    /// moved or sent goes to the server before muttrs quits.
+    fn leave(&mut self, kit: &mut Kit) -> wcgw_kit::Quitting {
         if self.tasks_done() {
-            return self.quit();
+            return wcgw_kit::Quitting::Now;
         }
-        self.quitting = Quitting::Asked;
+        self.leaving = Leaving::Asked;
         let left: usize = self.accounts.iter().map(|state| state.tasks.len()).sum();
         let tasks = if left == 1 {
             "the Task left is".to_owned()
@@ -1327,9 +1343,14 @@ impl Muttrs {
             format!("the {left} Tasks left are")
         };
         kit.info(format!(
-            "Quitting once {tasks} done: a key stays, :qa quits now"
+            "Quitting once {tasks} done: a key stays, :qa! quits now"
         ));
-        Vec::new()
+        wcgw_kit::Quitting::Later
+    }
+
+    /// The addresses seen, to keep once muttrs has quit.
+    pub(crate) fn save(&mut self) {
+        self.addresses.save();
     }
 
     /// `q`: closes what's current (the Pager, back to its Index; the Draft, once confirmed; what a search found;
@@ -1688,15 +1709,6 @@ impl wcgw_kit::App for Muttrs {
         }
         self.everything_dirty();
         effects.extend(self.settle(kit));
-        if let Some(message) = self.to_view.take() {
-            effects.extend(self.show_message(kit, Arc::new(message), None, None, None));
-            effects.extend(self.settle(kit));
-        }
-        // A message at once: the kit asks for the Pictures in view as it takes one, not as it starts.
-        effects.push(Effect::After {
-            after: Duration::ZERO,
-            msg: Msg::Tick,
-        });
         effects
     }
 
@@ -1719,18 +1731,18 @@ impl wcgw_kit::App for Muttrs {
                     .copied()
                     .filter(|_| !self.indexes.contains_key(&kit.current_buffer()))
                     .or(Some(kit.current_buffer()));
-                let uid = opened.uid;
-                self.open_message(kit, opened, from, Some(uid), None);
+                self.open_message(kit, opened, from, None);
                 Vec::new()
             }
             Target::Link(url) => vec![Effect::OpenUrl(url)],
-            Target::Copy(url) => {
-                kit.info(format!("Copied {url}"));
-                vec![Effect::Copy(url)]
-            }
             Target::Draft => self.edit_draft(),
             Target::Move { targets, to } => self.move_to(kit, targets, &to),
-            Target::Label { targets, label } => self.toggle_label(kit, &targets, label),
+            Target::Label { targets, label } => {
+                // Picked otherwise than by `<CR>`, as by a click: the list opens again, to add or take off more.
+                self.toggle_label(&targets, label);
+                let picker = self.labels_picker(&targets);
+                kit.open_picker(self, picker)
+            }
             Target::Found {
                 account,
                 query,
@@ -1742,7 +1754,7 @@ impl wcgw_kit::App for Muttrs {
                 }
                 Vec::new()
             }
-            Target::Attachment { pager, part, save } => self.attachment(pager, part, save)?,
+            Target::Attachment { pager, part } => self.attachment(pager, part, false)?,
         };
         effects.extend(self.settle(kit));
         Ok(effects)
@@ -1786,34 +1798,13 @@ impl wcgw_kit::App for Muttrs {
     }
 
     fn keyed(&mut self, kit: &mut Kit) -> Effects {
-        self.quitting = match self.quitting {
-            Quitting::Asked => Quitting::Waiting,
-            Quitting::Waiting | Quitting::No => Quitting::No,
+        self.leaving = match self.leaving {
+            Leaving::Asked => Leaving::Waiting,
+            Leaving::Waiting | Leaving::No => Leaving::No,
         };
         let current = kit.current_buffer();
         let mut effects = Vec::new();
-        if let Some(index) = self.indexes.get_mut(&current) {
-            let under = match kit.target_under_cursor() {
-                Some(Target::Message(opened)) => Some(opened.uid),
-                _ => None,
-            };
-            if index.cursor != under {
-                let before = std::mem::replace(&mut index.cursor, under);
-                // The rows the cursor left and came to, alone, unless all of them are laid out again anyway.
-                if !self.dirty.contains(&current) {
-                    let look = index::Look::of(kit);
-                    let width = usize::from(self.width.max(20));
-                    let blocks: Vec<_> = [before, under]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|uid| index.block(uid, width, &look))
-                        .collect();
-                    let doc = kit.buffer_mut(current).doc_mut();
-                    for (key, content) in blocks {
-                        doc.replace(key, content);
-                    }
-                }
-            }
+        if self.indexes.contains_key(&current) {
             let near_end = kit.cursor_near_end();
             effects.extend(self.more_if_wanted(current, near_end));
         }
@@ -1837,6 +1828,10 @@ impl wcgw_kit::App for Muttrs {
         effects
     }
 
+    fn quit(&mut self, kit: &mut Kit) -> wcgw_kit::Quitting {
+        self.leave(kit)
+    }
+
     fn resized(&mut self, kit: &mut Kit, width: u16, _height: u16) -> Effects {
         if let Some(sidebar) = &mut self.sidebar {
             sidebar.width = sidebar_width(width);
@@ -1846,12 +1841,5 @@ impl wcgw_kit::App for Muttrs {
         }
         self.everything_dirty();
         self.settle(kit)
-    }
-}
-
-impl Drop for Muttrs {
-    /// Keeps the addresses seen, however muttrs quits (`:qa` too).
-    fn drop(&mut self) {
-        self.addresses.save();
     }
 }

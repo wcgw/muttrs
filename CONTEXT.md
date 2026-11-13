@@ -80,8 +80,8 @@ done; the status line says the one being done, and how many more wait.
 _Avoid_: job, operation, request (`Request` is what a Task asks, in the code)
 
 **History**:
-What was typed at the command line before: commands (`:`), and searches (`/`). `Up` and `Down` go back through it.
-wcgw-kit keeps it, while muttrs runs for now.
+What was typed at the command line before, kept between runs: commands (`:`), and searches (`/`). `Up` and `Down` go
+back through it. wcgw-kit keeps it.
 
 **Pager**:
 Where one Message is read: its headers, then its body as rendered, with its Pictures, Links and Attachments.

@@ -84,8 +84,6 @@ pub(crate) struct Pager {
     pub(crate) opened: Option<Opened>,
     /// The Index it was opened from, to go back to.
     pub(crate) from: Option<BufferId>,
-    /// The Message that Index's cursor was on when it was opened from there: what `q` goes back to as it was.
-    pub(crate) from_uid: Option<u32>,
     html: Option<Document>,
     plain: Option<Document>,
     /// The body shown, HTML or plain text.
@@ -158,7 +156,6 @@ impl Pager {
             message,
             opened: None,
             from: None,
-            from_uid: None,
             html,
             plain,
             showing,

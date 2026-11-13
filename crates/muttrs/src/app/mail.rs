@@ -7,6 +7,7 @@ use std::sync::Arc;
 use muttrs_mail::Role;
 use muttrs_mail::client::{self, Flag, Verdict};
 use wcgw_kit::BufferId;
+use wcgw_kit::shell::CursorLine;
 
 use super::{
     Document, Effect, Effects, Io, Kit, Line, Muttrs, Opened, Span, Target, Targets, UNDOES, Undo,
@@ -70,15 +71,7 @@ impl Muttrs {
             let Some(Target::Message(opened)) = kit.target_under_cursor() else {
                 return None;
             };
-            let look = crate::index::Look::of(kit);
-            let folded = index
-                .folded_text(opened.uid, usize::from(self.width.max(20)), &look)
-                .is_some_and(|folded| kit.cursor_row_text() == folded);
-            if folded {
-                index.thread_of(opened.uid)
-            } else {
-                vec![opened.uid]
-            }
+            Self::at_cursor(kit, index, opened.uid)
         } else {
             selection
         };
@@ -87,6 +80,15 @@ impl Muttrs {
             mailbox: index.mailbox.clone(),
             uids,
         })
+    }
+
+    /// The Message `uid` at the cursor of `index`, with its thread when that's folded into it.
+    fn at_cursor(kit: &Kit, index: &Index, uid: u32) -> Vec<u32> {
+        if kit.on_closed_fold() {
+            index.thread_of(uid)
+        } else {
+            vec![uid]
+        }
     }
 
     /// The Messages an action is for, or why there are none.
@@ -279,22 +281,22 @@ impl Muttrs {
             let next = index
                 .next(opened.uid, true)
                 .or_else(|| index.next(opened.uid, false));
-            Some((from, opened, pager.from_uid, next))
+            Some((from, opened, next))
         });
         if let Some((buffer, index)) = self.index_for(targets) {
             index.remove(&targets.uids);
             self.dirty.insert(buffer);
         }
         match in_pager {
-            Some((from, opened, from_uid, Some(next))) => {
+            Some((from, opened, Some(next))) => {
                 let opened = Opened {
                     uid: next,
                     ..opened
                 };
-                self.open_message(kit, opened, Some(from), from_uid, None);
+                self.open_message(kit, opened, Some(from), None);
                 Vec::new()
             }
-            Some((_, _, _, None)) => self.close_pager(kit, current),
+            Some((_, _, None)) => self.close_pager(kit, current),
             None => Vec::new(),
         }
     }
@@ -364,20 +366,15 @@ impl Muttrs {
     }
 
     /// Adds the `label`th of the Account's Labels to `targets`: to all of them, unless all have it already, when it's
-    /// taken off them. The Labels' list opens again, to add or take off more.
-    pub(crate) fn toggle_label(
-        &mut self,
-        kit: &mut Kit,
-        targets: &Targets,
-        label: usize,
-    ) -> Effects {
+    /// taken off them.
+    pub(crate) fn toggle_label(&mut self, targets: &Targets, label: usize) {
         let Some(chosen) = self
             .accounts
             .get(targets.account)
             .and_then(|state| state.labels.get(label))
             .cloned()
         else {
-            return Vec::new();
+            return;
         };
         let (have, all) = self.labelled(targets, label);
         let on = have < all || all == 0;
@@ -398,8 +395,6 @@ impl Muttrs {
                 on,
             });
         }
-        let picker = self.labels_picker(kit, targets, label);
-        kit.open_picker(self, picker)
     }
 
     /// The Mailbox of `account` called `wanted`: by its name for people, its path, or its name on the server.
@@ -584,15 +579,7 @@ impl Muttrs {
             let Some(Target::Message(opened)) = kit.target_under_cursor() else {
                 return Ok(());
             };
-            let look = crate::index::Look::of(kit);
-            let folded = index
-                .folded_text(opened.uid, usize::from(self.width.max(20)), &look)
-                .is_some_and(|folded| kit.cursor_row_text() == folded);
-            Some(if folded {
-                index.thread_of(opened.uid)
-            } else {
-                vec![opened.uid]
-            })
+            Some(Self::at_cursor(kit, index, opened.uid))
         };
         if let (Some(uids), Some(index)) = (uids, self.indexes.get_mut(&current)) {
             index.toggle_selected(&uids);
@@ -701,9 +688,11 @@ impl Muttrs {
         };
         let name = format!("{}?{query}", kit.buffer(listed).name());
         let buffer = if let Some(&buffer) = self.searched.get(&key) {
+            kit.buffer_mut(buffer).set_name(name);
             buffer
         } else {
             let buffer = kit.add_buffer(name, Document::new(), false);
+            kit.buffer_mut(buffer).set_cursorline(CursorLine::Row);
             self.searched.insert(key, buffer);
             buffer
         };
@@ -1118,17 +1107,17 @@ impl Muttrs {
         }
     }
 
-    /// `gx`: opens the Link under the cursor in the browser; without one, lists the Links to open one.
+    /// `gx`: opens the Link under the cursor in the browser, or `gy` copies it (`copy`); without one, lists the
+    /// Links, `<CR>` opening one and `<C-y>` copying it.
     pub(crate) fn browse(&mut self, kit: &mut Kit, copy: bool) -> Result<Effects, String> {
         if let Some(Target::Link(url)) = kit.target_under_cursor() {
             return Ok(if copy {
-                kit.info(format!("Copied {url}"));
-                vec![Effect::Copy(url)]
+                super::pickers::copy(kit, url)
             } else {
                 vec![Effect::OpenUrl(url)]
             });
         }
-        let picker = self.links_picker(kit, copy)?;
+        let picker = self.links_picker(kit)?;
         Ok(kit.open_picker(self, picker))
     }
 

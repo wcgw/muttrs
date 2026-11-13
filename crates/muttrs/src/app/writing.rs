@@ -40,7 +40,70 @@ fn sending(draft: &muttrs_mail::compose::Draft) -> String {
     }
 }
 
+/// The files and directories `typed` starts the path of, as typed (`~` and all), directories ending in `/`.
+fn paths(typed: &str) -> Vec<String> {
+    let (directory, name) = match typed.rfind('/') {
+        Some(at) => typed.split_at(at + 1),
+        None => ("", typed),
+    };
+    let listed = if directory.is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        crate::xdg::expand(directory)
+    };
+    let Ok(entries) = std::fs::read_dir(listed) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            let shown = file.starts_with(name) && (name.starts_with('.') || !file.starts_with('.'));
+            let slash = if entry.path().is_dir() { "/" } else { "" };
+            shown.then(|| format!("{directory}{file}{slash}"))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
 impl Muttrs {
+    /// The addresses `word` starts, as written to complete it: the query command's first, once it answered for
+    /// `word`, then those seen, the most often seen first. Asks the query command for `word` next, unless it has.
+    pub(crate) fn addresses_starting(&self, word: &str) -> Vec<String> {
+        if word.is_empty() {
+            return Vec::new();
+        }
+        let lower = word.to_lowercase();
+        let queried: Vec<muttrs_mail::Address> = match &self.queried {
+            Some((asked, found)) if *asked == lower => found.clone(),
+            _ => {
+                *self.to_query.borrow_mut() = Some(lower.clone());
+                Vec::new()
+            }
+        };
+        let seen = self.addresses.complete(word);
+        let mut found: Vec<String> = Vec::new();
+        let written = queried.iter().map(ToString::to_string).chain(seen);
+        for written in written {
+            // `Name <address>` where the name starts as typed, else the address alone, as it starts so.
+            let address = written
+                .rsplit_once('<')
+                .map_or(written.as_str(), |(_, rest)| rest.trim_end_matches('>'));
+            let candidate = if written.starts_with(word) {
+                written.clone()
+            } else if address.starts_with(word) {
+                address.to_owned()
+            } else {
+                continue;
+            };
+            if !found.contains(&candidate) {
+                found.push(candidate);
+            }
+        }
+        found
+    }
+
     /// `:compose`: a new Message to `to`, as written, asking whom to first if it says nobody, then its subject, as
     /// mutt does, before the editor.
     pub(crate) fn compose(&mut self, kit: &mut Kit, to: &str) -> Result<Effects, String> {
@@ -48,12 +111,27 @@ impl Muttrs {
             return Err("Writing needs an Account: run muttrs without `view`".to_owned());
         }
         if to.trim().is_empty() {
-            kit.prompt("To: ", false, |_: &mut Self, kit, to| {
-                if to.trim().is_empty() {
-                    return Vec::new();
-                }
-                Self::addressed(kit, &to)
-            });
+            kit.prompt_completing(
+                "To: ",
+                |muttrs: &Self, _, typed| {
+                    // The address typed last, after those typed before it.
+                    let (before, word) = match typed.rsplit_once(',') {
+                        Some((before, word)) => (format!("{before}, "), word.trim()),
+                        None => (String::new(), typed.trim()),
+                    };
+                    muttrs
+                        .addresses_starting(word)
+                        .into_iter()
+                        .map(|address| format!("{before}{address}"))
+                        .collect()
+                },
+                |_: &mut Self, kit, to| {
+                    if to.trim().is_empty() {
+                        return Vec::new();
+                    }
+                    Self::addressed(kit, &to)
+                },
+            );
             return Ok(Vec::new());
         }
         Ok(Self::addressed(kit, to))
@@ -104,8 +182,7 @@ impl Muttrs {
             let message = Arc::clone(pager.message());
             return Ok(self.write_about(kit, writing, opened.account, &message, opened.uid));
         }
-        let uid = opened.uid;
-        self.open_message(kit, opened, from, Some(uid), Some(writing));
+        self.open_message(kit, opened, from, Some(writing));
         Ok(Vec::new())
     }
 
@@ -392,12 +469,16 @@ impl Muttrs {
             return Err("No Draft to attach to".to_owned());
         }
         if path.is_empty() {
-            kit.prompt("Attach: ", false, |muttrs: &mut Self, kit, path| {
-                if let Err(error) = muttrs.attach(kit, path.trim()) {
-                    kit.error(error);
-                }
-                Vec::new()
-            });
+            kit.prompt_completing(
+                "Attach: ",
+                |_: &Self, _, typed| paths(typed),
+                |muttrs: &mut Self, kit, path| {
+                    if let Err(error) = muttrs.attach(kit, path.trim()) {
+                        kit.error(error);
+                    }
+                    Vec::new()
+                },
+            );
             return Ok(Vec::new());
         }
         let path = crate::xdg::expand(path);

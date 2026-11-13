@@ -221,9 +221,11 @@ async fn mail() -> anyhow::Result<()> {
     let addresses = AddressBook::load(xdg::cache_dir().map(|cache| cache.join("addresses.txt")));
     let (muttrs, kit) = Muttrs::mail(config, states, addresses, voight, pictures);
     tracing::info!("starting");
-    runtime::run("muttrs", muttrs, kit, net, (inbox, mailbox))
+    let (mut muttrs, _) = runtime::run_returning("muttrs", muttrs, kit, net, (inbox, mailbox))
         .await
-        .context("running the terminal")
+        .context("running the terminal")?;
+    muttrs.save();
+    Ok(())
 }
 
 async fn view(path: &str) -> anyhow::Result<()> {

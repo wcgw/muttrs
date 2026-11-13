@@ -17,7 +17,7 @@ const WRITING: Topic = Topic::new(74, "Writing");
 const LISTING: Topic = Topic::new(76, "Listing");
 
 /// muttrs' default keys: keys, the command each runs, what which-key says of it, and its `:help` topic.
-const KEYS: [(&str, &str, &str, Topic); 43] = [
+const KEYS: [(&str, &str, &str, Topic); 42] = [
     (
         "<2-LeftMouse>",
         "open",
@@ -37,17 +37,16 @@ const KEYS: [(&str, &str, &str, Topic); 43] = [
         Topic::OPENING,
     ),
     ("gy", "yanklink", "copy the Link", Topic::OPENING),
-    ("<leader>o", "pick links", "Links", Topic::OPENING),
     (
-        "<leader>a",
-        "pick attachments",
-        "open an Attachment",
+        "<leader>o",
+        "pick links",
+        "Links: <C-y> copies",
         Topic::OPENING,
     ),
     (
-        "<leader>A",
-        "pick saveattachments",
-        "save an Attachment",
+        "<leader>a",
+        "pick attachments",
+        "Attachments: <C-s> saves",
         Topic::OPENING,
     ),
     ("<C-n>", "next", "the next Message, older", MAIL),
@@ -114,39 +113,9 @@ fn filters(muttrs: &Muttrs, kit: &Kit, _: &[&str], word: &str) -> Vec<String> {
     crate::filter::completions(word, listed)
 }
 
-/// Addresses that start with `word`, as seen or found by the query command: what completing asks it for next.
+/// Addresses that start with `word`, as seen or found by the query command.
 fn addresses(muttrs: &Muttrs, _: &Kit, _: &[&str], word: &str) -> Vec<String> {
-    let word = word.trim_start_matches(',');
-    if word.is_empty() {
-        return Vec::new();
-    }
-    let lower = word.to_lowercase();
-    let queried = match &muttrs.queried {
-        Some((asked, found)) if *asked == lower => {
-            found.iter().map(|address| address.email.clone()).collect()
-        }
-        _ => Vec::new(),
-    };
-    if muttrs
-        .queried
-        .as_ref()
-        .is_none_or(|(asked, _)| *asked != lower)
-    {
-        *muttrs.to_query.borrow_mut() = Some(lower.clone());
-    }
-    let seen = muttrs.addresses.complete(word).into_iter().map(|written| {
-        // `Name <address>`: the address, which is what the word starts.
-        written
-            .rsplit_once('<')
-            .map_or(written.clone(), |(_, rest)| {
-                rest.trim_end_matches('>').to_owned()
-            })
-    });
-    queried
-        .into_iter()
-        .chain(seen)
-        .filter(|address| address.to_lowercase().starts_with(&lower))
-        .collect()
+    muttrs.addresses_starting(word.trim_start_matches(','))
 }
 
 /// The Mailboxes of the Account shown, by their paths.

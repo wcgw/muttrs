@@ -1,12 +1,11 @@
 //! The lists muttrs opens over its windows as the kit's pickers (its D14), narrowed as what's typed matches: the
-//! Links of the Message shown (to open, or to copy), its Attachments (to open, or to save), the Mailboxes to move
-//! to, the Labels, and where a search of every Mailbox found Messages. A picker has one verb, `<CR>`: copying and
-//! saving are pickers of their own.
+//! Links of the Message shown (`<CR>` opens one, `<C-y>` copies it), its Attachments (`<CR>` opens one, `<C-s>`
+//! saves it), the Mailboxes to move to, the Labels, and where a search of every Mailbox found Messages.
 
 use wcgw_kit::hl::Group;
 use wcgw_kit::shell::{Choice, Pick, Picker};
 
-use super::{Kit, Muttrs, Target, Targets};
+use super::{Effect, Effects, Kit, Muttrs, Target, Targets};
 use crate::hl;
 use crate::icons;
 use crate::index::truncate;
@@ -16,30 +15,26 @@ use crate::sidebar::{self, Row};
 pub(super) fn add(kit: &mut Kit) {
     kit.add_picker("links", |muttrs, kit| {
         muttrs
-            .links_picker(kit, false)
+            .links_picker(kit)
             .unwrap_or_else(|why| Picker::list("Links", Vec::new(), why))
     });
-    kit.add_picker("yanklinks", |muttrs, kit| {
-        muttrs
-            .links_picker(kit, true)
-            .unwrap_or_else(|why| Picker::list("Copy a Link", Vec::new(), why))
-    });
-    kit.add_picker("attachments", |muttrs, kit| {
-        muttrs.attachments_picker(kit, false)
-    });
-    kit.add_picker("saveattachments", |muttrs, kit| {
-        muttrs.attachments_picker(kit, true)
-    });
+    kit.add_picker("attachments", |muttrs, kit| muttrs.attachments_picker(kit));
     kit.add_picker("mailboxes", |muttrs, kit| muttrs.move_picker(kit));
     kit.add_picker("labels", |muttrs, kit| match muttrs.targets(kit) {
-        Some(targets) => muttrs.labels_picker(kit, &targets, 0),
+        Some(targets) => muttrs.labels_picker(&targets),
         None => Picker::list("Labels", Vec::new(), "No Message here"),
     });
 }
 
+/// Copies `url`, saying so.
+pub(super) fn copy(kit: &mut Kit, url: String) -> Effects {
+    kit.info(format!("Copied {url}"));
+    vec![Effect::Copy(url)]
+}
+
 impl Muttrs {
-    /// The Links of the Message the Pager shows, numbered, to open in the browser, or to copy if `copy`.
-    pub(super) fn links_picker(&self, kit: &Kit, copy: bool) -> Result<Picker<Self>, String> {
+    /// The Links of the Message the Pager shows, numbered, to open in the browser, or to copy.
+    pub(super) fn links_picker(&self, kit: &Kit) -> Result<Picker<Self>, String> {
         let pager = self
             .pagers
             .get(&kit.current_buffer())
@@ -63,25 +58,23 @@ impl Muttrs {
                 Choice {
                     label,
                     text: format!("{number}{} {}", link.text, link.url),
-                    pick: Pick::Target(if copy {
-                        Target::Copy(link.url.clone())
-                    } else {
-                        Target::Link(link.url.clone())
-                    }),
+                    pick: Pick::Target(Target::Link(link.url.clone())),
                 }
             })
             .collect();
-        let title = if copy { "Copy a Link" } else { "Links" };
-        Ok(Picker::list(title, choices, "No Link matches"))
+        Ok(Picker::list("Links", choices, "No Link matches").verb(
+            "<C-y>",
+            "copy",
+            |_, kit, pick| match pick {
+                Pick::Target(Target::Link(url)) => copy(kit, url),
+                _ => Vec::new(),
+            },
+        ))
     }
 
-    /// The Attachments of the Message the Pager shows, to open, or to save if `save`.
-    fn attachments_picker(&self, kit: &Kit, save: bool) -> Picker<Self> {
-        let title = if save {
-            "Save an Attachment"
-        } else {
-            "Attachments"
-        };
+    /// The Attachments of the Message the Pager shows, to open, or to save.
+    fn attachments_picker(&self, kit: &Kit) -> Picker<Self> {
+        let title = "Attachments";
         let current = kit.current_buffer();
         let Some(pager) = self.pagers.get(&current) else {
             return Picker::list(title, Vec::new(), "Attachments are the Pager's");
@@ -111,11 +104,22 @@ impl Muttrs {
                 pick: Pick::Target(Target::Attachment {
                     pager: current,
                     part,
-                    save,
                 }),
             })
             .collect();
-        Picker::list(title, choices, "No Attachment matches")
+        Picker::list(title, choices, "No Attachment matches").verb(
+            "<C-s>",
+            "save",
+            |muttrs: &mut Self, kit, pick| match pick {
+                Pick::Target(Target::Attachment { pager, part }) => {
+                    muttrs.attachment(pager, part, true).unwrap_or_else(|why| {
+                        kit.error(why);
+                        Vec::new()
+                    })
+                }
+                _ => Vec::new(),
+            },
+        )
     }
 
     /// The Account's other Mailboxes, to move the Messages an action is for to one.
@@ -150,12 +154,7 @@ impl Muttrs {
 
     /// The Account's Labels, each marked as `targets` have it (`✓` all, `–` some), to add or take off; starting on
     /// the `selecting`th.
-    pub(super) fn labels_picker(
-        &self,
-        kit: &Kit,
-        targets: &Targets,
-        selecting: usize,
-    ) -> Picker<Self> {
+    pub(super) fn labels_picker(&self, targets: &Targets) -> Picker<Self> {
         let title = match targets.uids.len() {
             1 => "Labels".to_owned(),
             count => format!("Labels of {count}"),
@@ -171,8 +170,30 @@ impl Muttrs {
             };
             return Picker::list(title, Vec::new(), why);
         }
-        let _ = kit;
-        let choices = state
+        // `<CR>` adds a Label or takes it off, the list staying open for more, as muttrs' did.
+        Picker::list(title, self.label_choices(targets), "No Label matches").verb(
+            "<CR>",
+            "add or take off",
+            |muttrs: &mut Self, kit, pick| {
+                let Pick::Target(Target::Label { targets, label }) = pick else {
+                    return Vec::new();
+                };
+                muttrs.toggle_label(&targets, label);
+                let choices = muttrs.label_choices(&targets);
+                if let Some(picker) = kit.picker_mut() {
+                    picker.set_choices(choices);
+                }
+                Vec::new()
+            },
+        )
+    }
+
+    /// The Account's Labels, each marked as `targets` have it.
+    fn label_choices(&self, targets: &Targets) -> Vec<Choice<Target>> {
+        let Some(state) = self.accounts.get(targets.account) else {
+            return Vec::new();
+        };
+        state
             .labels
             .iter()
             .enumerate()
@@ -194,8 +215,7 @@ impl Muttrs {
                     }),
                 }
             })
-            .collect();
-        Picker::list(title, choices, "No Label matches").selecting(selecting)
+            .collect()
     }
 
     /// Where a search of every Mailbox of `account` for `query` `found` Messages, how many in each, in the sidebar's

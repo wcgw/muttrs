@@ -191,9 +191,11 @@ Not there yet, roughly in the order a mutt user would reach for them:
       Indexes, the Pagers and the Draft as the kit's buffers; every action a `:` command, its keys after the kit's
       shared verbs; Links, Attachments, Mailboxes, Labels and what's found as pickers; `Muttrs…` highlight groups
       with tokyonight-moon's colours; voight's shared Assessor
-- [ ] What the kit doesn't have yet, and muttrs had: handing the terminal to a command (`!`, `|`), the History
-      kept between runs, completion at a prompt (To:), a window's cursor put where muttrs wants it (it reopens the
-      window), picker verbs (Copy, Save)
+- [x] What the kit grew since: windows' cursors put where muttrs wants them, `'cursorline'`, widths of windows,
+      fold state, picker verbs (Copy, Save; Labels staying open), statusline colours, a quit hook, completing prompts (To:, Attach:), the
+      History on disk
+- [ ] What the kit doesn't have yet, and muttrs had: handing the terminal to a command (`!`, `|`), choosing the
+      editor and the Draft's file name
 
 ### Later
 

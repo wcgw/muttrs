@@ -32,9 +32,12 @@ pub(super) fn install(kit: &mut Kit) {
         "voight's Heatmap",
         VOIGHT,
     );
-    kit.add_segment(Segment::new(Side::Right, 2, |muttrs: &Muttrs, kit| {
-        muttrs.assessment_said(kit)
-    }));
+    kit.add_segment(
+        Segment::new(Side::Right, 2, |muttrs: &Muttrs, kit| {
+            muttrs.assessment_said(kit)
+        })
+        .with_group(crate::hl::VOIGHT),
+    );
 }
 
 impl Muttrs {

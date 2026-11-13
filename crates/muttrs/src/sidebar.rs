@@ -149,6 +149,20 @@ fn block_of(row: &Row) -> String {
     }
 }
 
+/// Where `account`'s Mailbox `name` is listed: the key of its block, and its line there.
+pub(crate) fn place_of(
+    accounts: &[AccountState],
+    account: usize,
+    name: &str,
+) -> Option<(String, usize)> {
+    let row = Row::Mailbox(account, name.to_owned());
+    let rows = rows(accounts);
+    let at = rows.iter().position(|listed| *listed == row)?;
+    let key = block_of(&row);
+    let first = rows.iter().position(|listed| block_of(listed) == key)?;
+    Some((key, at - first))
+}
+
 /// What drawing the sidebar takes.
 pub(crate) struct Draw<'a> {
     pub(crate) accounts: &'a [AccountState],

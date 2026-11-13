@@ -640,15 +640,19 @@ fn links_open_from_the_cursor_or_a_picker_and_copy_from_another() {
     assert!(effects.contains(&wcgw_kit::Effect::OpenUrl(
         "https://example.com/menu".to_owned()
     )));
-    let effects = mail.press(":pick yanklinks<CR><CR>");
+    let effects = mail.press("<Space>o<C-y>");
     assert!(
         effects.contains(&wcgw_kit::Effect::Copy(
             "https://example.com/menu".to_owned()
         )),
         "{effects:?}"
     );
+    assert!(
+        mail.screen().contains("Links"),
+        "copying leaves the picker open"
+    );
     // On the Link itself, <CR> opens it.
-    mail.press("/menu<CR>");
+    mail.press("<Esc>/menu<CR>");
     let effects = mail.press("<CR>");
     assert!(
         effects.contains(&wcgw_kit::Effect::OpenUrl(
@@ -670,7 +674,7 @@ fn attachments_open_or_save_from_pickers() {
         effect,
         wcgw_kit::Effect::App(Io::OpenFile { name, .. }) if name == "notes.txt"
     )));
-    let effects = mail.press("<Space>A<CR>");
+    let effects = mail.press("<Space>a<C-s>");
     assert!(effects.iter().any(|effect| matches!(
         effect,
         wcgw_kit::Effect::App(Io::Save { name, .. }) if name == "notes.txt"
@@ -704,9 +708,19 @@ fn moving_and_labelling_choose_from_pickers() {
     );
     assert!(
         mail.screen().contains("✓ Fun"),
-        "the picker again: {}",
+        "the picker, still open: {}",
         mail.screen()
     );
+    mail.press("<CR>");
+    assert!(
+        mail.requests().iter().any(|request| matches!(
+            request,
+            Request::Label { uids, on: false, .. } if uids == &[2]
+        )),
+        "taken off again"
+    );
+    mail.press("<Esc>");
+    assert!(!mail.screen().contains("Fun"), "{}", mail.screen());
 }
 
 #[test]
@@ -1051,7 +1065,7 @@ fn the_cursor_s_row_is_drawn_across_the_index() {
     mail.press("j");
     let rows = mail.rows();
     let y = rows.iter().position(|row| row.contains("Report")).unwrap();
-    let cursor = mail.harness.kit.style(crate::hl::CURSOR_LINE).bg;
+    let cursor = mail.harness.kit.style(wcgw_kit::hl::Group::CURSOR_LINE).bg;
     assert!(cursor.is_some());
     assert_eq!(
         mail.harness.style_at(99, u16::try_from(y).unwrap()).bg,
@@ -1099,5 +1113,68 @@ fn q_closes_help_s_window_and_goes_back_from_a_command_s_output() {
         mail.rows()[0].contains("home › Inbox"),
         "{:#?}",
         mail.rows()
+    );
+}
+
+#[test]
+fn the_to_prompt_completes_addresses_seen() {
+    let mut mail = Mail::new(100, 30);
+    mail.two();
+    mail.press("cbob@example.com, an<Tab>");
+    assert!(
+        mail.cmdline()
+            .contains("To: bob@example.com, ann@example.com"),
+        "{}",
+        mail.cmdline()
+    );
+}
+
+#[test]
+fn quitting_with_tasks_left_waits_for_them_but_not_with_a_bang() {
+    let mut mail = Mail::new(100, 20);
+    mail.two();
+    assert!(!mail.press(":qa<CR>").contains(&wcgw_kit::Effect::Quit));
+    assert!(
+        mail.cmdline().contains("Quitting once"),
+        "{}",
+        mail.cmdline()
+    );
+    assert!(mail.press(":qa!<CR>").contains(&wcgw_kit::Effect::Quit));
+}
+
+#[test]
+fn the_sidebar_s_cursor_follows_the_mailbox_opened_by_name() {
+    let mut mail = Mail::new(100, 20);
+    mail.press(":cd Archive<CR><C-w>h");
+    assert!(
+        mail.harness.kit.cursor_row_text().contains("Archive"),
+        "{}",
+        mail.harness.kit.cursor_row_text()
+    );
+}
+
+#[test]
+fn the_index_is_laid_out_for_its_window_s_width() {
+    let mut mail = Mail::new(120, 20);
+    mail.two();
+    mail.press(":vsplit<CR>");
+    let width = mail
+        .harness
+        .kit
+        .text_width(mail.harness.kit.current_buffer());
+    assert!(width < 60, "{width}");
+    let rows = mail.rows();
+    let lunch = line_with(&rows, "Lunch").expect("listed");
+    assert_eq!(
+        lunch.matches("Lunch").count(),
+        2,
+        "on a row in each window, not wrapped: {rows:#?}"
+    );
+    assert_eq!(
+        line_with(&rows, "Report")
+            .unwrap()
+            .matches("Report")
+            .count(),
+        2
     );
 }
