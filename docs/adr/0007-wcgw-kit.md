@@ -42,6 +42,10 @@ with ghd.
   (selecting is `x`), `s` flags (moving is `<Space>m`), `$` is the end of the line (refreshing is `<C-l>`), `J` and
   `K` don't step through Messages (`<C-n>` and `<C-p>` do), `h` is a motion (every header is `K`), `H` is a motion
   (the Heatmap is `<Space>h`), and a Draft's keys are commands (`:send`, `:postpone`, `:attach`, `:detach`).
+- Selecting is as in ghd: `x` selects, or unselects, and moves down, as `<Space>` did and ghd's `s` does; `<Esc>`
+  (`:clear`) unselects every Message, or else lists them all again, as ghd's clears its Selection, or else its
+  filter. It no longer clears a search of the Index (`:nohlsearch` is the kit's), nor goes back from what the
+  server found (`q` does).
 - `config.toml` keeps what's muttrs' own. Themes (`themes/*.toml`) and keys (`[keys.*]`) are no longer read:
   `init.vim` says them, as `:hi` and `:map` lines, which `scripts/convert-config.py` writes from them. `theme`,
   `icons`, `images` and `mouse` still say how muttrs starts, as `:colorscheme` and `:set` lines before `init.vim`.

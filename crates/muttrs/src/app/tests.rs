@@ -619,13 +619,26 @@ fn filters_select_and_limit_and_complete() {
 }
 
 #[test]
-fn x_selects_and_unselect_alone_unselects_all() {
+fn x_selects_and_goes_down_and_esc_clears_the_selection_then_the_limit() {
     let mut mail = Mail::new(100, 30);
     mail.two();
-    mail.press("xjx");
+    // The second `x` selects the next Message, not the first again.
+    mail.press("xx");
     assert!(mail.rows()[0].contains("2 selected"), "{:#?}", mail.rows());
     mail.press(":unselect<CR>");
     assert!(!mail.rows()[0].contains("selected"));
+
+    // Lunch, from Ann, selected, then left out of what's listed.
+    mail.press("ggx:limit from:bob<CR>");
+    assert!(mail.rows()[0].contains("1 selected"), "{:#?}", mail.rows());
+    assert!(mail.rows()[0].contains("limited to from:bob"));
+    // `<Esc>` unselects what isn't listed too, and leaves the limit for the next one.
+    mail.press("<Esc>");
+    assert!(!mail.rows()[0].contains("selected"), "{:#?}", mail.rows());
+    assert!(mail.rows()[0].contains("limited to from:bob"));
+    mail.press("<Esc>");
+    assert!(!mail.rows()[0].contains("limited"), "{:#?}", mail.rows());
+    assert!(mail.cmdline().contains("All show again"));
 }
 
 #[test]

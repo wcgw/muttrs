@@ -348,6 +348,13 @@ impl Index {
         }
     }
 
+    /// Unselects every Message, listed or not; `false` if none was selected.
+    pub(crate) fn clear_selected(&mut self) -> bool {
+        let any = !self.selected.is_empty();
+        self.selected.clear();
+        any
+    }
+
     /// Selects, or unselects, the Messages listed that `picks` picks, folded ones too: how many it picks, and how
     /// many of those it selected, or unselected, that weren't, or were.
     pub(crate) fn select_where(

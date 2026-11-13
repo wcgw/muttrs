@@ -565,7 +565,25 @@ impl Muttrs {
         Ok(())
     }
 
-    /// `x`: selects the Message at the cursor, with its thread when that's folded into it, or unselects it.
+    /// `:clear` (`<Esc>`): unselects every Message of the Index, listed or not, or else lists them all again, as
+    /// `:limit` alone does. Elsewhere, nothing.
+    pub(crate) fn clear(&mut self, kit: &mut Kit) -> Result<(), String> {
+        let current = kit.current_buffer();
+        let Some(index) = self.indexes.get_mut(&current) else {
+            return Ok(());
+        };
+        if index.clear_selected() {
+            self.dirty.insert(current);
+            Ok(())
+        } else if index.limited().is_some() {
+            self.limit_to(kit, "")
+        } else {
+            Ok(())
+        }
+    }
+
+    /// `:toggle` (`x`, which then moves down): selects the Message at the cursor, with its thread when that's folded
+    /// into it, or unselects it.
     pub(crate) fn toggle_selected(&mut self, kit: &mut Kit) -> Result<(), String> {
         let current = kit.current_buffer();
         let index = self

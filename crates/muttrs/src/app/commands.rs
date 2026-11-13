@@ -67,7 +67,12 @@ const KEYS: [(&str, &str, &str, Topic); 42] = [
     ("\\", "sidebar", "show or hide the sidebar", Topic::WINDOWS),
     ("<F1>", "help", "help", Topic::SEARCHING),
     ("<leader>?", "help", "help", Topic::SEARCHING),
-    ("x", "toggle", "select, or not", LISTING),
+    (
+        "<Esc>",
+        "clear",
+        "clear the Selection, or else the limit",
+        LISTING,
+    ),
     ("S", "grep", "search the server", LISTING),
     ("od", "sort date", "sort newest first", LISTING),
     ("of", "sort from", "sort by sender", LISTING),
@@ -91,6 +96,11 @@ const KEYS: [(&str, &str, &str, Topic); 42] = [
     ("<leader>s", "send", "send the Draft", WRITING),
     ("<leader>p", "postpone", "postpone the Draft", WRITING),
 ];
+
+/// muttrs' defaults that go on past a command: `x` selects and moves down, as ghd's `s`. Keys, the keys they stand
+/// for, what which-key says of them, and their `:help` topic.
+const MAPS: [(&str, &str, &str, Topic); 1] =
+    [("x", ":toggle<CR>j", "select or not, and down", LISTING)];
 
 /// Every argument is one of `choices`, or there's none.
 fn one_of(
@@ -272,6 +282,10 @@ pub(super) fn add(kit: &mut Kit) {
         })
         .help("unselect what a filter picks; alone, all")
         .complete(filters),
+        Command::new("clear", 3, |muttrs: &mut Muttrs, kit, _| {
+            muttrs.clear(kit).map(|()| Vec::new())
+        })
+        .help("clear the Selection, or else the limit"),
         Command::new("limit", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs.limit_to(kit, line.args).map(|()| Vec::new())
         })
@@ -448,6 +462,9 @@ pub(super) fn add(kit: &mut Kit) {
     let keymap = kit.keymap_mut();
     for (notation, command, description, topic) in KEYS {
         keymap.bind(&[Mode::Normal], notation, command, description, topic);
+    }
+    for (notation, keys, description, topic) in MAPS {
+        keymap.bind_keys(&[Mode::Normal], notation, keys, description, topic);
     }
     // `q` closes the Pager, back to its Index, rather than its window; in the Index, it quits once what's asked
     // is done, rather than leaving the sidebar alone.
