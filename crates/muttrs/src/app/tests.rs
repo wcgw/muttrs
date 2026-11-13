@@ -856,7 +856,7 @@ fn piping_fetches_the_messages_then_runs_the_command() {
         .expect("the terminal handed to the command");
     assert_eq!(shell.command, "cat");
     assert!(shell.wait, "Enter brings muttrs back");
-    let piped = shell.stdin.as_deref().unwrap_or_default();
+    let piped = String::from_utf8_lossy(shell.stdin.as_deref().unwrap_or_default());
     assert!(
         piped.contains("Subject: Lunch") && piped.contains("Hi."),
         "the Message, as it came: {piped}"

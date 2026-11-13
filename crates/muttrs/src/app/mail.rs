@@ -890,9 +890,8 @@ impl Muttrs {
         match then {
             Then::Pipe(command) => {
                 let raw: Vec<&[u8]> = messages.iter().map(|message| message.as_slice()).collect();
-                // The kit pipes text: what isn't UTF-8 (an 8bit part in Latin-1, say) goes as U+FFFD.
-                let mbox =
-                    String::from_utf8_lossy(&muttrs_mail::mbox::for_commands(&raw)).into_owned();
+                // Byte for byte, as they came: an 8bit part in Latin-1 reaches the command as it is.
+                let mbox = muttrs_mail::mbox::for_commands(&raw);
                 vec![Effect::Shell(
                     wcgw_kit::Shell::new(command).stdin(mbox).wait(),
                 )]

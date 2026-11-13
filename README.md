@@ -177,7 +177,7 @@ stay.
 `|` pipes Messages to a command: the one the Pager shows, as it came, or those selected (else the one at the cursor,
 a folded thread whole), several as an mbox, the oldest first, as `git am` and `b4 am` take a series of patches:
 `|git am -3`. The command has the terminal until `Enter` brings muttrs back. `!` runs a command so, or the shell. The
-Messages are piped as text: what isn't UTF-8 in them (an 8bit part in Latin-1, say) goes as `�`.
+Messages are piped byte for byte, an 8bit part in Latin-1 as it came.
 
 `:limit` lists only the Messages a filter picks, in threads among themselves, until `:limit` alone lists them all
 again; `:select` then picks among those.
