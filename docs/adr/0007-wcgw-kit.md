@@ -59,6 +59,8 @@ with ghd.
   anew, as `:sync!` did.
 - A Mailbox opens by name with `:e NAME`, as a buffer does in every app: `:cd` goes.
 - `:limit` is `:filter`, as ghd's: it narrows the Index to what a Filter picks, and the winbar says `filter …`.
+- `:voight on` and `off` start and stop assessing, as ghd's do; they showed and hid the Heatmap, which
+  `:voight heatmap` (`<leader>h`) does.
 - The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.
 - Quitting with Tasks left waits for them, through the kit's quit hook; `:qa!` doesn't.
 - In pickers, `<CR>` opens; `<C-y>` yanks a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the

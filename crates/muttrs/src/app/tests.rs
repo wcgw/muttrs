@@ -1115,8 +1115,31 @@ fn voight_assesses_the_pager_s_prose_says_so_and_shades_its_heatmap() {
         )),
         "{effects:?}"
     );
+    // As ghd's: off stops assessing, on starts again.
     mail.press(":voight off<CR>");
-    assert!(!mail.statusline().contains("Heatmap"));
+    assert!(
+        !mail.statusline().contains("voight"),
+        "{}",
+        mail.statusline()
+    );
+    mail.press(":voight heatmap<CR>");
+    assert!(
+        mail.cmdline().contains(":voight on starts it again"),
+        "{}",
+        mail.cmdline()
+    );
+    let effects = mail.press(":voight on<CR>");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, wcgw_kit::Effect::App(Io::Assess { .. }))),
+        "assessed again: {effects:?}"
+    );
+    assert!(
+        mail.statusline().contains("voight …"),
+        "{}",
+        mail.statusline()
+    );
 }
 
 #[test]

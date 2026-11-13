@@ -205,10 +205,11 @@ Mailboxes, as moving it out of the Label's would ([docs/adr/0005-labels.md](docs
 
 With voight on, the statusline says how much of the prose the Pager shows voight estimates an LLM wrote (`voight
 73%`), once it has assessed it, one Message at a time. What's quoted is left out, as it's someone else's, and so is
-preformatted text; a body with fewer than 50 words of prose isn't assessed. `<Space>h` (`:voight heatmap`, or `:voight
-on` and `:voight off`) shows the Heatmap: each stretch of prose voight scored (about 100 to 400 words) shaded from
-green (0%) through yellow to red (100%), in the colours of the `VoightHeatHuman`, `VoightHeatEven` and `VoightHeatLlm`
-highlight groups. It's an estimate, never evidence of authorship.
+preformatted text; a body with fewer than 50 words of prose isn't assessed. `<Space>h` (`:voight heatmap`) shows the
+Heatmap, or hides it: each stretch of prose voight scored (about 100 to 400 words) shaded from green (0%) through
+yellow to red (100%), in the colours of the `VoightHeatHuman`, `VoightHeatEven` and `VoightHeatLlm` highlight groups.
+It's an estimate, never evidence of authorship. `:voight off` stops assessing, and `:voight on` starts again, as in
+ghd.
 
 ## Searching
 

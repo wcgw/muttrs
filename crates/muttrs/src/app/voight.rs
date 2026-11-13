@@ -5,7 +5,7 @@ use wcgw_kit::keymap::{Mode, Topic};
 use wcgw_kit::shell::{Command, Segment, Side};
 
 use super::{Kit, Muttrs};
-use crate::assessment::{Assessed, Readiness};
+use crate::assessment::{Assessed, Assessments, Readiness};
 
 /// What voight is about, in `:help`.
 const VOIGHT: Topic = Topic::new(78, "voight");
@@ -16,7 +16,7 @@ pub(super) fn install(kit: &mut Kit) {
         Command::new("voight", 2, |muttrs: &mut Muttrs, kit, line| {
             muttrs.voight(kit, line.args)
         })
-        .help("voight: heatmap shows or hides the Heatmap; on, off it")
+        .help("voight: alone, what it says; heatmap shows or hides the Heatmap; on and off start and stop it")
         .complete(|_, _, before, _| {
             if before.is_empty() {
                 ["heatmap", "on", "off"].map(str::to_owned).to_vec()
@@ -41,15 +41,34 @@ pub(super) fn install(kit: &mut Kit) {
 }
 
 impl Muttrs {
-    /// `:voight`: `heatmap` shows the Heatmap or stops; `on` and `off` show it or not; alone, says how it stands.
+    /// `:voight`, as ghd's: `heatmap` shows the Heatmap or stops; `on` and `off` start and stop assessing; alone,
+    /// says how it stands.
     fn voight(&mut self, kit: &mut Kit, args: &str) -> Result<super::Effects, String> {
-        if self.assessments.is_none() {
-            return Err("voight is off: voight = \"cpu\" in config.toml turns it on".to_owned());
+        match args {
+            "on" if !self.voight_built => return Err(Self::voight_off(false).to_owned()),
+            "on" => {
+                if self.assessments.is_none() {
+                    let mut assessments = Assessments::default();
+                    if let Some(loaded) = self.voight_loaded {
+                        assessments.loaded(loaded);
+                    }
+                    self.assessments = Some(assessments);
+                }
+                return Ok(Vec::new());
+            }
+            "off" => {
+                self.assessments = None;
+                self.heatmap = false;
+                self.dirty.extend(self.pagers.keys().copied());
+                return Ok(Vec::new());
+            }
+            _ if self.assessments.is_none() => {
+                return Err(Self::voight_off(self.voight_built).to_owned());
+            }
+            _ => {}
         }
         let heatmap = match args {
             "heatmap" => !self.heatmap,
-            "on" => true,
-            "off" => false,
             "" => {
                 kit.info(
                     self.assessment_said(kit)
@@ -71,6 +90,15 @@ impl Muttrs {
         }
         self.dirty.extend(self.pagers.keys().copied());
         Ok(Vec::new())
+    }
+
+    /// Why there's no voight: stopped by `:voight off`, if it runs, else the configuration's.
+    fn voight_off(built: bool) -> &'static str {
+        if built {
+            "voight is off: :voight on starts it again"
+        } else {
+            "voight is off: voight = \"cpu\" in config.toml turns it on"
+        }
     }
 
     /// What the statusline says of voight while a Pager shows: that it's loading, assessing, or its Assessment, with

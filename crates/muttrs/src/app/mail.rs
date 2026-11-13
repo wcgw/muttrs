@@ -1147,6 +1147,11 @@ impl Muttrs {
 
     /// Takes in what voight says: that its model is loaded, or why it couldn't be, or an Assessment.
     pub(super) fn voight_said(&mut self, kit: &mut Kit, said: crate::assessment::Event) -> Effects {
+        match &said {
+            crate::assessment::Event::Loaded { .. } => self.voight_loaded = Some(true),
+            crate::assessment::Event::Failed(_) => self.voight_loaded = Some(false),
+            crate::assessment::Event::Assessed { .. } => {}
+        }
         let Some(assessments) = &mut self.assessments else {
             return Vec::new();
         };

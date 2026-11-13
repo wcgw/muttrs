@@ -265,8 +265,13 @@ pub(crate) struct Muttrs {
     to_query: std::cell::RefCell<Option<String>>,
     /// What the query command is asked for, while it is.
     querying: Option<String>,
-    /// voight's Assessments, if it's on.
+    /// voight's Assessments, while it's on.
     assessments: Option<Assessments>,
+    /// Whether voight runs, as the configuration says: `:voight on` can start assessing again only then.
+    voight_built: bool,
+    /// Whether voight's model loaded, once it has or couldn't: what Assessments started again by `:voight on` are
+    /// told.
+    voight_loaded: Option<bool>,
     /// Whether the Pager shows its prose as the Heatmap of its Assessment.
     heatmap: bool,
     /// Signing in to an Account again.
@@ -392,6 +397,8 @@ impl Muttrs {
             to_query: std::cell::RefCell::new(None),
             querying: None,
             assessments: voight.then(Assessments::default),
+            voight_built: voight,
+            voight_loaded: None,
             heatmap: false,
             signing_in: None,
             next_sign_in: 1,
