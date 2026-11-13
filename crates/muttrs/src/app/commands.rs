@@ -17,7 +17,7 @@ const WRITING: Topic = Topic::new(74, "Writing");
 const LISTING: Topic = Topic::new(76, "Listing");
 
 /// muttrs' default keys: keys, the command each runs, what which-key says of it, and its `:help` topic.
-const KEYS: [(&str, &str, &str, Topic); 42] = [
+const KEYS: [(&str, &str, &str, Topic); 40] = [
     (
         "<2-LeftMouse>",
         "open",
@@ -65,8 +65,6 @@ const KEYS: [(&str, &str, &str, Topic); 42] = [
     ("|", "pipe", "pipe to a command", MAIL),
     ("!", "shell", "run a command", MAIL),
     ("\\", "sidebar", "show or hide the sidebar", Topic::WINDOWS),
-    ("<F1>", "help", "help", Topic::SEARCHING),
-    ("<leader>?", "help", "help", Topic::SEARCHING),
     (
         "<Esc>",
         "clear",
