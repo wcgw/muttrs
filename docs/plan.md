@@ -13,24 +13,25 @@ consequences get a record of their own in [`adr/`](adr).
 A Cargo workspace, layered so that each crate only knows the ones below it:
 
 ```
-muttrs            the binary: configuration, theme, icons, the TUI (sidebar, index, pager, compose), its keys
+muttrs            the binary: configuration, its groups, icons, commands and keys, and what the kit's buffers show
+│                 (sidebar, Index, Pager, Draft)
 ├── muttrs-mail   Accounts and their protocols: IMAP (reading), SMTP (sending), TLS, OAuth2, secrets, MIME
-├── muttrs-render a Message's body, HTML or plain text, laid out as styled lines for a width, with its Links and
-│                 the slots its images go in
-└── muttrs-gfx    Pictures in the terminal: kitty graphics through Unicode placeholders, or half blocks
+└── wcgw-kit      the editor shell the wcgw apps share (its own repository): the loop, keys, `:` commands,
+    │             windows, chrome, the mouse; wcgw-kit-text (once muttrs-render) lays bodies out, wcgw-kit-gfx
+    │             (once muttrs-gfx) draws Pictures
 ```
 
-- **muttrs-render** is pure: HTML or text in, lines out, given a width, a style sheet and what's known of the images'
-  sizes. No terminal, no network. It's the part with the most tests. See
-  [ADR 0001](adr/0001-own-html-layout.md).
-- **muttrs-gfx** draws Pictures as ordinary ratatui cells, so they scroll and clip with the text around them: kitty
-  Unicode placeholders where the terminal has them (Ghostty, kitty), half blocks in truecolor everywhere else. See
+- **wcgw-kit-text** is pure: HTML or text in, lines out, given a width, a style sheet and what's known of the images'
+  sizes. No terminal, no network. See [ADR 0001](adr/0001-own-html-layout.md).
+- **wcgw-kit-gfx** draws Pictures as ordinary cells, so they scroll and clip with the text around them: kitty Unicode
+  placeholders where the terminal has them (Ghostty, kitty), half blocks everywhere else. See
   [ADR 0002](adr/0002-pictures-as-cells.md).
-- **muttrs-mail** owns every connection. The TUI talks to an Account through a worker task that holds the IMAP session
+- **muttrs-mail** owns every connection. The UI talks to an Account through a worker task that holds the IMAP session
   and answers requests over channels, so the UI never waits on the network. A second session IDLEs for new mail. See
   [ADR 0003](adr/0003-imap-smtp-and-gmail.md).
-- **muttrs** keeps the state, draws it, and turns keys into requests. `muttrs view FILE.eml` opens the Pager on a file
-  without any Account, which is how rendering is tried out.
+- **muttrs** keeps the state, says what each buffer shows, and turns commands into requests; the kit draws it and
+  takes the keys ([ADR 0007](adr/0007-wcgw-kit.md)). `muttrs view FILE.eml` opens the Pager on a file without any
+  Account, which is how rendering is tried out.
 
 Portability to macOS: TLS is rustls with the ring provider and the platform's roots (no OpenSSL); secrets go through
 `secret-tool` on Linux and `security` on macOS, or any command; files follow XDG on both; URLs and attachments open
@@ -184,6 +185,16 @@ Not there yet, roughly in the order a mutt user would reach for them:
 - [x] Marking as not Junk (`:not-junk`): out of Junk to the Inbox; both marked `$Junk` or `$NotJunk`, as spam
       filters learn by the move or the keyword
 
+### wcgw-kit ✅
+
+- [x] muttrs in [wcgw-kit](https://github.com/wcgw/wcgw-kit) ([ADR 0007](adr/0007-wcgw-kit.md)): the sidebar, the
+      Indexes, the Pagers and the Draft as the kit's buffers; every action a `:` command, its keys after the kit's
+      shared verbs; Links, Attachments, Mailboxes, Labels and what's found as pickers; `Muttrs…` highlight groups
+      with tokyonight-moon's colours; voight's shared Assessor
+- [ ] What the kit doesn't have yet, and muttrs had: handing the terminal to a command (`!`, `|`), the History
+      kept between runs, completion at a prompt (To:), a window's cursor put where muttrs wants it (it reopens the
+      window), picker verbs (Copy, Save)
+
 ### Later
 
 - Pictures inline in text (icons), animated GIFs, syntax highlighting in `<pre>`
@@ -193,8 +204,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
 
 ## Testing
 
-- muttrs-render: unit tests on HTML and text fixtures, asserting the text and styles drawn.
-- muttrs-gfx: the escape sequences, the placeholder cells, the half blocks' colours.
+- wcgw-kit-text and wcgw-kit-gfx (once muttrs-render and muttrs-gfx) are tested in wcgw-kit.
 - muttrs-mail: MIME and modified UTF-7 unit tests; OAuth2 against a mock token endpoint; IMAP and SMTP against a local
   test server in a container ([docs/development.md](development.md)), over both TLS modes.
-- muttrs: state and keys, and drawing to ratatui's test backend.
+- muttrs: its model (the Index's threads, Filters, Tasks, the Heatmap), and the app driven as the user meets it
+  through wcgw-kit's harness: keys in, the screen and what's asked of a detached Account out.

@@ -6,7 +6,7 @@ See [plan.md](plan.md#architecture) for the crates and how they depend on each o
 
 ## Checks
 
-What CI runs, on Linux and macOS:
+What CI runs, on Linux and macOS (with wcgw-kit checked out beside muttrs, until it's published):
 
 ```sh
 cargo fmt --all --check
@@ -16,7 +16,8 @@ cargo test --workspace
 
 ## Trying things out
 
-- `cargo run -p muttrs-render --example render -- FILE.html [WIDTH]` prints a body's Rendering as text.
+- `cargo run -p wcgw-kit-text --example render -- FILE.html [WIDTH]`, in wcgw-kit, prints a body's Rendering as
+  text: muttrs' renderer is wcgw-kit-text now.
 - `cargo run -p muttrs -- view FILE.eml` opens the Pager on a Message saved as a file.
 - With `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` pointed at a scratch directory, muttrs runs with a
   configuration, cache and log of its own, leaving yours alone. `MUTTRS_LOG=debug` logs more.
