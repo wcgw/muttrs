@@ -8,7 +8,7 @@ use jiff::tz::TimeZone;
 use muttrs_mail::{Address, Message, Part};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 use wcgw_kit::BufferId;
-use wcgw_kit::doc::Content;
+use wcgw_kit::doc::{BlockKey, Content};
 use wcgw_kit_text::{CellSize, Document, ImageSource, Link, Options, Styles, TextFormat};
 
 use crate::app::{Line, Opened, Span, Target};
@@ -308,23 +308,20 @@ impl Pager {
         true
     }
 
-    /// The Pager as a kit document, `width` cells wide: its headers, then its body, a Link's text and number opening
-    /// it, each Picture a line of its own the kit draws it over; the prose shaded by `heat`, the windows of its
-    /// Assessment, if given. Shaded, a Link isn't found: the kit finds them by their styles, which the Heatmap
-    /// changes, so `<CR>` doesn't open those, and the Links' list (`<Space>o`) is the way to them.
-    pub(crate) fn shown(
+    /// The Pager as blocks of a kit document, `width` cells wide: its headers, then its body, a Link's text and
+    /// number opening it, each Picture a line of its own the kit draws it over; the prose shaded by `heat`, the
+    /// windows of its Assessment, if given, once the Links are found (by their styles, which shading changes).
+    pub(crate) fn blocks(
         &self,
         width: u16,
         look: &Look,
         heat: Option<&[Window]>,
-    ) -> wcgw_kit::doc::Document<Target> {
-        let mut shown = wcgw_kit::doc::Document::new();
+    ) -> Vec<(BlockKey, Content<Target>)> {
         if self.source {
-            shown.push_back(
-                "source",
+            return vec![(
+                BlockKey::new("source"),
                 Content::from(source_lines(&self.message.source(), width)),
-            );
-            return shown;
+            )];
         }
         let headers = Content::from(self.headers(width, look));
         let sizes: Vec<Option<(u32, u32)>> = if self.showing == Body::Html && look.pictures {
@@ -338,9 +335,9 @@ impl Pager {
         } else {
             Vec::new()
         };
-        match self.document() {
+        let body = match self.document() {
             Some(document) => {
-                let mut rendering = document.render(&Options {
+                let rendering = document.render(&Options {
                     width,
                     cell: look.cell,
                     pixel_ratio: look
@@ -349,28 +346,26 @@ impl Pager {
                     max_picture_rows: look.max_picture_rows,
                     pictures: &sizes,
                 });
-                if let (Some(heat), Some(prose)) = (heat, &self.prose) {
-                    heatmap::shade(&mut rendering.lines, prose, heat, &look.heat);
-                }
-                // A Link's text and number open it.
-                shown = wcgw_kit_text::kit::linked_document(
+                let mut lines = wcgw_kit_text::kit::linked_lines(
                     document,
                     &rendering,
-                    "body",
                     |image| source(self.id, image),
                     |_, link| Some(Target::Link(link.url.clone())),
                 );
+                if let (Some(heat), Some(prose)) = (heat, &self.prose) {
+                    heatmap::shade_lines(&mut lines, prose, heat, &look.heat);
+                }
+                lines
             }
-            None => shown.push_back(
-                "body",
-                vec![Line::Text(vec![Span::new(
-                    "This Message has no body to show.",
-                    hl::DIM,
-                )])],
-            ),
-        }
-        shown.push_front("headers", headers);
-        shown
+            None => vec![Line::Text(vec![Span::new(
+                "This Message has no body to show.",
+                hl::DIM,
+            )])],
+        };
+        vec![
+            (BlockKey::new("headers"), headers),
+            (BlockKey::new("body"), Content::from(body)),
+        ]
     }
 
     /// The headers, laid out `width` cells wide, then a rule.

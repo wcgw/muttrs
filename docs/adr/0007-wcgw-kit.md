@@ -51,9 +51,7 @@ with ghd.
 - Quitting with Tasks left waits for them, through the kit's quit hook; `:qa!` doesn't.
 - In pickers, `<CR>` opens; `<C-y>` copies a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the
   Labels', `<CR>` adds or takes off a Label and the list stays open, as muttrs' did.
-- What the kit can't do yet, muttrs does without, until it can:
-  - `!` and `|` run their command without the terminal, showing what it writes in a buffer: the kit has no way to
-    hand the terminal to a command but `$EDITOR`.
-  - The Draft is edited in a file the kit names (`.md`), in `$EDITOR`: muttrs' `editor` setting and the `.eml` name
-    that had vim take it for mail are gone.
+- `!` and `|` hand the terminal to their command, as the kit does, waiting for Enter after; the kit pipes text, so
+  what isn't UTF-8 in what `|` pipes goes as U+FFFD.
+- The Draft is edited in an `.eml` file, in the configuration's `editor`, else the kit's (`$EDITOR`, `$VISUAL`).
 - Building needs wcgw-kit checked out beside muttrs until it's published, as voight is pinned.

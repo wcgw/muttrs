@@ -251,13 +251,26 @@ impl Muttrs {
         }
         let text = compose.text();
         self.compose = Some(compose);
-        vec![Effect::Edit(wcgw_kit::Edit::new(text))]
+        vec![Effect::Edit(self.draft_edit(text))]
+    }
+
+    /// The Draft's `text` to edit: in an `.eml` file, so that vim and Neovim take it for mail, in the `editor` the
+    /// configuration says, else the user's (`$EDITOR`, `$VISUAL`).
+    fn draft_edit(&self, text: String) -> wcgw_kit::Edit {
+        let edit = wcgw_kit::Edit::new(text).suffix("eml");
+        match &self.config.editor {
+            Some(editor) => edit.editor(editor),
+            None => edit,
+        }
     }
 
     /// `<CR>` on the Draft, `:draft`: edits it again.
     pub(crate) fn edit_draft(&mut self) -> Effects {
         match &mut self.compose {
-            Some(compose) => vec![Effect::Edit(wcgw_kit::Edit::new(compose.text()))],
+            Some(compose) => {
+                let text = compose.text();
+                vec![Effect::Edit(self.draft_edit(text))]
+            }
             None => Vec::new(),
         }
     }

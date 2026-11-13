@@ -115,12 +115,6 @@ pub(crate) enum Msg {
     Queried(String, Vec<muttrs_mail::Address>),
     /// An Account's address book's contacts, by the Account's name, or why they couldn't be had.
     Contacts(String, Result<Vec<muttrs_mail::Address>, String>),
-    /// A command ran: what it wrote, and whether it went well.
-    Ran {
-        command: String,
-        output: String,
-        status: Result<(), String>,
-    },
     /// What came of saving or opening an Attachment, to say.
     Said(Result<String, String>),
 }
@@ -140,11 +134,6 @@ pub(crate) enum Io {
     Paste { id: u64, address: String },
     /// Give up the sign-in `id`.
     StopSignIn(u64),
-    /// Run `command` with `sh`, piping it `input`, as [`Msg::Ran`] tells.
-    Run {
-        command: String,
-        input: Option<Arc<Vec<u8>>>,
-    },
     /// Save `bytes` as `name` in `directory`, as [`Msg::Said`] tells.
     Save {
         directory: std::path::PathBuf,
@@ -700,14 +689,14 @@ impl Muttrs {
         };
         let look = self.pager_look(kit);
         let heat = self.heat(pager);
-        let shown = pager.shown(width, &look, heat.as_deref());
+        let blocks = pager.blocks(width, &look, heat.as_deref());
         let subject = if pager.message().subject.is_empty() {
             "(no subject)".to_owned()
         } else {
             pager.message().subject.clone()
         };
         let buffer = kit.buffer_mut(buffer);
-        *buffer.doc_mut() = shown;
+        buffer.doc_mut().set_blocks(blocks);
         buffer.set_winbar(Some(vec![(format!(" {subject}"), hl::SUBJECT)]));
     }
 
@@ -1684,11 +1673,6 @@ impl wcgw_kit::App for Muttrs {
                 }
                 Vec::new()
             }
-            Msg::Ran {
-                command,
-                output,
-                status,
-            } => self.ran(kit, &command, &output, status),
         };
         effects.extend(self.settle(kit));
         effects
@@ -1819,6 +1803,11 @@ impl wcgw_kit::App for Muttrs {
         }
         effects.extend(self.settle(kit));
         effects
+    }
+
+    /// `!` or `|` ran with the terminal: the kit has said how it went, if it went wrong.
+    fn shelled(&mut self, kit: &mut Kit, _status: Result<i32, String>) -> Effects {
+        self.settle(kit)
     }
 
     fn edited(&mut self, kit: &mut Kit, saved: Result<String, String>) -> Effects {

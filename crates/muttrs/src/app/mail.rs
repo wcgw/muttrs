@@ -813,7 +813,7 @@ impl Muttrs {
         if let Some(pager) = self.pagers.get(&kit.current_buffer()) {
             let message = Arc::new(pager.message().raw().to_vec());
             let account = pager.opened.as_ref().map_or(0, |opened| opened.account);
-            return Ok(self.then(kit, then, account, &[message]));
+            return Ok(self.then(then, account, &[message]));
         }
         let Targets {
             account,
@@ -882,25 +882,20 @@ impl Muttrs {
             .iter()
             .filter_map(|uid| piping.got.get(uid).cloned())
             .collect();
-        self.then(kit, piping.then, piping.account, &messages)
+        self.then(piping.then, piping.account, &messages)
     }
 
     /// Does `then` with `messages`, of `account`, as RFC 5322 writes them.
-    fn then(
-        &mut self,
-        kit: &mut Kit,
-        then: Then,
-        account: usize,
-        messages: &[Arc<Vec<u8>>],
-    ) -> Effects {
+    fn then(&mut self, then: Then, account: usize, messages: &[Arc<Vec<u8>>]) -> Effects {
         match then {
             Then::Pipe(command) => {
                 let raw: Vec<&[u8]> = messages.iter().map(|message| message.as_slice()).collect();
-                kit.info(format!("Piping to {command}…"));
-                vec![Effect::App(Io::Run {
-                    command,
-                    input: Some(Arc::new(muttrs_mail::mbox::for_commands(&raw))),
-                })]
+                // The kit pipes text: what isn't UTF-8 (an 8bit part in Latin-1, say) goes as U+FFFD.
+                let mbox =
+                    String::from_utf8_lossy(&muttrs_mail::mbox::for_commands(&raw)).into_owned();
+                vec![Effect::Shell(
+                    wcgw_kit::Shell::new(command).stdin(mbox).wait(),
+                )]
             }
             Then::Bounce(to) => {
                 let Some(state) = self.accounts.get_mut(account) else {
@@ -930,50 +925,17 @@ impl Muttrs {
         }
     }
 
-    /// Runs `command` (`:shell`, `!`), without the terminal: what it writes shows in a buffer of its own.
-    pub(crate) fn shell(kit: &mut Kit, command: &str) -> Result<Effects, String> {
+    /// Runs `command` (`:shell`, `!`) with the terminal, which comes back once Enter's pressed after it; the shell
+    /// itself (`$SHELL`) if it's empty.
+    pub(crate) fn shell(command: &str) -> Effects {
         if command.is_empty() {
-            return Err(
-                "The shell needs the terminal, which wcgw-kit can't hand over yet: :shell COMMAND runs one"
-                    .to_owned(),
-            );
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|shell| !shell.trim().is_empty())
+                .unwrap_or_else(|| "sh".to_owned());
+            return vec![Effect::Shell(wcgw_kit::Shell::new(shell))];
         }
-        kit.info(format!("Running {command}…"));
-        Ok(vec![Effect::App(Io::Run {
-            command: command.to_owned(),
-            input: None,
-        })])
-    }
-
-    /// Takes what came of running `command`: what it wrote shows in the buffer `!`, if anything.
-    pub(super) fn ran(
-        &mut self,
-        kit: &mut Kit,
-        command: &str,
-        output: &str,
-        status: Result<(), String>,
-    ) -> Effects {
-        match status {
-            Ok(()) => kit.info(format!("{command}: done")),
-            Err(why) => kit.error(format!("{command}: {why}")),
-        }
-        if output.trim().is_empty() {
-            return Vec::new();
-        }
-        let buffer = kit
-            .find_buffer("!")
-            .unwrap_or_else(|| kit.add_buffer("!", Document::new(), false));
-        let mut doc = Document::new();
-        let mut lines = vec![Line::Text(vec![Span::new(format!("!{command}"), hl::DIM)])];
-        lines.extend(
-            output
-                .lines()
-                .map(|line| Line::text(line.replace('\t', "    "))),
-        );
-        doc.push_back("output", lines);
-        *kit.buffer_mut(buffer).doc_mut() = doc;
-        self.show_in_main(kit, buffer);
-        Vec::new()
+        vec![Effect::Shell(wcgw_kit::Shell::new(command).wait())]
     }
 
     /// Opens or saves Attachment `part` of the Pager in `pager`.

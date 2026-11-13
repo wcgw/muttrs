@@ -847,18 +847,68 @@ fn piping_fetches_the_messages_then_runs_the_command() {
         }]
     );
     let effects = mail.body(1, plain_message("Lunch", "Hi."));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        wcgw_kit::Effect::App(Io::Run { command, input: Some(_) }) if command == "cat"
-    )));
-    mail.harness.send(Msg::Ran {
-        command: "cat".to_owned(),
-        output: "From MAILER-DAEMON\nHi.\n".to_owned(),
-        status: Ok(()),
-    });
+    let shell = effects
+        .iter()
+        .find_map(|effect| match effect {
+            wcgw_kit::Effect::Shell(shell) => Some(shell),
+            _ => None,
+        })
+        .expect("the terminal handed to the command");
+    assert_eq!(shell.command, "cat");
+    assert!(shell.wait, "Enter brings muttrs back");
+    let piped = shell.stdin.as_deref().unwrap_or_default();
     assert!(
-        line_with(&mail.rows(), "!cat").is_some(),
-        "what it wrote shows"
+        piped.contains("Subject: Lunch") && piped.contains("Hi."),
+        "the Message, as it came: {piped}"
+    );
+}
+
+#[test]
+fn bang_runs_a_command_with_the_terminal_and_alone_the_shell() {
+    let mut mail = Mail::new(100, 30);
+    let effects = mail.press("!date<CR>");
+    assert!(effects.contains(&wcgw_kit::Effect::Shell(
+        wcgw_kit::Shell::new("date").wait()
+    )));
+    let effects = mail.press("!<CR>");
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            wcgw_kit::Effect::Shell(shell) if !shell.wait && shell.stdin.is_none()
+        )),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn drafts_are_edited_as_mail_in_the_editor_the_configuration_says() {
+    let config = Config {
+        editor: Some("nvim -c startinsert".to_owned()),
+        ..Config::default()
+    };
+    let mut mail = Mail::with(config, false, 100, 30);
+    mail.two();
+    let effects = mail.press("c<CR>");
+    assert!(effects.is_empty(), "nobody: no Draft");
+    let effects = mail.press("cann@example.com<CR>Lunch<CR>");
+    let edit = effects
+        .iter()
+        .find_map(|effect| match effect {
+            wcgw_kit::Effect::Edit(edit) => Some(edit),
+            _ => None,
+        })
+        .expect("the editor opens");
+    assert_eq!(edit.suffix, "eml");
+    assert_eq!(edit.editor.as_deref(), Some("nvim -c startinsert"));
+    let mut mail = Mail::new(100, 30);
+    mail.two();
+    let effects = mail.press("cann@example.com<CR>Lunch<CR>");
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            wcgw_kit::Effect::Edit(edit) if edit.editor.is_none()
+        )),
+        "the user's editor, without one configured"
     );
 }
 
@@ -958,7 +1008,7 @@ fn voight_assesses_the_pager_s_prose_says_so_and_shades_its_heatmap() {
     mail.two();
     mail.harness
         .send(Msg::Voight(Event::Loaded { fallback: None }));
-    let prose = "words ".repeat(60);
+    let prose = format!("{}see https://example.com/x for more.", "words ".repeat(60));
     mail.press("j");
     let effects = mail.read(2, plain_message("Report", &prose));
     let key = effects
@@ -999,6 +1049,15 @@ fn voight_assesses_the_pager_s_prose_says_so_and_shades_its_heatmap() {
     let x = u16::try_from(rows[y].find("words").unwrap()).unwrap();
     let shaded = mail.harness.style_at(x, u16::try_from(y).unwrap());
     assert!(shaded.bg.is_some(), "{shaded:?}");
+    // A Link in shaded prose still opens.
+    mail.press("/x for<CR>");
+    let effects = mail.press("<CR>");
+    assert!(
+        effects.contains(&wcgw_kit::Effect::OpenUrl(
+            "https://example.com/x".to_owned()
+        )),
+        "{effects:?}"
+    );
     mail.press(":voight off<CR>");
     assert!(!mail.statusline().contains("Heatmap"));
 }
@@ -1099,7 +1158,7 @@ fn an_account_in_the_sidebar_asks_what_s_new_and_cd_opens_a_mailbox() {
 }
 
 #[test]
-fn q_closes_help_s_window_and_goes_back_from_a_command_s_output() {
+fn q_closes_help_s_window_and_goes_back_from_signing_in() {
     let mut mail = Mail::new(100, 30);
     mail.two();
     mail.press(":help<CR>");
@@ -1107,12 +1166,12 @@ fn q_closes_help_s_window_and_goes_back_from_a_command_s_output() {
     let effects = mail.press("q");
     assert!(!effects.contains(&wcgw_kit::Effect::Quit));
     assert_eq!(mail.harness.kit.window_ids().len(), 2);
-    mail.harness.send(Msg::Ran {
-        command: "date".to_owned(),
-        output: "Thu Nov 12\n".to_owned(),
-        status: Ok(()),
-    });
-    assert!(line_with(&mail.rows(), "!date").is_some());
+    // A buffer of muttrs' own, as signing in shows, is left for the Index.
+    let sign_in = mail
+        .harness
+        .kit
+        .add_buffer("login", super::Document::new(), false);
+    mail.harness.kit.show_buffer(sign_in);
     mail.press("q");
     assert!(
         mail.rows()[0].contains("home › Inbox"),

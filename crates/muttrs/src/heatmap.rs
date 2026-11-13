@@ -79,6 +79,61 @@ pub(crate) fn shade(lines: &mut [Line<'static>], text: &str, windows: &[Window],
     }
 }
 
+/// As [`shade`], on a kit buffer's `lines`: each piece keeps the group and the target (a Link) of the span it's cut
+/// from, so that what's found by its styles before shading still is after.
+pub(crate) fn shade_lines<T: Clone>(
+    lines: &mut [wcgw_kit::doc::Line<T>],
+    text: &str,
+    windows: &[Window],
+    heat: &Heat,
+) {
+    use wcgw_kit::doc::Line as KitLine;
+    let mut drawn: Vec<Line<'static>> = lines
+        .iter()
+        .map(|line| match line {
+            KitLine::Text(spans) => Line::from(
+                spans
+                    .iter()
+                    .map(|span| Span::styled(span.text.clone(), span.style.unwrap_or_default()))
+                    .collect::<Vec<_>>(),
+            ),
+            KitLine::Image { .. } => Line::default(),
+        })
+        .collect();
+    shade(&mut drawn, text, windows, heat);
+    for (line, shaded) in lines.iter_mut().zip(drawn) {
+        let KitLine::Text(spans) = line else {
+            continue;
+        };
+        // Each piece is cut from one span: the one whose text it starts in.
+        let ends: Vec<usize> = spans
+            .iter()
+            .scan(0, |end, span| {
+                *end += span.text.len();
+                Some(*end)
+            })
+            .collect();
+        let mut at = 0;
+        let mut pieces = Vec::with_capacity(shaded.spans.len());
+        for piece in shaded.spans {
+            let from = ends
+                .iter()
+                .position(|&end| end > at)
+                .unwrap_or(spans.len().saturating_sub(1));
+            at += piece.content.len();
+            let Some(span) = spans.get(from) else {
+                continue;
+            };
+            let mut cut = wcgw_kit::doc::Span::new(piece.content.into_owned(), span.group)
+                .with_style(piece.style);
+            cut.target.clone_from(&span.target);
+            cut.picture.clone_from(&span.picture);
+            pieces.push(cut);
+        }
+        *spans = pieces;
+    }
+}
+
 /// Where a piece of a line is in the text it draws.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Place {
@@ -346,5 +401,40 @@ mod tests {
         assert_eq!(stepped.style(0.24), stepped.human);
         assert_eq!(stepped.style(0.26), stepped.even);
         assert_eq!(stepped.style(0.76), stepped.llm);
+    }
+
+    #[test]
+    fn kit_lines_keep_their_links_through_the_shading() {
+        let text = "See the page now.";
+        let mut lines = vec![wcgw_kit::doc::Line::Text(vec![
+            wcgw_kit::doc::Span::new("See ", wcgw_kit::hl::Group::NORMAL),
+            wcgw_kit::doc::Span::new("the page", wcgw_kit::hl::Group::NORMAL)
+                .with_target("https://x.example"),
+            wcgw_kit::doc::Span::new(" now.", wcgw_kit::hl::Group::NORMAL),
+        ])];
+        shade_lines(&mut lines, text, &[window(text, "page now", 1.0)], &theme());
+        let wcgw_kit::doc::Line::Text(spans) = &lines[0] else {
+            panic!("a line of text");
+        };
+        let pieces: Vec<(&str, Option<&str>, Option<Color>)> = spans
+            .iter()
+            .map(|span| {
+                (
+                    span.text.as_str(),
+                    span.target,
+                    span.style.and_then(|style| style.bg),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            [
+                ("See ", None, None),
+                ("the ", Some("https://x.example"), None),
+                ("page", Some("https://x.example"), Some(Color::Red)),
+                (" now", None, Some(Color::Red)),
+                (".", None, None),
+            ]
+        );
     }
 }

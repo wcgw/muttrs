@@ -2,7 +2,6 @@
 //! background, each telling the app how it went through the kit's inbox; and the Pictures' bytes for the kit.
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -131,59 +130,6 @@ impl Net {
             )),
         }
     }
-
-    /// Runs `command` through `sh`, piping it `input`, if any, without the terminal: what it writes comes back.
-    fn run(&self, command: String, input: Option<Arc<Vec<u8>>>) {
-        let inbox = self.inbox.clone();
-        tokio::task::spawn_blocking(move || {
-            let (output, status) = run(&command, input.as_deref().map(Vec::as_slice));
-            let _ = inbox.send(Msg::Ran {
-                command,
-                output,
-                status,
-            });
-        });
-    }
-}
-
-/// Runs `command` through `sh`, its input `input` (or none), and what it writes, on either stream; and whether it
-/// went well.
-fn run(command: &str, input: Option<&[u8]>) -> (String, Result<(), String>) {
-    let child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(if input.is_some() {
-            std::process::Stdio::piped()
-        } else {
-            std::process::Stdio::null()
-        })
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(child) => child,
-        Err(error) => return (String::new(), Err(format!("couldn't run it: {error}"))),
-    };
-    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
-        let input = input.to_vec();
-        // Written aside: a command that writes before it's read all of it waits neither on muttrs, nor muttrs on it.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        });
-    }
-    match child.wait_with_output() {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            let status = if output.status.success() {
-                Ok(())
-            } else {
-                Err(format!("exited with {}", output.status))
-            };
-            (text, status)
-        }
-        Err(error) => (String::new(), Err(format!("couldn't run it: {error}"))),
-    }
 }
 
 /// Saves `bytes` as `name` in `directory`, under a name of its own if that one's taken; where it went.
@@ -236,7 +182,6 @@ impl Perform<Muttrs> for Net {
             Io::StopSignIn(id) => {
                 self.sign_ins.remove(&id);
             }
-            Io::Run { command, input } => self.run(command, input),
             Io::Save {
                 directory,
                 name,
@@ -281,15 +226,6 @@ impl Perform<Muttrs> for Net {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn commands_run_without_the_terminal_and_what_they_write_comes_back() {
-        let (output, status) = run("tr a-z A-Z; echo oops >&2", Some(b"mail\n"));
-        assert_eq!(output, "MAIL\noops\n");
-        assert_eq!(status, Ok(()));
-        let (_, status) = run("exit 3", None);
-        assert!(status.is_err());
-    }
 
     #[test]
     fn saving_finds_a_name_of_its_own() {

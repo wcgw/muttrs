@@ -176,8 +176,8 @@ stay.
 
 `|` pipes Messages to a command: the one the Pager shows, as it came, or those selected (else the one at the cursor,
 a folded thread whole), several as an mbox, the oldest first, as `git am` and `b4 am` take a series of patches:
-`|git am -3`. `!` runs a command. Both run without the terminal for now (wcgw-kit can't hand it over to one yet):
-what they write shows in a buffer of its own, and a command that needs the terminal, as the shell itself, can't run.
+`|git am -3`. The command has the terminal until `Enter` brings muttrs back. `!` runs a command so, or the shell. The
+Messages are piped as text: what isn't UTF-8 in them (an 8bit part in Latin-1, say) goes as `�`.
 
 `:limit` lists only the Messages a filter picks, in threads among themselves, until `:limit` alone lists them all
 again; `:select` then picks among those.
@@ -220,8 +220,9 @@ there, as `S` does.
 ## Writing
 
 `c` asks whom the Message is to (`Tab` completes addresses, from those muttrs has seen), then its subject, as mutt
-does; `:compose ADDRESS` says whom to at once, and completes the same. Then `c`, `r`, `R` and `<Space>f` open a Draft in your editor
-(`$EDITOR`, else `$VISUAL`, else `nvim` or `vi`) as a file of headers, a blank line, then the body:
+does; `:compose ADDRESS` says whom to at once, and completes the same. Then `c`, `r`, `R` and `<Space>f` open a Draft
+in your editor (`editor` in the configuration, else `$EDITOR`, `$VISUAL`, `nvim` or `vi`) as a file of headers, a
+blank line, then the body:
 
 ```
 From: Alex <alex@example.com>
@@ -259,7 +260,8 @@ POST alone where it says one does (RFC 8058), else by mail, sent at once, else a
 
 The Account's signature goes in after a `-- ` line, above the quote in a reply. A reply is from the address of the
 Account's (its own, or one of its `identities`) the Message was sent to. Quitting the editor on a new Draft without
-changing it drops the Draft, as mutt does. The body is Markdown, sent as it is (the plain text) and as the HTML it
+changing it drops the Draft, as mutt does. Its name ends in `.eml`, so that vim and Neovim edit it as mail. The body is
+Markdown, sent as it is (the plain text) and as the HTML it
 makes, in which each new line breaks the line, as in plain text mail. `Attach:` lines attach files. Saving and
 quitting shows the Draft as it will be sent, until `<Space>s` (`:send`) sends it through the Account's SMTP server; a
 copy goes to Sent (but on Gmail, which keeps its own), and what it replies to is flagged answered. `<Space>p`
@@ -292,6 +294,7 @@ pager_read_delay = 1          # seconds a Message shows before it's marked read;
 max_picture_rows = 24         # the most rows a Picture takes
 # pixel_ratio = 2.0           # the terminal's pixels to a CSS pixel; guessed from the cells' size otherwise
 # download_dir = "~/Downloads"
+# editor = "nvim"             # what Drafts are written in; $EDITOR, else $VISUAL, by default
 threads = true                # the Index in threads (:threads switches), or newest first
 hide_thread_subjects = false  # a reply's subject as an arrow, ├─>, where it's what it replies to's, as mutt does
 voight = "cpu"                # where voight assesses the Pager's prose: "off", or "cuda", "metal", "wgpu" if built so
@@ -303,8 +306,8 @@ What's on screen is the kit's, and `~/.config/muttrs/init.vim` says it, after `~
 `:map` for keys. muttrs' groups are named `Muttrs…` (`MuttrsUnread`, `MuttrsFlagged`, `MuttrsLabel`, …) and link to
 the standard ones, with colours of their own in tokyonight-moon; `MuttrsPage` has the background authors' colours
 are judged against. `theme`, `icons`, `images` and `mouse` in config.toml still say how muttrs starts, before
-init.vim, and will go; `editor` and themes in `themes/` are no longer read: `scripts/convert-config.py` writes a
-theme's file as `:hi` lines.
+init.vim, and will go; themes in `themes/` are no longer read: `scripts/convert-config.py` writes a theme's file as
+`:hi` lines.
 
 muttrs keeps the Mailboxes, the Envelopes listed and the Messages read in `~/.cache/muttrs/accounts/`, readable by
 you alone: they show at once when muttrs starts, before the server says what's new, and can be read offline. What's

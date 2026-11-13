@@ -244,17 +244,14 @@ pub(super) fn add(kit: &mut Kit) {
         .help("pipe the Message, or those selected as an mbox, to a command"),
         Command::new("shell", 2, |_: &mut Muttrs, kit, line| match line.args {
             "" => {
-                kit.prompt("!", false, |_: &mut Muttrs, kit, command| {
-                    Muttrs::shell(kit, command.trim()).unwrap_or_else(|why| {
-                        kit.error(why);
-                        Vec::new()
-                    })
+                kit.prompt("!", false, |_: &mut Muttrs, _, command| {
+                    Muttrs::shell(command.trim())
                 });
                 Ok(Vec::new())
             }
-            command => Muttrs::shell(kit, command),
+            command => Ok(Muttrs::shell(command)),
         })
-        .help("run a command, showing what it writes"),
+        .help("run a command with the terminal; alone, the shell"),
         Command::new("bounce", 4, |muttrs: &mut Muttrs, kit, line| {
             muttrs.bounce(kit, required(line.args)?)
         })

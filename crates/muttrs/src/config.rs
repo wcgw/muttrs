@@ -44,7 +44,7 @@ pub(crate) struct Config {
     pub(crate) pixel_ratio: Option<f32>,
     /// Where Attachments are saved; `~/Downloads` by default.
     pub(crate) download_dir: Option<String>,
-    /// The editor Drafts were written in. No longer read: the kit opens `$EDITOR`, else `$VISUAL`.
+    /// The editor Drafts are written in; `$EDITOR`, else `$VISUAL`, by default.
     pub(crate) editor: Option<String>,
     /// Whether the Index shows Messages in threads, at first; `T` switches.
     pub(crate) threads: bool,
@@ -257,11 +257,6 @@ impl Config {
         if !self.mouse {
             lines.push("set mouse=".to_owned());
         }
-        if self.editor.is_some() {
-            ignored.push(
-                "editor = … is no longer read: Drafts open in $EDITOR, else $VISUAL".to_owned(),
-            );
-        }
         if self.keys.is_some() {
             ignored.push(
                 "[keys.*] are no longer read: :map keys in ~/.config/muttrs/init.vim (scripts/convert-config.py)"
@@ -367,7 +362,12 @@ mod tests {
                 "set mouse="
             ]
         );
-        assert_eq!(ignored.len(), 2, "{ignored:?}");
+        assert_eq!(ignored.len(), 1, "[keys.*]: {ignored:?}");
+        assert_eq!(
+            config.editor.as_deref(),
+            Some("nvim"),
+            "the editor is muttrs' own again"
+        );
         assert_eq!(parse("").unwrap().kit_settings(), (Vec::new(), Vec::new()));
     }
 

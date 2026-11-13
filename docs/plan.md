@@ -194,8 +194,8 @@ Not there yet, roughly in the order a mutt user would reach for them:
 - [x] What the kit grew since: windows' cursors put where muttrs wants them, `'cursorline'`, widths of windows,
       fold state, picker verbs (Copy, Save; Labels staying open), statusline colours, a quit hook, completing prompts (To:, Attach:), the
       History on disk
-- [ ] What the kit doesn't have yet, and muttrs had: handing the terminal to a command (`!`, `|`), choosing the
-      editor and the Draft's file name
+- [x] Then the rest: handing the terminal to a command (`!`, `|`), choosing the editor and the Draft's file name
+      (`.eml`), and Links found before the Heatmap shades them
 
 ### Later
 
