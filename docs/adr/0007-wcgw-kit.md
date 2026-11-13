@@ -57,6 +57,7 @@ with ghd.
   `:forward-attached` `:forward attached`, and `:source` (the Message as it came) `:raw`, as `:source` is vim's.
 - Asking for what's new is `<C-l>` (`:e!`), as in every app: `:refresh` goes, and `:sync` lists the open Mailbox
   anew, as `:sync!` did.
+- A Mailbox opens by name with `:e NAME`, as a buffer does in every app: `:cd` goes.
 - The History is the kit's, in the file muttrs kept it in: commands and searches; what `!` and `|` ran isn't kept.
 - Quitting with Tasks left waits for them, through the kit's quit hook; `:qa!` doesn't.
 - In pickers, `<CR>` opens; `<C-y>` copies a Link, `<C-s>` saves an Attachment, as the kit's picker verbs. In the

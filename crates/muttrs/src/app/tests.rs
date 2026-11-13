@@ -1206,7 +1206,7 @@ fn an_account_in_the_sidebar_asks_what_s_new_and_cd_opens_a_mailbox() {
     mail.requests();
     mail.press("<C-w>hgg<CR>");
     assert_eq!(mail.requests(), [Request::Refresh]);
-    mail.press(":cd work/reports<CR>");
+    mail.press(":e work/reports<CR>");
     assert_eq!(mail.requests(), [Request::Open("Work/Reports".to_owned())]);
     let current = mail.harness.kit.current_buffer();
     assert_eq!(mail.harness.kit.buffer(current).name(), "Reports");
@@ -1266,7 +1266,7 @@ fn quitting_with_tasks_left_waits_for_them_but_not_with_a_bang() {
 #[test]
 fn the_sidebar_s_cursor_follows_the_mailbox_opened_by_name() {
     let mut mail = Mail::new(100, 20);
-    mail.press(":cd Archive<CR><C-w>h");
+    mail.press(":e Archive<CR><C-w>h");
     assert!(
         mail.harness.kit.cursor_row_text().contains("Archive"),
         "{}",

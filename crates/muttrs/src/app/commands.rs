@@ -342,13 +342,6 @@ pub(super) fn add(kit: &mut Kit) {
         })
         .help("search every Mailbox on the server, for where it finds Messages"),
         // Mailboxes.
-        Command::new("cd", 2, |muttrs: &mut Muttrs, kit, line| {
-            muttrs
-                .change_mailbox(kit, required(line.args)?)
-                .map(|()| Vec::new())
-        })
-        .help("open a Mailbox by name")
-        .complete(mailboxes),
         Command::new("create", 3, |muttrs: &mut Muttrs, kit, line| {
             muttrs
                 .create_mailbox(kit, required(line.args)?)
